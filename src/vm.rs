@@ -1,8 +1,9 @@
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     net::IpAddr,
+    ops::Range,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -17,8 +18,8 @@ use virt::{connect::Connect, domain::Domain, error::clear_error_callback, sys};
 
 use crate::{
     config::{
-        DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCreateArgs, VmDumpArgs,
-        VmExecArgs, VmLaunchArgs, VmListArgs, VmNameArgs, VmShutdownArgs,
+        ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCreateArgs,
+        VmDumpArgs, VmExecArgs, VmLaunchArgs, VmListArgs, VmNameArgs, VmShutdownArgs,
     },
     disk,
     domain_xml::{self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml},
@@ -111,24 +112,21 @@ fn apply(args: VmApplyArgs) -> Result<()> {
         .checked_mul(1024)
         .context("memoryGiB is too large")?;
 
-    let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
-        name: &manifest.name,
-        memory_mib,
-        vcpus: manifest.vcpus,
-        system_disk: &manifest.system_disk,
-        cdrom: manifest.cdrom.as_deref(),
-        serial_log: manifest.serial_log.as_deref(),
-        boot_devices: &boot_devices,
-        network: &manifest.network,
-        graphics: GraphicsSpec {
-            mode: manifest.graphics,
-            vnc_listen: &manifest.vnc_listen,
-            vnc_port: manifest.vnc_port,
-        },
-    });
+    let current_xml = current_domain_xml(&args.connect_uri, &manifest.name)?;
+    let xml = if current_xml.is_empty() {
+        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)
+    } else {
+        patch_domain_xml(&current_xml, &manifest, &boot_devices, memory_mib)?
+    };
 
     if args.dry_run {
-        print_apply_diff(&args.connect_uri, &manifest.name, &manifest_path, &xml)?;
+        print_apply_diff(
+            &current_xml,
+            &manifest.name,
+            &manifest_path,
+            &xml,
+            should_color(args.color),
+        );
         return Ok(());
     }
 
@@ -147,6 +145,28 @@ fn apply(args: VmApplyArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn build_manifest_domain_xml(
+    manifest: &VmManifest,
+    boot_devices: &[BootDevice],
+    memory_mib: u64,
+) -> String {
+    build_vm_launch_domain_xml(VmLaunchDomainSpec {
+        name: &manifest.name,
+        memory_mib,
+        vcpus: manifest.vcpus,
+        system_disk: &manifest.system_disk,
+        cdrom: manifest.cdrom.as_deref(),
+        serial_log: manifest.serial_log.as_deref(),
+        boot_devices,
+        network: &manifest.network,
+        graphics: GraphicsSpec {
+            mode: manifest.graphics,
+            vnc_listen: &manifest.vnc_listen,
+            vnc_port: manifest.vnc_port,
+        },
+    })
 }
 
 fn dump(args: VmDumpArgs) -> Result<()> {
@@ -203,6 +223,372 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
         vnc_port,
         serial_log,
     })
+}
+
+struct XmlReplacement {
+    range: Range<usize>,
+    value: String,
+}
+
+fn patch_domain_xml(
+    xml: &str,
+    manifest: &VmManifest,
+    boot_devices: &[BootDevice],
+    memory_mib: u64,
+) -> Result<String> {
+    let doc = Document::parse(xml).context("failed to parse existing libvirt domain XML")?;
+    let domain = doc.root_element();
+    let devices = required_child(domain, "devices")?;
+    let mut replacements = Vec::new();
+
+    patch_memory(xml, domain, memory_mib, &mut replacements)?;
+    push_text_replacement(
+        xml,
+        required_child(domain, "vcpu")?,
+        &manifest.vcpus.to_string(),
+        &mut replacements,
+    )?;
+    patch_boot_order(xml, domain, boot_devices, &mut replacements)?;
+    patch_disk_source(
+        xml,
+        devices,
+        "disk",
+        Some("vda"),
+        &manifest.system_disk,
+        &mut replacements,
+    )?;
+
+    if let Some(cdrom) = &manifest.cdrom {
+        patch_disk_source(xml, devices, "cdrom", None, cdrom, &mut replacements)?;
+    }
+
+    patch_network(xml, devices, &manifest.network, &mut replacements)?;
+    patch_graphics(xml, devices, manifest, &mut replacements)?;
+
+    if let Some(serial_log) = &manifest.serial_log {
+        patch_serial_log(xml, devices, serial_log, &mut replacements)?;
+    }
+
+    Ok(apply_xml_replacements(xml, replacements))
+}
+
+fn patch_memory(
+    xml: &str,
+    domain: Node<'_, '_>,
+    memory_mib: u64,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    for tag in ["memory", "currentMemory"] {
+        let node = required_child(domain, tag)?;
+        let unit = node.attribute("unit").unwrap_or("KiB");
+        let value = memory_value_for_unit(memory_mib, unit)?;
+        push_text_replacement(xml, node, &value.to_string(), replacements)?;
+    }
+
+    Ok(())
+}
+
+fn memory_value_for_unit(memory_mib: u64, unit: &str) -> Result<u64> {
+    match unit {
+        "KiB" => memory_mib
+            .checked_mul(1024)
+            .context("memoryGiB is too large for KiB domain memory"),
+        "MiB" => Ok(memory_mib),
+        "GiB" => {
+            if memory_mib % 1024 != 0 {
+                bail!("memoryGiB cannot be represented as whole GiB in existing domain XML");
+            }
+            Ok(memory_mib / 1024)
+        }
+        _ => bail!("unsupported domain memory unit {unit:?}"),
+    }
+}
+
+fn patch_boot_order(
+    xml: &str,
+    domain: Node<'_, '_>,
+    boot_devices: &[BootDevice],
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let os = required_child(domain, "os")?;
+    let boot_nodes = os
+        .children()
+        .filter(|child| child.has_tag_name("boot"))
+        .collect::<Vec<_>>();
+    if boot_nodes.is_empty() {
+        bail!("cannot update existing domain XML because <os> has no <boot> entries");
+    }
+
+    let current_boot = boot_order(domain)?;
+    let desired_boot = boot_devices
+        .iter()
+        .map(|device| boot_device_name(*device).to_string())
+        .collect::<Vec<_>>();
+    if current_boot == desired_boot {
+        return Ok(());
+    }
+
+    let first = boot_nodes.first().expect("checked non-empty").range();
+    let last = boot_nodes.last().expect("checked non-empty").range();
+    let start = line_start(xml, first.start);
+    let end = line_end(xml, last.end);
+    let indent = &xml[start..first.start];
+    let value = boot_devices
+        .iter()
+        .map(|device| format!("{indent}<boot dev='{}'/>\n", boot_device_name(*device)))
+        .collect::<String>();
+
+    replacements.push(XmlReplacement {
+        range: start..end,
+        value,
+    });
+
+    Ok(())
+}
+
+fn patch_disk_source(
+    xml: &str,
+    devices: Node<'_, '_>,
+    device: &str,
+    target_dev: Option<&str>,
+    path: &Path,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let disk = find_disk(devices, device, target_dev)?.with_context(|| {
+        let target = target_dev
+            .map(|target| format!(" target {target}"))
+            .unwrap_or_default();
+        format!("cannot update existing domain XML because {device} disk{target} is missing")
+    })?;
+    let source =
+        optional_child(disk, "source").context("domain XML disk is missing source element")?;
+    push_attr_replacement(
+        xml,
+        source,
+        "file",
+        &path.display().to_string(),
+        replacements,
+    )
+}
+
+fn patch_network(
+    xml: &str,
+    devices: Node<'_, '_>,
+    network: &str,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let interface = devices
+        .children()
+        .find(|child| child.has_tag_name("interface") && child.attribute("type") == Some("network"))
+        .context("cannot update existing domain XML because network interface is missing")?;
+    let source = optional_child(interface, "source")
+        .context("domain XML network interface is missing source element")?;
+    push_attr_replacement(xml, source, "network", network, replacements)
+}
+
+fn patch_graphics(
+    xml: &str,
+    devices: Node<'_, '_>,
+    manifest: &VmManifest,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    match manifest.graphics {
+        GraphicsMode::None => {
+            if devices
+                .children()
+                .any(|child| child.has_tag_name("graphics"))
+            {
+                bail!("cannot remove graphics from an existing domain XML yet");
+            }
+        }
+        GraphicsMode::Vnc => {
+            let graphics = devices
+                .children()
+                .find(|child| child.has_tag_name("graphics"))
+                .context("cannot update existing domain XML because VNC graphics is missing")?;
+            if graphics.attribute("type") != Some("vnc") {
+                bail!("cannot update non-VNC graphics in existing domain XML");
+            }
+
+            if graphics.attribute("listen").is_some() {
+                push_attr_replacement(xml, graphics, "listen", &manifest.vnc_listen, replacements)?;
+            }
+            if let Some(listen) = optional_child(graphics, "listen")
+                && listen.attribute("address").is_some()
+            {
+                push_attr_replacement(xml, listen, "address", &manifest.vnc_listen, replacements)?;
+            }
+
+            let port = manifest
+                .vnc_port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| "-1".to_string());
+            let autoport = if manifest.vnc_port.is_some() {
+                "no"
+            } else {
+                "yes"
+            };
+            if graphics.attribute("port").is_some() {
+                push_attr_replacement(xml, graphics, "port", &port, replacements)?;
+            }
+            if graphics.attribute("autoport").is_some() {
+                push_attr_replacement(xml, graphics, "autoport", autoport, replacements)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn patch_serial_log(
+    xml: &str,
+    devices: Node<'_, '_>,
+    path: &Path,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let desired = path.display().to_string();
+    let mut patched = false;
+
+    for console in devices
+        .children()
+        .filter(|child| child.has_tag_name("console") && child.attribute("type") == Some("file"))
+    {
+        if let Some(source) = optional_child(console, "source")
+            && source.attribute("path").is_some()
+        {
+            push_attr_replacement(xml, source, "path", &desired, replacements)?;
+            patched = true;
+        }
+    }
+
+    for serial in devices
+        .children()
+        .filter(|child| child.has_tag_name("serial") && child.attribute("type") == Some("file"))
+    {
+        if let Some(source) = optional_child(serial, "source")
+            && source.attribute("path").is_some()
+        {
+            push_attr_replacement(xml, source, "path", &desired, replacements)?;
+            patched = true;
+        }
+    }
+
+    if !patched {
+        bail!("cannot update existing domain XML because file console/serial log is missing");
+    }
+
+    Ok(())
+}
+
+fn find_disk<'a, 'input>(
+    devices: Node<'a, 'input>,
+    device: &str,
+    target_dev: Option<&str>,
+) -> Result<Option<Node<'a, 'input>>> {
+    for disk in devices
+        .children()
+        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some(device))
+    {
+        if let Some(target_dev) = target_dev
+            && disk_target_dev(disk).as_deref() != Some(target_dev)
+        {
+            continue;
+        }
+
+        return Ok(Some(disk));
+    }
+
+    Ok(None)
+}
+
+fn push_text_replacement(
+    xml: &str,
+    node: Node<'_, '_>,
+    value: &str,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let range = node_text_range(node)?;
+    if &xml[range.clone()] != value {
+        replacements.push(XmlReplacement {
+            range,
+            value: value.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn push_attr_replacement(
+    xml: &str,
+    node: Node<'_, '_>,
+    attr_name: &str,
+    value: &str,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let attr = node
+        .attributes()
+        .find(|attr| attr.name() == attr_name)
+        .with_context(|| {
+            format!(
+                "domain XML <{}> is missing {attr_name} attribute",
+                node.tag_name().name()
+            )
+        })?;
+    let range = attr.range_value();
+    let escaped = escape_xml_value(value);
+    if &xml[range.clone()] != escaped {
+        replacements.push(XmlReplacement {
+            range,
+            value: escaped,
+        });
+    }
+
+    Ok(())
+}
+
+fn node_text_range(node: Node<'_, '_>) -> Result<Range<usize>> {
+    node.children()
+        .find(|child| child.is_text())
+        .map(|child| child.range())
+        .with_context(|| format!("domain XML <{}> is missing text", node.tag_name().name()))
+}
+
+fn apply_xml_replacements(xml: &str, mut replacements: Vec<XmlReplacement>) -> String {
+    replacements.sort_by_key(|replacement| replacement.range.start);
+
+    let mut output = xml.to_string();
+    for replacement in replacements.into_iter().rev() {
+        output.replace_range(replacement.range, &replacement.value);
+    }
+
+    output
+}
+
+fn line_start(xml: &str, pos: usize) -> usize {
+    xml[..pos].rfind('\n').map(|index| index + 1).unwrap_or(0)
+}
+
+fn line_end(xml: &str, pos: usize) -> usize {
+    xml[pos..]
+        .find('\n')
+        .map(|index| pos + index + 1)
+        .unwrap_or(xml.len())
+}
+
+fn boot_device_name(device: BootDevice) -> &'static str {
+    match device {
+        BootDevice::Hd => "hd",
+        BootDevice::Cdrom => "cdrom",
+    }
+}
+
+fn escape_xml_value(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn required_child<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Result<Node<'a, 'input>> {
@@ -364,15 +750,15 @@ fn serial_log_path(devices: Node<'_, '_>) -> Option<PathBuf> {
 }
 
 fn print_apply_diff(
-    connect_uri: &str,
+    current_xml: &str,
     name: &str,
     manifest_path: &Path,
     desired_xml: &str,
-) -> Result<()> {
-    let current_xml = current_domain_xml(connect_uri, name)?;
+    color: bool,
+) {
     if current_xml == desired_xml {
         println!("[qtr] no changes");
-        return Ok(());
+        return;
     }
 
     let current_header = if current_xml.is_empty() {
@@ -382,15 +768,52 @@ fn print_apply_diff(
     };
     let desired_path = manifest_path.strip_prefix("/").unwrap_or(manifest_path);
     let desired_header = format!("desired/{}", desired_path.display());
-    let diff = TextDiff::from_lines(current_xml.as_str(), desired_xml);
-    print!(
-        "{}",
-        diff.unified_diff()
-            .context_radius(3)
-            .header(&current_header, &desired_header)
-    );
+    let diff = TextDiff::from_lines(current_xml, desired_xml);
+    let diff = diff
+        .unified_diff()
+        .context_radius(3)
+        .header(&current_header, &desired_header)
+        .to_string();
 
-    Ok(())
+    if color {
+        print!("{}", colorize_unified_diff(&diff));
+    } else {
+        print!("{diff}");
+    }
+}
+
+fn should_color(mode: ColorMode) -> bool {
+    match mode {
+        ColorMode::Always => true,
+        ColorMode::Auto => io::stdout().is_terminal(),
+        ColorMode::Never => false,
+    }
+}
+
+fn colorize_unified_diff(diff: &str) -> String {
+    diff.split_inclusive('\n')
+        .map(colorize_diff_line)
+        .collect::<String>()
+}
+
+fn colorize_diff_line(line: &str) -> String {
+    let (content, newline) = line
+        .strip_suffix('\n')
+        .map_or((line, ""), |line| (line, "\n"));
+    let color = if content.starts_with("--- ") || content.starts_with('-') {
+        Some("\x1b[31m")
+    } else if content.starts_with("+++ ") || content.starts_with('+') {
+        Some("\x1b[32m")
+    } else if content.starts_with("@@") {
+        Some("\x1b[36m")
+    } else {
+        None
+    };
+
+    match color {
+        Some(color) => format!("{color}{content}\x1b[0m{newline}"),
+        None => line.to_string(),
+    }
 }
 
 fn current_domain_xml(connect_uri: &str, name: &str) -> Result<String> {
@@ -1043,5 +1466,121 @@ mod tests {
             manifest.serial_log,
             Some(PathBuf::from("/logs/install-os.serial.log"))
         );
+    }
+
+    #[test]
+    fn patches_existing_domain_xml_without_rebuilding_it() {
+        let xml = r#"<domain type='kvm'>
+  <name>install-os</name>
+  <uuid>c194be5c-a0ba-4e90-8b23-18c8df0825f1</uuid>
+  <memory unit='KiB'>4194304</memory>
+  <currentMemory unit='KiB'>4194304</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-i440fx-10.2'>hvm</type>
+    <boot dev='cdrom'/>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='off'/>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='/home/fanmi/workspace/qtr/.tmp/iso/CentOS-7-x86_64-DVD-2207-02.iso'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
+    </disk>
+    <controller type='usb' index='0' model='qemu-xhci'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'/>
+    </controller>
+    <interface type='network'>
+      <mac address='52:54:00:1c:92:5f'/>
+      <source network='default'/>
+      <model type='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </interface>
+    <serial type='file'>
+      <source path='/home/fanmi/workspace/qtr/.tmp/logs/install-os.serial.log'/>
+      <target type='isa-serial' port='0'>
+        <model name='isa-serial'/>
+      </target>
+    </serial>
+    <console type='file'>
+      <source path='/home/fanmi/workspace/qtr/.tmp/logs/install-os.serial.log'/>
+      <target type='serial' port='0'/>
+    </console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+      <address type='virtio-serial' controller='0' bus='0' port='1'/>
+    </channel>
+    <input type='tablet' bus='usb'>
+      <address type='usb' bus='0' port='1'/>
+    </input>
+    <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'>
+      <listen type='address' address='0.0.0.0'/>
+    </graphics>
+    <video>
+      <model type='cirrus' vram='16384' heads='1' primary='yes'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
+    </video>
+  </devices>
+</domain>
+"#;
+        let manifest = VmManifest {
+            name: "install-os".to_string(),
+            system_disk: PathBuf::from("/home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2"),
+            cdrom: Some(PathBuf::from(
+                "/home/fanmi/workspace/qtr/.tmp/iso/CentOS-7-x86_64-DVD-2207-02.iso",
+            )),
+            boot: Some(vec!["hd".to_string()]),
+            memory_gib: 4,
+            vcpus: 2,
+            network: "default".to_string(),
+            graphics: GraphicsMode::Vnc,
+            vnc_listen: "0.0.0.0".to_string(),
+            vnc_port: None,
+            serial_log: Some(PathBuf::from(
+                "/home/fanmi/workspace/qtr/.tmp/logs/install-os.serial.log",
+            )),
+        };
+        let boot_devices = [BootDevice::Hd];
+
+        let patched =
+            patch_domain_xml(xml, &manifest, &boot_devices, 4096).expect("XML should patch");
+
+        assert!(patched.contains("<uuid>c194be5c-a0ba-4e90-8b23-18c8df0825f1</uuid>"));
+        assert!(patched.contains("machine='pc-i440fx-10.2'"));
+        assert!(patched.contains("<memory unit='KiB'>4194304</memory>"));
+        assert!(patched.contains(
+            "<address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>"
+        ));
+        assert!(patched.contains("<video>"));
+        assert!(!patched.contains("<boot dev='cdrom'/>"));
+        assert!(patched.contains("    <boot dev='hd'/>\n"));
+    }
+
+    #[test]
+    fn colorizes_unified_diff_lines() {
+        let diff = "--- old\n+++ new\n@@ -1 +1 @@\n-old\n+new\n same\n";
+
+        let colored = colorize_unified_diff(diff);
+
+        assert!(colored.contains("\x1b[31m--- old\x1b[0m\n"));
+        assert!(colored.contains("\x1b[32m+++ new\x1b[0m\n"));
+        assert!(colored.contains("\x1b[36m@@ -1 +1 @@\x1b[0m\n"));
+        assert!(colored.contains("\x1b[31m-old\x1b[0m\n"));
+        assert!(colored.contains("\x1b[32m+new\x1b[0m\n"));
+        assert!(colored.contains(" same\n"));
     }
 }

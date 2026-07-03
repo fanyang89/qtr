@@ -253,6 +253,17 @@ pub struct VmApplyArgs {
     /// Print the libvirt domain XML diff without applying it.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// When to color dry-run diffs.
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
+    pub color: ColorMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Debug, Args)]
