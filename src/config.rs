@@ -26,12 +26,33 @@ pub struct VmArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum VmCommand {
+    #[command(about = "Define a regular VM without starting it")]
+    Create(VmCreateArgs),
+
     #[command(about = "Create and start a regular VM")]
     Launch(VmLaunchArgs),
+
+    #[command(about = "Start a defined VM")]
+    Start(VmNameArgs),
+
+    #[command(about = "Print the VNC endpoint for a running VM")]
+    Vnc(VmNameArgs),
+
+    #[command(about = "Wait until a VM shuts down")]
+    WaitShutdown(VmNameArgs),
+
+    #[command(about = "Ask a VM to shut down gracefully")]
+    Shutdown(VmShutdownArgs),
+
+    #[command(about = "Force stop a VM")]
+    Destroy(VmNameArgs),
+
+    #[command(about = "Remove an inactive VM definition")]
+    Undefine(VmNameArgs),
 }
 
 #[derive(Debug, Args)]
-pub struct VmLaunchArgs {
+pub struct VmCreateArgs {
     /// Libvirt domain name.
     #[arg(long)]
     pub name: String,
@@ -75,10 +96,40 @@ pub struct VmLaunchArgs {
     /// Libvirt connection URI.
     #[arg(long, default_value = "qemu:///system")]
     pub connect_uri: String,
+}
+
+#[derive(Debug, Args)]
+pub struct VmLaunchArgs {
+    #[command(flatten)]
+    pub create: VmCreateArgs,
 
     /// Wait until the guest shuts down, then undefine the VM and keep the disk.
     #[arg(long)]
     pub wait_shutdown: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct VmNameArgs {
+    /// Libvirt domain name.
+    pub name: String,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+}
+
+#[derive(Debug, Args)]
+pub struct VmShutdownArgs {
+    /// Libvirt domain name.
+    pub name: String,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+
+    /// Wait until the guest becomes inactive.
+    #[arg(long)]
+    pub wait: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

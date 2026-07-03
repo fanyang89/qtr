@@ -4,19 +4,28 @@ use anyhow::{Context, Result, bail};
 use virt::{connect::Connect, domain::Domain, error::clear_error_callback};
 
 use crate::{
-    config::{GraphicsMode, VmArgs, VmCommand, VmLaunchArgs},
+    config::{
+        GraphicsMode, VmArgs, VmCommand, VmCreateArgs, VmLaunchArgs, VmNameArgs, VmShutdownArgs,
+    },
     domain_xml::{self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml},
 };
 
 pub fn run(args: VmArgs) -> Result<()> {
+    clear_error_callback();
+
     match args.command {
+        VmCommand::Create(args) => create(args).map(|_| ()),
         VmCommand::Launch(args) => launch(args),
+        VmCommand::Start(args) => start(args),
+        VmCommand::Vnc(args) => vnc(args),
+        VmCommand::WaitShutdown(args) => wait_shutdown_command(args),
+        VmCommand::Shutdown(args) => shutdown(args),
+        VmCommand::Destroy(args) => destroy(args),
+        VmCommand::Undefine(args) => undefine(args),
     }
 }
 
-fn launch(args: VmLaunchArgs) -> Result<()> {
-    clear_error_callback();
-
+fn create(args: VmCreateArgs) -> Result<Domain> {
     prepare_system_disk(&args)?;
 
     let boot = default_boot_order(&args);
@@ -39,34 +48,170 @@ fn launch(args: VmLaunchArgs) -> Result<()> {
         },
     });
 
-    let conn = Connect::open(Some(&args.connect_uri))
-        .with_context(|| format!("failed to connect to libvirt at {}", args.connect_uri))?;
+    let conn = connect(&args.connect_uri)?;
     let domain = Domain::define_xml(&conn, &xml)
         .with_context(|| format!("failed to define domain {}", args.name))?;
 
-    domain
-        .create()
-        .with_context(|| format!("failed to start domain {}", args.name))?;
+    eprintln!("[qtr] defined VM: {}", args.name);
+    Ok(domain)
+}
 
-    eprintln!("[qtr] started VM: {}", args.name);
-    if args.graphics == GraphicsMode::Vnc {
-        print_vnc_endpoint(&domain, &args.vnc_listen)?;
+fn launch(args: VmLaunchArgs) -> Result<()> {
+    let name = args.create.name.clone();
+    let graphics = args.create.graphics;
+    let vnc_listen = args.create.vnc_listen.clone();
+    let system_disk = args.create.system_disk.clone();
+    let wait = args.wait_shutdown;
+    let domain = create(args.create)?;
+
+    start_domain(&domain, &name)?;
+
+    if graphics == GraphicsMode::Vnc {
+        print_vnc_endpoint(&domain, &vnc_listen)?;
     }
 
-    if args.wait_shutdown {
+    if wait {
         eprintln!("[qtr] waiting for guest shutdown...");
-        wait_shutdown(&domain, &args.name)?;
+        wait_shutdown_domain(&domain, &name)?;
         domain
             .undefine()
-            .with_context(|| format!("failed to undefine domain {}", args.name))?;
-        eprintln!("[qtr] undefined VM: {}", args.name);
-        eprintln!("[qtr] system disk saved: {}", args.system_disk.display());
+            .with_context(|| format!("failed to undefine domain {name}"))?;
+        eprintln!("[qtr] undefined VM: {name}");
+        eprintln!("[qtr] system disk saved: {}", system_disk.display());
     }
 
     Ok(())
 }
 
-fn prepare_system_disk(args: &VmLaunchArgs) -> Result<()> {
+fn start(args: VmNameArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    start_domain(&domain, &args.name)?;
+
+    if let Some(endpoint) = query_vnc_endpoint(&domain, "127.0.0.1")? {
+        eprintln!("[qtr] VNC: {endpoint}");
+    }
+
+    Ok(())
+}
+
+fn vnc(args: VmNameArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {} state", args.name))?
+    {
+        bail!("domain {} is not active", args.name);
+    }
+
+    let endpoint = query_vnc_endpoint(&domain, "127.0.0.1")?.with_context(|| {
+        format!(
+            "domain {} does not expose an active VNC endpoint",
+            args.name
+        )
+    })?;
+    println!("{endpoint}");
+
+    Ok(())
+}
+
+fn wait_shutdown_command(args: VmNameArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    eprintln!("[qtr] waiting for guest shutdown...");
+    wait_shutdown_domain(&domain, &args.name)
+}
+
+fn shutdown(args: VmShutdownArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {} state", args.name))?
+    {
+        eprintln!("[qtr] VM already stopped: {}", args.name);
+        return Ok(());
+    }
+
+    domain
+        .shutdown()
+        .with_context(|| format!("failed to request shutdown for domain {}", args.name))?;
+    eprintln!("[qtr] shutdown requested: {}", args.name);
+
+    if args.wait {
+        wait_shutdown_domain(&domain, &args.name)?;
+    }
+
+    Ok(())
+}
+
+fn destroy(args: VmNameArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {} state", args.name))?
+    {
+        eprintln!("[qtr] VM already stopped: {}", args.name);
+        return Ok(());
+    }
+
+    domain
+        .destroy()
+        .with_context(|| format!("failed to destroy domain {}", args.name))?;
+    eprintln!("[qtr] destroyed VM: {}", args.name);
+
+    Ok(())
+}
+
+fn undefine(args: VmNameArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    if domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {} state", args.name))?
+    {
+        bail!(
+            "domain {} is active; shutdown or destroy it first",
+            args.name
+        );
+    }
+
+    domain
+        .undefine()
+        .with_context(|| format!("failed to undefine domain {}", args.name))?;
+    eprintln!("[qtr] undefined VM: {}", args.name);
+
+    Ok(())
+}
+
+fn connect(uri: &str) -> Result<Connect> {
+    Connect::open(Some(uri)).with_context(|| format!("failed to connect to libvirt at {uri}"))
+}
+
+fn lookup_domain(conn: &Connect, name: &str) -> Result<Domain> {
+    Domain::lookup_by_name(conn, name).with_context(|| format!("failed to find domain {name}"))
+}
+
+fn start_domain(domain: &Domain, name: &str) -> Result<()> {
+    if domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))?
+    {
+        eprintln!("[qtr] VM already running: {name}");
+        return Ok(());
+    }
+
+    domain
+        .create()
+        .with_context(|| format!("failed to start domain {name}"))?;
+    eprintln!("[qtr] started VM: {name}");
+
+    Ok(())
+}
+
+fn prepare_system_disk(args: &VmCreateArgs) -> Result<()> {
     match &args.create_system_disk {
         Some(size) => create_system_disk(&args.system_disk, size),
         None => {
@@ -86,7 +231,7 @@ fn create_system_disk(output: &Path, size: &str) -> Result<()> {
         bail!("system disk {} already exists", output.display());
     }
 
-    if let Some(parent) = output.parent() {
+    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
@@ -107,7 +252,7 @@ fn create_system_disk(output: &Path, size: &str) -> Result<()> {
     Ok(())
 }
 
-fn default_boot_order(args: &VmLaunchArgs) -> String {
+fn default_boot_order(args: &VmCreateArgs) -> String {
     match &args.boot {
         Some(boot) => boot.clone(),
         None if args.cdrom.is_some() => "cdrom,hd".to_string(),
@@ -116,16 +261,19 @@ fn default_boot_order(args: &VmLaunchArgs) -> String {
 }
 
 fn print_vnc_endpoint(domain: &Domain, fallback_listen: &str) -> Result<()> {
-    let xml = domain
-        .get_xml_desc(0)
-        .context("failed to query started domain XML")?;
-
-    match parse_vnc_endpoint(&xml, fallback_listen) {
+    match query_vnc_endpoint(domain, fallback_listen)? {
         Some(endpoint) => eprintln!("[qtr] VNC: {endpoint}"),
         None => eprintln!("[qtr] VNC: enabled, but port was not found in domain XML"),
     }
 
     Ok(())
+}
+
+fn query_vnc_endpoint(domain: &Domain, fallback_listen: &str) -> Result<Option<String>> {
+    let xml = domain
+        .get_xml_desc(0)
+        .context("failed to query domain XML")?;
+    Ok(parse_vnc_endpoint(&xml, fallback_listen))
 }
 
 fn parse_vnc_endpoint(xml: &str, fallback_listen: &str) -> Option<String> {
@@ -170,7 +318,7 @@ fn parse_attr(tag: &str, name: &str) -> Option<String> {
     None
 }
 
-fn wait_shutdown(domain: &Domain, name: &str) -> Result<()> {
+fn wait_shutdown_domain(domain: &Domain, name: &str) -> Result<()> {
     loop {
         if !domain
             .is_active()
