@@ -1,4 +1,9 @@
-use std::{thread, time::Duration};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use virt::{connect::Connect, domain::Domain, error::clear_error_callback, sys};
@@ -85,7 +90,12 @@ fn domain_state_name(state: sys::virDomainState) -> &'static str {
     }
 }
 
-fn create(args: VmCreateArgs) -> Result<Domain> {
+fn create(mut args: VmCreateArgs) -> Result<Domain> {
+    normalize_create_args(&mut args)?;
+    create_normalized(args)
+}
+
+fn create_normalized(args: VmCreateArgs) -> Result<Domain> {
     prepare_system_disk(&args)?;
 
     let boot = default_boot_order(&args);
@@ -117,13 +127,15 @@ fn create(args: VmCreateArgs) -> Result<Domain> {
     Ok(domain)
 }
 
-fn launch(args: VmLaunchArgs) -> Result<()> {
+fn launch(mut args: VmLaunchArgs) -> Result<()> {
+    normalize_create_args(&mut args.create)?;
+
     let name = args.create.name.clone();
     let graphics = args.create.graphics;
     let vnc_listen = args.create.vnc_listen.clone();
     let system_disk = args.create.system_disk.clone();
     let wait = args.wait_shutdown;
-    let domain = create(args.create)?;
+    let domain = create_normalized(args.create)?;
 
     start_domain(&domain, &name)?;
 
@@ -285,6 +297,30 @@ fn prepare_system_disk(args: &VmCreateArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn normalize_create_args(args: &mut VmCreateArgs) -> Result<()> {
+    args.system_disk = absolute_path(&args.system_disk)?;
+
+    if let Some(cdrom) = &args.cdrom {
+        let cdrom = absolute_path(cdrom)?;
+        if !cdrom.exists() {
+            bail!("cdrom ISO {} does not exist", cdrom.display());
+        }
+        args.cdrom = Some(cdrom);
+    }
+
+    Ok(())
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    Ok(env::current_dir()
+        .context("failed to determine current directory")?
+        .join(path))
 }
 
 fn default_boot_order(args: &VmCreateArgs) -> String {
