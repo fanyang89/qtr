@@ -14,6 +14,9 @@ pub enum Command {
     #[command(about = "Create virtual disk images")]
     Disk(DiskArgs),
 
+    #[command(about = "Configure host prerequisites")]
+    Host(HostArgs),
+
     #[command(about = "Manage libvirt virtual networks")]
     Net(NetArgs),
 
@@ -73,6 +76,37 @@ pub struct DiskOverlayArgs {
 pub enum DiskFormat {
     Raw,
     Qcow2,
+}
+
+#[derive(Debug, Args)]
+pub struct HostArgs {
+    #[command(subcommand)]
+    pub command: HostCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HostCommand {
+    #[command(about = "Allow a user to manage qemu:///system without a polkit agent")]
+    SetupLibvirtAccess(SetupLibvirtAccessArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SetupLibvirtAccessArgs {
+    /// User to grant libvirt management access to. Defaults to SUDO_USER.
+    #[arg(long)]
+    pub user: Option<String>,
+
+    /// Group allowed by the generated polkit rule.
+    #[arg(long, default_value = "libvirt")]
+    pub group: String,
+
+    /// Polkit rule path to write.
+    #[arg(long, default_value = "/etc/polkit-1/rules.d/80-qtr-libvirt.rules")]
+    pub rule_path: PathBuf,
+
+    /// Print actions without changing the host.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
