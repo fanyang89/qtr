@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    env,
+    env, fs,
     io::{self, Write},
     net::IpAddr,
     path::{Path, PathBuf},
@@ -10,12 +10,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use similar::TextDiff;
 use virt::{connect::Connect, domain::Domain, error::clear_error_callback, sys};
 
 use crate::{
     config::{
-        DiskFormat, GraphicsMode, VmArgs, VmCommand, VmCreateArgs, VmExecArgs, VmLaunchArgs,
-        VmListArgs, VmNameArgs, VmShutdownArgs,
+        DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCreateArgs, VmExecArgs,
+        VmLaunchArgs, VmListArgs, VmNameArgs, VmShutdownArgs,
     },
     disk,
     domain_xml::{self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml},
@@ -26,6 +28,7 @@ pub fn run(args: VmArgs) -> Result<()> {
     clear_error_callback();
 
     match args.command {
+        VmCommand::Apply(args) => apply(args),
         VmCommand::List(args) => list(args),
         VmCommand::Create(args) => create(args).map(|_| ()),
         VmCommand::Launch(args) => launch(args),
@@ -36,6 +39,198 @@ pub fn run(args: VmArgs) -> Result<()> {
         VmCommand::Shutdown(args) => shutdown(args),
         VmCommand::Destroy(args) => destroy(args),
         VmCommand::Undefine(args) => undefine(args),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VmManifest {
+    name: String,
+    system_disk: PathBuf,
+    cdrom: Option<PathBuf>,
+    boot: Option<Vec<String>>,
+    #[serde(default = "default_vm_memory_gib", rename = "memoryGiB")]
+    memory_gib: u64,
+    #[serde(default = "default_vm_vcpus")]
+    vcpus: u32,
+    #[serde(default = "default_vm_network")]
+    network: String,
+    #[serde(default = "default_vm_graphics")]
+    graphics: GraphicsMode,
+    #[serde(default = "default_vm_vnc_listen")]
+    vnc_listen: String,
+    vnc_port: Option<u16>,
+    serial_log: Option<PathBuf>,
+}
+
+fn default_vm_memory_gib() -> u64 {
+    4
+}
+
+fn default_vm_vcpus() -> u32 {
+    2
+}
+
+fn default_vm_network() -> String {
+    "default".to_string()
+}
+
+fn default_vm_graphics() -> GraphicsMode {
+    GraphicsMode::Vnc
+}
+
+fn default_vm_vnc_listen() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn apply(args: VmApplyArgs) -> Result<()> {
+    let manifest_path = absolute_path(&args.file)?;
+    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read VM definition {}", manifest_path.display()))?;
+    let mut manifest: VmManifest = serde_yaml::from_str(&manifest_text)
+        .with_context(|| format!("failed to parse VM definition {}", manifest_path.display()))?;
+
+    normalize_manifest_paths(&mut manifest, manifest_dir)?;
+    validate_manifest(&manifest)?;
+
+    let boot = manifest_boot_order(&manifest);
+    let boot_devices = domain_xml::parse_boot_devices(&boot)?;
+    if boot_devices.contains(&BootDevice::Cdrom) && manifest.cdrom.is_none() {
+        bail!("boot order contains cdrom but cdrom was not provided");
+    }
+
+    let memory_mib = manifest
+        .memory_gib
+        .checked_mul(1024)
+        .context("memoryGiB is too large")?;
+
+    let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
+        name: &manifest.name,
+        memory_mib,
+        vcpus: manifest.vcpus,
+        system_disk: &manifest.system_disk,
+        cdrom: manifest.cdrom.as_deref(),
+        serial_log: manifest.serial_log.as_deref(),
+        boot_devices: &boot_devices,
+        network: &manifest.network,
+        graphics: GraphicsSpec {
+            mode: manifest.graphics,
+            vnc_listen: &manifest.vnc_listen,
+            vnc_port: manifest.vnc_port,
+        },
+    });
+
+    if args.dry_run {
+        print_apply_diff(&args.connect_uri, &manifest.name, &manifest_path, &xml)?;
+        return Ok(());
+    }
+
+    prepare_serial_log_path(manifest.serial_log.as_deref())?;
+
+    let conn = connect(&args.connect_uri)?;
+    let domain = Domain::define_xml_flags(&conn, &xml, sys::VIR_DOMAIN_DEFINE_VALIDATE)
+        .with_context(|| format!("failed to apply VM definition {}", manifest.name))?;
+
+    eprintln!("[qtr] applied VM: {}", manifest.name);
+    if domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {} state", manifest.name))?
+    {
+        eprintln!("[qtr] VM is running; changes apply on next start");
+    }
+
+    Ok(())
+}
+
+fn print_apply_diff(
+    connect_uri: &str,
+    name: &str,
+    manifest_path: &Path,
+    desired_xml: &str,
+) -> Result<()> {
+    let current_xml = current_domain_xml(connect_uri, name)?;
+    if current_xml == desired_xml {
+        println!("[qtr] no changes");
+        return Ok(());
+    }
+
+    let current_header = if current_xml.is_empty() {
+        "/dev/null".to_string()
+    } else {
+        format!("current/libvirt/{name}")
+    };
+    let desired_path = manifest_path.strip_prefix("/").unwrap_or(manifest_path);
+    let desired_header = format!("desired/{}", desired_path.display());
+    let diff = TextDiff::from_lines(current_xml.as_str(), desired_xml);
+    print!(
+        "{}",
+        diff.unified_diff()
+            .context_radius(3)
+            .header(&current_header, &desired_header)
+    );
+
+    Ok(())
+}
+
+fn current_domain_xml(connect_uri: &str, name: &str) -> Result<String> {
+    let conn = connect_read_only(connect_uri)?;
+    let domain = match Domain::lookup_by_name(&conn, name) {
+        Ok(domain) => domain,
+        Err(_) => return Ok(String::new()),
+    };
+
+    domain
+        .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+        .with_context(|| format!("failed to query inactive domain XML for {name}"))
+}
+
+fn normalize_manifest_paths(manifest: &mut VmManifest, base_dir: &Path) -> Result<()> {
+    manifest.system_disk = manifest_relative_path(base_dir, &manifest.system_disk);
+
+    if let Some(cdrom) = &manifest.cdrom {
+        manifest.cdrom = Some(manifest_relative_path(base_dir, cdrom));
+    }
+
+    let serial_log = manifest
+        .serial_log
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!(".tmp/logs/{}.serial.log", manifest.name)));
+    manifest.serial_log = Some(manifest_relative_path(base_dir, &serial_log));
+
+    Ok(())
+}
+
+fn manifest_relative_path(base_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
+fn validate_manifest(manifest: &VmManifest) -> Result<()> {
+    if !manifest.system_disk.exists() {
+        bail!(
+            "system disk {} does not exist",
+            manifest.system_disk.display()
+        );
+    }
+
+    if let Some(cdrom) = &manifest.cdrom
+        && !cdrom.exists()
+    {
+        bail!("cdrom ISO {} does not exist", cdrom.display());
+    }
+
+    Ok(())
+}
+
+fn manifest_boot_order(manifest: &VmManifest) -> String {
+    match &manifest.boot {
+        Some(boot) => boot.join(","),
+        None if manifest.cdrom.is_some() => "cdrom,hd".to_string(),
+        None => "hd".to_string(),
     }
 }
 
@@ -308,6 +503,11 @@ fn connect(uri: &str) -> Result<Connect> {
     Connect::open(Some(uri)).with_context(|| format!("failed to connect to libvirt at {uri}"))
 }
 
+fn connect_read_only(uri: &str) -> Result<Connect> {
+    Connect::open_read_only(Some(uri))
+        .with_context(|| format!("failed to connect to libvirt read-only at {uri}"))
+}
+
 fn lookup_domain(conn: &Connect, name: &str) -> Result<Domain> {
     Domain::lookup_by_name(conn, name).with_context(|| format!("failed to find domain {name}"))
 }
@@ -345,12 +545,13 @@ fn prepare_system_disk(args: &VmCreateArgs) -> Result<()> {
 }
 
 fn prepare_serial_log(args: &VmCreateArgs) -> Result<()> {
-    let Some(path) = &args.serial_log else {
-        return Ok(());
-    };
+    prepare_serial_log_path(args.serial_log.as_deref())
+}
 
+fn prepare_serial_log_path(path: Option<&Path>) -> Result<()> {
+    let Some(path) = path else { return Ok(()) };
     if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
+        fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::Deserialize;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "QEMU test runner")]
@@ -202,6 +203,9 @@ pub struct VmArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum VmCommand {
+    #[command(about = "Apply a VM definition from a YAML file")]
+    Apply(VmApplyArgs),
+
     #[command(about = "List defined VMs")]
     List(VmListArgs),
 
@@ -231,6 +235,21 @@ pub enum VmCommand {
 
     #[command(about = "Remove an inactive VM definition")]
     Undefine(VmNameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VmApplyArgs {
+    /// YAML VM definition file.
+    #[arg(short, long, value_name = "FILE")]
+    pub file: PathBuf,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+
+    /// Print the libvirt domain XML diff without applying it.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -347,7 +366,8 @@ pub struct VmShutdownArgs {
     pub wait: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum GraphicsMode {
     None,
     Vnc,

@@ -79,6 +79,32 @@ cargo run -- vm launch \
 
 VMs write serial console output to `.tmp/logs/<name>.serial.log` by default. Override it with `--serial-log`.
 
+## Declarative VM Config
+
+Define or update a VM from YAML:
+
+```yaml
+name: install-os
+systemDisk: .tmp/disks/sys.qcow2
+cdrom: .tmp/iso/CentOS-7-x86_64-Everything-2207-02.iso
+boot: [cdrom, hd]
+memoryGiB: 4
+vcpus: 2
+network: default
+graphics: vnc
+vncListen: 0.0.0.0
+serialLog: .tmp/logs/install-os.serial.log
+```
+
+Apply it:
+
+```bash
+cargo run -- vm apply -f vm.yaml
+cargo run -- vm apply -f vm.yaml --dry-run
+```
+
+`vm apply` updates the persistent libvirt domain definition. If the VM is already running, changes take effect on the next start. Relative paths are resolved from the YAML file directory. Use `--dry-run` to print the libvirt domain XML diff without applying it.
+
 Run commands through QEMU Guest Agent after the guest boots:
 
 ```bash
