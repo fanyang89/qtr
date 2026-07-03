@@ -43,6 +43,7 @@ fn create(args: VmCreateArgs) -> Result<Domain> {
         system_disk: &args.system_disk,
         cdrom: args.cdrom.as_deref(),
         boot_devices: &boot_devices,
+        network: &args.network,
         graphics: GraphicsSpec {
             mode: args.graphics,
             vnc_listen: &args.vnc_listen,

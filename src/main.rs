@@ -3,6 +3,7 @@ mod disk;
 mod domain_xml;
 mod guest_agent;
 mod matrix;
+mod network;
 mod runner;
 mod vm;
 
@@ -15,6 +16,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Disk(args) => disk::run(args),
+        Command::Net(args) => network::run(args),
         Command::Run(args) => runner::run(args),
         Command::Vm(args) => vm::run(args),
     }

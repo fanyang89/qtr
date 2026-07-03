@@ -14,6 +14,9 @@ pub enum Command {
     #[command(about = "Create virtual disk images")]
     Disk(DiskArgs),
 
+    #[command(about = "Manage libvirt virtual networks")]
+    Net(NetArgs),
+
     #[command(about = "Run disk matrix cases serially in temporary QEMU guests")]
     Run(RunArgs),
 
@@ -70,6 +73,79 @@ pub struct DiskOverlayArgs {
 pub enum DiskFormat {
     Raw,
     Qcow2,
+}
+
+#[derive(Debug, Args)]
+pub struct NetArgs {
+    #[command(subcommand)]
+    pub command: NetCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NetCommand {
+    #[command(about = "Define a NAT network")]
+    Create(NetCreateArgs),
+
+    #[command(about = "Start a defined network")]
+    Start(NetNameArgs),
+
+    #[command(about = "Stop an active network")]
+    Stop(NetNameArgs),
+
+    #[command(about = "Remove an inactive network definition")]
+    Undefine(NetNameArgs),
+
+    #[command(about = "Print network state")]
+    Info(NetNameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct NetCreateArgs {
+    /// Libvirt network name.
+    #[arg(long)]
+    pub name: String,
+
+    /// Optional host bridge name. Omit to let libvirt allocate one.
+    #[arg(long)]
+    pub bridge: Option<String>,
+
+    /// Gateway address on the virtual network.
+    #[arg(long, default_value = "192.168.100.1")]
+    pub address: String,
+
+    /// IPv4 netmask for the virtual network.
+    #[arg(long, default_value = "255.255.255.0")]
+    pub netmask: String,
+
+    /// First DHCP address handed to guests.
+    #[arg(long, default_value = "192.168.100.2")]
+    pub dhcp_start: String,
+
+    /// Last DHCP address handed to guests.
+    #[arg(long, default_value = "192.168.100.254")]
+    pub dhcp_end: String,
+
+    /// Start the network after defining it.
+    #[arg(long)]
+    pub start: bool,
+
+    /// Start the network automatically when libvirt starts.
+    #[arg(long)]
+    pub autostart: bool,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+}
+
+#[derive(Debug, Args)]
+pub struct NetNameArgs {
+    /// Libvirt network name.
+    pub name: String,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
 }
 
 #[derive(Debug, Args)]
@@ -147,6 +223,10 @@ pub struct VmCreateArgs {
     #[arg(long)]
     pub vnc_port: Option<u16>,
 
+    /// Libvirt network attached to the VM.
+    #[arg(long, default_value = "default")]
+    pub network: String,
+
     /// Libvirt connection URI.
     #[arg(long, default_value = "qemu:///system")]
     pub connect_uri: String,
@@ -217,6 +297,10 @@ pub struct RunArgs {
     /// Libvirt connection URI.
     #[arg(long, default_value = "qemu:///system")]
     pub connect_uri: String,
+
+    /// Libvirt network attached to each test VM.
+    #[arg(long, default_value = "default")]
+    pub network: String,
 
     /// Directory where per-case system overlays are created.
     #[arg(long, default_value = "/var/lib/libvirt/images/qtr-runs")]

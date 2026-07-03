@@ -72,6 +72,7 @@ fn run_case(
         vcpus: args.vcpus,
         system_disk: &system_disk,
         data_disk: &data_disk,
+        network: &args.network,
         case,
     });
 

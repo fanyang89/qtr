@@ -11,6 +11,7 @@ pub struct DomainSpec<'a> {
     pub vcpus: u32,
     pub system_disk: &'a Path,
     pub data_disk: &'a Path,
+    pub network: &'a str,
     pub case: &'a TestCase,
 }
 
@@ -42,7 +43,7 @@ pub fn build_domain_xml(spec: DomainSpec<'_>) -> String {
       <target dev='vdb' bus='virtio'/>
     </disk>
     <interface type='network'>
-      <source network='default'/>
+      <source network='{network}'/>
       <model type='virtio'/>
     </interface>
     <channel type='unix'>
@@ -59,6 +60,7 @@ pub fn build_domain_xml(spec: DomainSpec<'_>) -> String {
         vcpus = spec.vcpus,
         system_disk = escape_xml(&spec.system_disk.display().to_string()),
         data_disk = escape_xml(&spec.data_disk.display().to_string()),
+        network = escape_xml(spec.network),
         data_disk_cache = spec.case.data_disk_cache.as_xml(),
         data_disk_io = spec.case.data_disk_io.as_xml(),
     )
@@ -71,6 +73,7 @@ pub struct VmLaunchDomainSpec<'a> {
     pub system_disk: &'a Path,
     pub cdrom: Option<&'a Path>,
     pub boot_devices: &'a [BootDevice],
+    pub network: &'a str,
     pub graphics: GraphicsSpec<'a>,
 }
 
@@ -145,7 +148,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
       <target dev='vda' bus='virtio'/>
     </disk>
 {cdrom_xml}    <interface type='network'>
-      <source network='default'/>
+      <source network='{network}'/>
       <model type='virtio'/>
     </interface>
     <channel type='unix'>
@@ -162,6 +165,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         vcpus = spec.vcpus,
         boot_xml = boot_xml,
         system_disk = escape_xml(&spec.system_disk.display().to_string()),
+        network = escape_xml(spec.network),
         cdrom_xml = cdrom_xml,
         graphics_xml = graphics_xml,
     )
