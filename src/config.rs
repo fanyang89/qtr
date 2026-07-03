@@ -104,6 +104,18 @@ pub struct SetupLibvirtAccessArgs {
     #[arg(long, default_value = "/etc/polkit-1/rules.d/80-qtr-libvirt.rules")]
     pub rule_path: PathBuf,
 
+    /// QEMU process user to grant filesystem ACLs to.
+    #[arg(long, default_value = "qemu")]
+    pub qemu_user: String,
+
+    /// Directory QEMU may read and write. Can be passed more than once.
+    #[arg(long)]
+    pub qemu_rw_dir: Vec<PathBuf>,
+
+    /// Directory QEMU may read. Can be passed more than once.
+    #[arg(long)]
+    pub qemu_ro_dir: Vec<PathBuf>,
+
     /// Print actions without changing the host.
     #[arg(long)]
     pub dry_run: bool,

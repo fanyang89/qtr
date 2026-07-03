@@ -36,9 +36,13 @@ Grant the current user access to `qemu:///system` without an interactive polkit 
 
 ```bash
 cargo build
-sudo ./target/debug/qtr host setup-libvirt-access
+sudo ./target/debug/qtr host setup-libvirt-access \
+  --qemu-rw-dir .tmp/disks \
+  --qemu-ro-dir .tmp/iso
 newgrp libvirt
 ```
+
+The QEMU system process needs filesystem access to VM media. Use `--qemu-rw-dir` for writable qcow2 disks and `--qemu-ro-dir` for readonly ISO directories.
 
 Verify libvirt can load the QEMU driver:
 
