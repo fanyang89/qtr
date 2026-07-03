@@ -1,3 +1,17 @@
-fn main() {
-    println!("Hello, world!");
+mod config;
+mod domain_xml;
+mod guest_agent;
+mod matrix;
+mod runner;
+
+use anyhow::Result;
+use clap::Parser;
+use config::{Cli, Command};
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Run(args) => runner::run(args),
+    }
 }
