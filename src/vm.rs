@@ -1,12 +1,12 @@
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use virt::{connect::Connect, domain::Domain, error::clear_error_callback};
+use virt::{connect::Connect, domain::Domain, error::clear_error_callback, sys};
 
 use crate::{
     config::{
-        DiskFormat, GraphicsMode, VmArgs, VmCommand, VmCreateArgs, VmLaunchArgs, VmNameArgs,
-        VmShutdownArgs,
+        DiskFormat, GraphicsMode, VmArgs, VmCommand, VmCreateArgs, VmLaunchArgs, VmListArgs,
+        VmNameArgs, VmShutdownArgs,
     },
     disk,
     domain_xml::{self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml},
@@ -16,6 +16,7 @@ pub fn run(args: VmArgs) -> Result<()> {
     clear_error_callback();
 
     match args.command {
+        VmCommand::List(args) => list(args),
         VmCommand::Create(args) => create(args).map(|_| ()),
         VmCommand::Launch(args) => launch(args),
         VmCommand::Start(args) => start(args),
@@ -24,6 +25,63 @@ pub fn run(args: VmArgs) -> Result<()> {
         VmCommand::Shutdown(args) => shutdown(args),
         VmCommand::Destroy(args) => destroy(args),
         VmCommand::Undefine(args) => undefine(args),
+    }
+}
+
+fn list(args: VmListArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let flags = sys::VIR_CONNECT_LIST_DOMAINS_ACTIVE | sys::VIR_CONNECT_LIST_DOMAINS_INACTIVE;
+    let mut rows = conn
+        .list_all_domains(flags)
+        .context("failed to list domains")?
+        .into_iter()
+        .map(|domain| domain_list_row(&domain))
+        .collect::<Result<Vec<_>>>()?;
+
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+
+    println!("{:<32} {:<12} ID", "NAME", "STATE");
+    for row in rows {
+        println!("{:<32} {:<12} {}", row.name, row.state, row.id);
+    }
+
+    Ok(())
+}
+
+struct DomainListRow {
+    name: String,
+    state: &'static str,
+    id: String,
+}
+
+fn domain_list_row(domain: &Domain) -> Result<DomainListRow> {
+    let name = domain.get_name().context("failed to query domain name")?;
+    let (state, _) = domain
+        .get_state()
+        .with_context(|| format!("failed to query domain {name} state"))?;
+    let id = domain
+        .get_id()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    Ok(DomainListRow {
+        name,
+        state: domain_state_name(state),
+        id,
+    })
+}
+
+fn domain_state_name(state: sys::virDomainState) -> &'static str {
+    match state {
+        sys::VIR_DOMAIN_NOSTATE => "nostate",
+        sys::VIR_DOMAIN_RUNNING => "running",
+        sys::VIR_DOMAIN_BLOCKED => "blocked",
+        sys::VIR_DOMAIN_PAUSED => "paused",
+        sys::VIR_DOMAIN_SHUTDOWN => "shutdown",
+        sys::VIR_DOMAIN_SHUTOFF => "shutoff",
+        sys::VIR_DOMAIN_CRASHED => "crashed",
+        sys::VIR_DOMAIN_PMSUSPENDED => "pmsuspended",
+        _ => "unknown",
     }
 }
 

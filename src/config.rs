@@ -190,6 +190,9 @@ pub struct VmArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum VmCommand {
+    #[command(about = "List defined VMs")]
+    List(VmListArgs),
+
     #[command(about = "Define a regular VM without starting it")]
     Create(VmCreateArgs),
 
@@ -213,6 +216,13 @@ pub enum VmCommand {
 
     #[command(about = "Remove an inactive VM definition")]
     Undefine(VmNameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VmListArgs {
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
 }
 
 #[derive(Debug, Args)]
