@@ -13,6 +13,78 @@ pub struct Cli {
 pub enum Command {
     #[command(about = "Run disk matrix cases serially in temporary QEMU guests")]
     Run(RunArgs),
+
+    #[command(about = "Manage regular QEMU virtual machines")]
+    Vm(VmArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VmArgs {
+    #[command(subcommand)]
+    pub command: VmCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum VmCommand {
+    #[command(about = "Create and start a regular VM")]
+    Launch(VmLaunchArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VmLaunchArgs {
+    /// Libvirt domain name.
+    #[arg(long)]
+    pub name: String,
+
+    /// qcow2 system disk path.
+    #[arg(long)]
+    pub system_disk: PathBuf,
+
+    /// Create the qcow2 system disk with this size, for example 40G.
+    #[arg(long)]
+    pub create_system_disk: Option<String>,
+
+    /// Optional installation ISO attached as a readonly cdrom.
+    #[arg(long)]
+    pub cdrom: Option<PathBuf>,
+
+    /// Boot order as comma-separated devices: hd, cdrom.
+    #[arg(long)]
+    pub boot: Option<String>,
+
+    /// Guest memory size in MiB.
+    #[arg(long, default_value_t = 4096)]
+    pub memory_mib: u64,
+
+    /// Number of guest vCPUs.
+    #[arg(long, default_value_t = 2)]
+    pub vcpus: u32,
+
+    /// Graphics device exposed by the VM.
+    #[arg(long, value_enum, default_value_t = GraphicsMode::Vnc)]
+    pub graphics: GraphicsMode,
+
+    /// Address VNC listens on when --graphics vnc is used.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub vnc_listen: String,
+
+    /// Fixed VNC port. Omit to let libvirt auto-assign one.
+    #[arg(long)]
+    pub vnc_port: Option<u16>,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+
+    /// Wait until the guest shuts down, then undefine the VM and keep the disk.
+    #[arg(long)]
+    pub wait_shutdown: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum GraphicsMode {
+    None,
+    Vnc,
 }
 
 #[derive(Debug, Args)]
