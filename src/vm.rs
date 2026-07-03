@@ -10,14 +10,15 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use roxmltree::{Document, Node};
+use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 use virt::{connect::Connect, domain::Domain, error::clear_error_callback, sys};
 
 use crate::{
     config::{
-        DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCreateArgs, VmExecArgs,
-        VmLaunchArgs, VmListArgs, VmNameArgs, VmShutdownArgs,
+        DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCreateArgs, VmDumpArgs,
+        VmExecArgs, VmLaunchArgs, VmListArgs, VmNameArgs, VmShutdownArgs,
     },
     disk,
     domain_xml::{self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml},
@@ -29,6 +30,7 @@ pub fn run(args: VmArgs) -> Result<()> {
 
     match args.command {
         VmCommand::Apply(args) => apply(args),
+        VmCommand::Dump(args) => dump(args),
         VmCommand::List(args) => list(args),
         VmCommand::Create(args) => create(args).map(|_| ()),
         VmCommand::Launch(args) => launch(args),
@@ -42,12 +44,14 @@ pub fn run(args: VmArgs) -> Result<()> {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VmManifest {
     name: String,
     system_disk: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cdrom: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     boot: Option<Vec<String>>,
     #[serde(default = "default_vm_memory_gib", rename = "memoryGiB")]
     memory_gib: u64,
@@ -59,7 +63,9 @@ struct VmManifest {
     graphics: GraphicsMode,
     #[serde(default = "default_vm_vnc_listen")]
     vnc_listen: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     vnc_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     serial_log: Option<PathBuf>,
 }
 
@@ -143,6 +149,220 @@ fn apply(args: VmApplyArgs) -> Result<()> {
     Ok(())
 }
 
+fn dump(args: VmDumpArgs) -> Result<()> {
+    let xml = existing_domain_xml(&args.connect_uri, &args.name)?;
+    let manifest = manifest_from_domain_xml(&xml)?;
+    let yaml = serde_yaml::to_string(&manifest)
+        .with_context(|| format!("failed to serialize VM {} as YAML", args.name))?;
+
+    match args.output {
+        Some(path) => {
+            if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
+            }
+            fs::write(&path, yaml)
+                .with_context(|| format!("failed to write VM YAML {}", path.display()))?;
+        }
+        None => print!("{yaml}"),
+    }
+
+    Ok(())
+}
+
+fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
+    let doc = Document::parse(xml).context("failed to parse libvirt domain XML")?;
+    let domain = doc.root_element();
+
+    let name = required_child_text(domain, "name")?.to_string();
+    let memory_mib = memory_mib(domain)?;
+    if memory_mib % 1024 != 0 {
+        bail!("domain memory {memory_mib} MiB cannot be represented as whole GiB");
+    }
+
+    let boot = boot_order(domain)?;
+    let devices = required_child(domain, "devices")?;
+    let system_disk = disk_source_path(devices, "disk", Some("vda"))?;
+    let cdrom = optional_disk_source_path(devices, "cdrom", None)?;
+    let network = network_name(devices)?;
+    let (graphics, vnc_listen, vnc_port) = graphics_config(devices)?;
+    let serial_log = serial_log_path(devices);
+
+    Ok(VmManifest {
+        name,
+        system_disk,
+        cdrom,
+        boot: Some(boot),
+        memory_gib: memory_mib / 1024,
+        vcpus: required_child_text(domain, "vcpu")?
+            .parse()
+            .context("failed to parse domain vcpus")?,
+        network,
+        graphics,
+        vnc_listen,
+        vnc_port,
+        serial_log,
+    })
+}
+
+fn required_child<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Result<Node<'a, 'input>> {
+    node.children()
+        .find(|child| child.has_tag_name(tag))
+        .with_context(|| format!("domain XML is missing <{tag}>"))
+}
+
+fn optional_child<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Option<Node<'a, 'input>> {
+    node.children().find(|child| child.has_tag_name(tag))
+}
+
+fn required_child_text<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Result<&'a str> {
+    required_child(node, tag)?
+        .text()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("domain XML <{tag}> is empty"))
+}
+
+fn memory_mib(domain: Node<'_, '_>) -> Result<u64> {
+    let memory = required_child(domain, "memory")?;
+    let value = memory
+        .text()
+        .map(str::trim)
+        .context("domain XML <memory> is empty")?
+        .parse::<u64>()
+        .context("failed to parse domain memory")?;
+
+    match memory.attribute("unit").unwrap_or("KiB") {
+        "KiB" => {
+            if value % 1024 != 0 {
+                bail!("domain memory {value} KiB cannot be represented as whole MiB");
+            }
+            Ok(value / 1024)
+        }
+        "MiB" => Ok(value),
+        "GiB" => value
+            .checked_mul(1024)
+            .context("domain memory is too large"),
+        unit => bail!("unsupported domain memory unit {unit:?}"),
+    }
+}
+
+fn boot_order(domain: Node<'_, '_>) -> Result<Vec<String>> {
+    let os = required_child(domain, "os")?;
+    let boot = os
+        .children()
+        .filter(|child| child.has_tag_name("boot"))
+        .map(|boot| {
+            let dev = boot
+                .attribute("dev")
+                .context("domain XML <boot> is missing dev attribute")?;
+            match dev {
+                "hd" | "cdrom" => Ok(dev.to_string()),
+                _ => bail!("unsupported boot device {dev:?}"),
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if boot.is_empty() {
+        bail!("domain XML is missing boot order");
+    }
+
+    Ok(boot)
+}
+
+fn disk_source_path(
+    devices: Node<'_, '_>,
+    device: &str,
+    target_dev: Option<&str>,
+) -> Result<PathBuf> {
+    optional_disk_source_path(devices, device, target_dev)?.with_context(|| {
+        let target = target_dev
+            .map(|target| format!(" target {target}"))
+            .unwrap_or_default();
+        format!("domain XML is missing {device} disk{target}")
+    })
+}
+
+fn optional_disk_source_path(
+    devices: Node<'_, '_>,
+    device: &str,
+    target_dev: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    for disk in devices
+        .children()
+        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some(device))
+    {
+        if let Some(target_dev) = target_dev
+            && disk_target_dev(disk).as_deref() != Some(target_dev)
+        {
+            continue;
+        }
+
+        let source = optional_child(disk, "source")
+            .and_then(|source| source.attribute("file"))
+            .with_context(|| format!("domain XML {device} disk is missing source file"))?;
+        return Ok(Some(PathBuf::from(source)));
+    }
+
+    Ok(None)
+}
+
+fn disk_target_dev(disk: Node<'_, '_>) -> Option<String> {
+    optional_child(disk, "target")
+        .and_then(|target| target.attribute("dev"))
+        .map(str::to_string)
+}
+
+fn network_name(devices: Node<'_, '_>) -> Result<String> {
+    let interface = devices
+        .children()
+        .find(|child| child.has_tag_name("interface") && child.attribute("type") == Some("network"))
+        .context("domain XML is missing network interface")?;
+    Ok(optional_child(interface, "source")
+        .and_then(|source| source.attribute("network"))
+        .context("domain XML network interface is missing source network")?
+        .to_string())
+}
+
+fn graphics_config(devices: Node<'_, '_>) -> Result<(GraphicsMode, String, Option<u16>)> {
+    let Some(graphics) = devices
+        .children()
+        .find(|child| child.has_tag_name("graphics"))
+    else {
+        return Ok((GraphicsMode::None, default_vm_vnc_listen(), None));
+    };
+
+    match graphics.attribute("type") {
+        Some("vnc") => {
+            let listen = graphics
+                .attribute("listen")
+                .map(str::to_string)
+                .or_else(|| {
+                    optional_child(graphics, "listen")
+                        .and_then(|listen| listen.attribute("address"))
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(default_vm_vnc_listen);
+            let vnc_port = match graphics.attribute("port") {
+                Some("-1") | None => None,
+                Some(port) => Some(port.parse().context("failed to parse VNC port")?),
+            };
+            Ok((GraphicsMode::Vnc, listen, vnc_port))
+        }
+        Some(kind) => bail!("unsupported graphics type {kind:?}"),
+        None => bail!("domain XML graphics device is missing type"),
+    }
+}
+
+fn serial_log_path(devices: Node<'_, '_>) -> Option<PathBuf> {
+    devices
+        .children()
+        .find(|child| child.has_tag_name("console") && child.attribute("type") == Some("file"))
+        .and_then(|console| optional_child(console, "source"))
+        .and_then(|source| source.attribute("path"))
+        .map(PathBuf::from)
+}
+
 fn print_apply_diff(
     connect_uri: &str,
     name: &str,
@@ -180,6 +400,14 @@ fn current_domain_xml(connect_uri: &str, name: &str) -> Result<String> {
         Err(_) => return Ok(String::new()),
     };
 
+    domain
+        .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+        .with_context(|| format!("failed to query inactive domain XML for {name}"))
+}
+
+fn existing_domain_xml(connect_uri: &str, name: &str) -> Result<String> {
+    let conn = connect_read_only(connect_uri)?;
+    let domain = lookup_domain(&conn, name)?;
     domain
         .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
         .with_context(|| format!("failed to query inactive domain XML for {name}"))
@@ -767,5 +995,53 @@ fn wait_shutdown_domain(domain: &Domain, name: &str) -> Result<()> {
         }
 
         thread::sleep(Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dumps_qtr_domain_xml_to_manifest() {
+        let boot_devices = [BootDevice::Cdrom, BootDevice::Hd];
+        let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
+            name: "install-os",
+            memory_mib: 4096,
+            vcpus: 2,
+            system_disk: Path::new("/var/lib/libvirt/images/sys.qcow2"),
+            cdrom: Some(Path::new("/isos/os.iso")),
+            serial_log: Some(Path::new("/logs/install-os.serial.log")),
+            boot_devices: &boot_devices,
+            network: "default",
+            graphics: GraphicsSpec {
+                mode: GraphicsMode::Vnc,
+                vnc_listen: "0.0.0.0",
+                vnc_port: Some(5901),
+            },
+        });
+
+        let manifest = manifest_from_domain_xml(&xml).expect("domain XML should parse");
+
+        assert_eq!(manifest.name, "install-os");
+        assert_eq!(
+            manifest.system_disk,
+            PathBuf::from("/var/lib/libvirt/images/sys.qcow2")
+        );
+        assert_eq!(manifest.cdrom, Some(PathBuf::from("/isos/os.iso")));
+        assert_eq!(
+            manifest.boot,
+            Some(vec!["cdrom".to_string(), "hd".to_string()])
+        );
+        assert_eq!(manifest.memory_gib, 4);
+        assert_eq!(manifest.vcpus, 2);
+        assert_eq!(manifest.network, "default");
+        assert_eq!(manifest.graphics, GraphicsMode::Vnc);
+        assert_eq!(manifest.vnc_listen, "0.0.0.0");
+        assert_eq!(manifest.vnc_port, Some(5901));
+        assert_eq!(
+            manifest.serial_log,
+            Some(PathBuf::from("/logs/install-os.serial.log"))
+        );
     }
 }

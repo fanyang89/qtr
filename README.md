@@ -99,11 +99,13 @@ serialLog: .tmp/logs/install-os.serial.log
 Apply it:
 
 ```bash
+cargo run -- vm dump install-os > vm.yaml
+cargo run -- vm dump install-os -o vm.yaml
 cargo run -- vm apply -f vm.yaml
 cargo run -- vm apply -f vm.yaml --dry-run
 ```
 
-`vm apply` updates the persistent libvirt domain definition. If the VM is already running, changes take effect on the next start. Relative paths are resolved from the YAML file directory. Use `--dry-run` to print the libvirt domain XML diff without applying it.
+`vm dump` writes the supported VM fields from the inactive libvirt domain XML. `vm apply` updates the persistent libvirt domain definition. If the VM is already running, changes take effect on the next start. Relative paths are resolved from the YAML file directory. Use `--dry-run` to print the libvirt domain XML diff without applying it.
 
 Run commands through QEMU Guest Agent after the guest boots:
 
