@@ -217,6 +217,9 @@ pub enum VmCommand {
     #[command(about = "Print the VNC endpoint for a running VM")]
     Vnc(VmNameArgs),
 
+    #[command(about = "Run a shell command through QEMU Guest Agent")]
+    Exec(VmExecArgs),
+
     #[command(about = "Wait until a VM shuts down")]
     WaitShutdown(VmNameArgs),
 
@@ -279,6 +282,10 @@ pub struct VmCreateArgs {
     #[arg(long)]
     pub vnc_port: Option<u16>,
 
+    /// Host file that receives guest serial console output.
+    #[arg(long)]
+    pub serial_log: Option<PathBuf>,
+
     /// Libvirt network attached to the VM.
     #[arg(long, default_value = "default")]
     pub network: String,
@@ -306,6 +313,24 @@ pub struct VmNameArgs {
     /// Libvirt connection URI.
     #[arg(long, default_value = "qemu:///system")]
     pub connect_uri: String,
+}
+
+#[derive(Debug, Args)]
+pub struct VmExecArgs {
+    /// Libvirt domain name.
+    pub name: String,
+
+    /// Seconds to wait for QEMU Guest Agent and command completion.
+    #[arg(long, default_value_t = 120)]
+    pub timeout_secs: u64,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+
+    /// Shell command executed inside the guest via /bin/sh -lc.
+    #[arg(last = true, required = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Args)]

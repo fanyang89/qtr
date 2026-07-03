@@ -72,6 +72,7 @@ pub struct VmLaunchDomainSpec<'a> {
     pub vcpus: u32,
     pub system_disk: &'a Path,
     pub cdrom: Option<&'a Path>,
+    pub serial_log: Option<&'a Path>,
     pub boot_devices: &'a [BootDevice],
     pub network: &'a str,
     pub graphics: GraphicsSpec<'a>,
@@ -125,6 +126,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         .map(|device| format!("    <boot dev='{}'/>\n", device.as_xml()))
         .collect::<String>();
     let cdrom_xml = spec.cdrom.map(build_cdrom_xml).unwrap_or_default();
+    let console_xml = build_console_xml(spec.serial_log);
     let graphics_xml = build_graphics_xml(spec.graphics);
 
     format!(
@@ -154,10 +156,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>
-    <console type='pty'>
-      <target type='serial' port='0'/>
-    </console>
-{graphics_xml}  </devices>
+{console_xml}{graphics_xml}  </devices>
 </domain>
 "#,
         name = escape_xml(spec.name),
@@ -167,6 +166,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         system_disk = escape_xml(&spec.system_disk.display().to_string()),
         network = escape_xml(spec.network),
         cdrom_xml = cdrom_xml,
+        console_xml = console_xml,
         graphics_xml = graphics_xml,
     )
 }
@@ -182,6 +182,24 @@ fn build_cdrom_xml(path: &Path) -> String {
 "#,
         path = escape_xml(&path.display().to_string()),
     )
+}
+
+fn build_console_xml(serial_log: Option<&Path>) -> String {
+    match serial_log {
+        Some(path) => format!(
+            r#"    <console type='file'>
+      <source path='{path}'/>
+      <target type='serial' port='0'/>
+    </console>
+"#,
+            path = escape_xml(&path.display().to_string()),
+        ),
+        None => r#"    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+"#
+        .to_string(),
+    }
 }
 
 fn build_graphics_xml(spec: GraphicsSpec<'_>) -> String {

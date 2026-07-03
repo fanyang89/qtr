@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     env,
+    io::{self, Write},
     net::IpAddr,
     path::{Path, PathBuf},
     process::Command,
@@ -13,11 +14,12 @@ use virt::{connect::Connect, domain::Domain, error::clear_error_callback, sys};
 
 use crate::{
     config::{
-        DiskFormat, GraphicsMode, VmArgs, VmCommand, VmCreateArgs, VmLaunchArgs, VmListArgs,
-        VmNameArgs, VmShutdownArgs,
+        DiskFormat, GraphicsMode, VmArgs, VmCommand, VmCreateArgs, VmExecArgs, VmLaunchArgs,
+        VmListArgs, VmNameArgs, VmShutdownArgs,
     },
     disk,
     domain_xml::{self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml},
+    guest_agent,
 };
 
 pub fn run(args: VmArgs) -> Result<()> {
@@ -29,6 +31,7 @@ pub fn run(args: VmArgs) -> Result<()> {
         VmCommand::Launch(args) => launch(args),
         VmCommand::Start(args) => start(args),
         VmCommand::Vnc(args) => vnc(args),
+        VmCommand::Exec(args) => exec(args),
         VmCommand::WaitShutdown(args) => wait_shutdown_command(args),
         VmCommand::Shutdown(args) => shutdown(args),
         VmCommand::Destroy(args) => destroy(args),
@@ -95,7 +98,13 @@ fn domain_state_name(state: sys::virDomainState) -> &'static str {
 
 fn create(mut args: VmCreateArgs) -> Result<Domain> {
     normalize_create_args(&mut args)?;
-    create_normalized(args)
+    let serial_log = args.serial_log.clone();
+    let domain = create_normalized(args)?;
+    if let Some(serial_log) = serial_log {
+        eprintln!("[qtr] serial log: {}", serial_log.display());
+    }
+
+    Ok(domain)
 }
 
 fn create_normalized(args: VmCreateArgs) -> Result<Domain> {
@@ -113,6 +122,7 @@ fn create_normalized(args: VmCreateArgs) -> Result<Domain> {
         vcpus: args.vcpus,
         system_disk: &args.system_disk,
         cdrom: args.cdrom.as_deref(),
+        serial_log: args.serial_log.as_deref(),
         boot_devices: &boot_devices,
         network: &args.network,
         graphics: GraphicsSpec {
@@ -145,6 +155,7 @@ fn launch(mut args: VmLaunchArgs) -> Result<()> {
     if graphics == GraphicsMode::Vnc {
         print_vnc_endpoint(&domain, &vnc_listen)?;
     }
+    print_serial_log(&domain)?;
 
     if wait {
         eprintln!("[qtr] waiting for guest shutdown...");
@@ -165,6 +176,7 @@ fn start(args: VmNameArgs) -> Result<()> {
     start_domain(&domain, &args.name)?;
 
     print_vnc_endpoint(&domain, "127.0.0.1")?;
+    print_serial_log(&domain)?;
 
     Ok(())
 }
@@ -186,6 +198,38 @@ fn vnc(args: VmNameArgs) -> Result<()> {
         )
     })?;
     println!("{endpoint}");
+
+    Ok(())
+}
+
+fn exec(args: VmExecArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {} state", args.name))?
+    {
+        bail!("domain {} is not active", args.name);
+    }
+
+    let timeout = Duration::from_secs(args.timeout_secs);
+    guest_agent::wait_ready(&domain, timeout)
+        .with_context(|| format!("guest agent is not ready for domain {}", args.name))?;
+
+    let command = args.command.join(" ");
+    let result = guest_agent::run_command(&domain, &command, timeout)
+        .with_context(|| format!("failed to run guest command in domain {}", args.name))?;
+
+    io::stdout()
+        .write_all(&result.stdout)
+        .context("failed to write guest stdout")?;
+    io::stderr()
+        .write_all(&result.stderr)
+        .context("failed to write guest stderr")?;
+
+    if result.exitcode != 0 {
+        bail!("guest command exited with {}", result.exitcode);
+    }
 
     Ok(())
 }
@@ -300,8 +344,27 @@ fn prepare_system_disk(args: &VmCreateArgs) -> Result<()> {
     }
 }
 
+fn prepare_serial_log(args: &VmCreateArgs) -> Result<()> {
+    let Some(path) = &args.serial_log else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+
+    Ok(())
+}
+
 fn normalize_create_args(args: &mut VmCreateArgs) -> Result<()> {
     args.system_disk = absolute_path(&args.system_disk)?;
+
+    let serial_log = args
+        .serial_log
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!(".tmp/logs/{}.serial.log", args.name)));
+    args.serial_log = Some(absolute_path(&serial_log)?);
 
     if let Some(cdrom) = &args.cdrom {
         let cdrom = absolute_path(cdrom)?;
@@ -310,6 +373,8 @@ fn normalize_create_args(args: &mut VmCreateArgs) -> Result<()> {
         }
         args.cdrom = Some(cdrom);
     }
+
+    prepare_serial_log(args)?;
 
     Ok(())
 }
@@ -361,6 +426,32 @@ fn query_vnc_endpoint_spec(domain: &Domain, fallback_listen: &str) -> Result<Opt
         .get_xml_desc(0)
         .context("failed to query domain XML")?;
     Ok(parse_vnc_endpoint(&xml, fallback_listen))
+}
+
+fn print_serial_log(domain: &Domain) -> Result<()> {
+    if let Some(path) = query_serial_log(domain)? {
+        eprintln!("[qtr] serial log: {path}");
+    }
+
+    Ok(())
+}
+
+fn query_serial_log(domain: &Domain) -> Result<Option<String>> {
+    let xml = domain
+        .get_xml_desc(0)
+        .context("failed to query domain XML")?;
+    Ok(parse_serial_log(&xml))
+}
+
+fn parse_serial_log(xml: &str) -> Option<String> {
+    let console_start = xml.find("<console type='file'")?;
+    let console_xml = &xml[console_start..];
+    let console_end = console_xml.find("</console>")?;
+    let console_xml = &console_xml[..console_end];
+    let source_start = console_xml.find("<source ")?;
+    let source_xml = &console_xml[source_start..];
+    let source_end = source_xml.find('>')?;
+    parse_attr(&source_xml[..source_end], "path")
 }
 
 #[derive(Debug)]
