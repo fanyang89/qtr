@@ -1,4 +1,5 @@
 mod config;
+mod disk;
 mod domain_xml;
 mod guest_agent;
 mod matrix;
@@ -13,6 +14,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Disk(args) => disk::run(args),
         Command::Run(args) => runner::run(args),
         Command::Vm(args) => vm::run(args),
     }

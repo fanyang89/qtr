@@ -2,7 +2,6 @@ use std::{
     fs,
     io::{self, Write},
     path::Path,
-    process::Command,
     time::Duration,
 };
 
@@ -11,7 +10,8 @@ use uuid::Uuid;
 use virt::{connect::Connect, domain::Domain, error::clear_error_callback};
 
 use crate::{
-    config::RunArgs,
+    config::{DiskFormat, RunArgs},
+    disk,
     domain_xml::{self, DomainSpec},
     guest_agent,
     matrix::{self, TestCase},
@@ -63,8 +63,8 @@ fn run_case(
     let system_disk = run_dir.join(format!("{}-system.qcow2", case.name));
     let data_disk = data_run_dir.join(format!("{}-data.raw", case.name));
 
-    create_system_overlay(&args.system_base_image, &system_disk)?;
-    create_data_disk(&data_disk, &args.data_disk_size)?;
+    disk::create_overlay(&system_disk, &args.system_base_image, DiskFormat::Qcow2)?;
+    disk::create_image(&data_disk, DiskFormat::Raw, &args.data_disk_size)?;
 
     let xml = domain_xml::build_domain_xml(DomainSpec {
         name: &domain_name,
@@ -129,49 +129,6 @@ fn run_defined_domain(
         eprintln!("[qtr] failed case: {} exit={}", case.name, result.exitcode);
         Err(anyhow!("guest test exited with {}", result.exitcode))
     }
-}
-
-fn create_system_overlay(base_image: &Path, output: &Path) -> Result<()> {
-    let status = Command::new("qemu-img")
-        .arg("create")
-        .arg("-f")
-        .arg("qcow2")
-        .arg("-F")
-        .arg("qcow2")
-        .arg("-b")
-        .arg(base_image)
-        .arg(output)
-        .status()
-        .with_context(|| format!("failed to run qemu-img for {}", output.display()))?;
-
-    if !status.success() {
-        bail!(
-            "qemu-img failed to create system overlay {}",
-            output.display()
-        );
-    }
-
-    Ok(())
-}
-
-fn create_data_disk(output: &Path, size: &str) -> Result<()> {
-    let status = Command::new("qemu-img")
-        .arg("create")
-        .arg("-f")
-        .arg("raw")
-        .arg(output)
-        .arg(size)
-        .status()
-        .with_context(|| format!("failed to run qemu-img for {}", output.display()))?;
-
-    if !status.success() {
-        bail!(
-            "qemu-img failed to create raw data disk {}",
-            output.display()
-        );
-    }
-
-    Ok(())
 }
 
 fn cleanup_domain(domain: &Domain, domain_name: &str) {

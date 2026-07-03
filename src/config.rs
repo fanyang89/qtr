@@ -11,11 +11,65 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(about = "Create virtual disk images")]
+    Disk(DiskArgs),
+
     #[command(about = "Run disk matrix cases serially in temporary QEMU guests")]
     Run(RunArgs),
 
     #[command(about = "Manage regular QEMU virtual machines")]
     Vm(VmArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DiskArgs {
+    #[command(subcommand)]
+    pub command: DiskCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DiskCommand {
+    #[command(about = "Create a new raw or qcow2 disk")]
+    Create(DiskCreateArgs),
+
+    #[command(about = "Create a qcow2 overlay from a backing file")]
+    Overlay(DiskOverlayArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DiskCreateArgs {
+    /// Output disk path.
+    #[arg(long)]
+    pub path: PathBuf,
+
+    /// New disk format.
+    #[arg(long, value_enum)]
+    pub format: DiskFormat,
+
+    /// New disk size, for example 100G.
+    #[arg(long)]
+    pub size: String,
+}
+
+#[derive(Debug, Args)]
+pub struct DiskOverlayArgs {
+    /// Output qcow2 overlay path.
+    #[arg(long)]
+    pub path: PathBuf,
+
+    /// Backing image read by the overlay.
+    #[arg(long)]
+    pub backing_file: PathBuf,
+
+    /// Backing image format.
+    #[arg(long, value_enum, default_value_t = DiskFormat::Qcow2)]
+    pub backing_format: DiskFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiskFormat {
+    Raw,
+    Qcow2,
 }
 
 #[derive(Debug, Args)]

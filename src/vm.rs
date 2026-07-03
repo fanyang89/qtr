@@ -1,12 +1,14 @@
-use std::{fs, path::Path, process::Command, thread, time::Duration};
+use std::{thread, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use virt::{connect::Connect, domain::Domain, error::clear_error_callback};
 
 use crate::{
     config::{
-        GraphicsMode, VmArgs, VmCommand, VmCreateArgs, VmLaunchArgs, VmNameArgs, VmShutdownArgs,
+        DiskFormat, GraphicsMode, VmArgs, VmCommand, VmCreateArgs, VmLaunchArgs, VmNameArgs,
+        VmShutdownArgs,
     },
+    disk,
     domain_xml::{self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml},
 };
 
@@ -213,7 +215,7 @@ fn start_domain(domain: &Domain, name: &str) -> Result<()> {
 
 fn prepare_system_disk(args: &VmCreateArgs) -> Result<()> {
     match &args.create_system_disk {
-        Some(size) => create_system_disk(&args.system_disk, size),
+        Some(size) => disk::create_image(&args.system_disk, DiskFormat::Qcow2, size),
         None => {
             if !args.system_disk.exists() {
                 bail!(
@@ -224,32 +226,6 @@ fn prepare_system_disk(args: &VmCreateArgs) -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn create_system_disk(output: &Path, size: &str) -> Result<()> {
-    if output.exists() {
-        bail!("system disk {} already exists", output.display());
-    }
-
-    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    }
-
-    let status = Command::new("qemu-img")
-        .arg("create")
-        .arg("-f")
-        .arg("qcow2")
-        .arg(output)
-        .arg(size)
-        .status()
-        .with_context(|| format!("failed to run qemu-img for {}", output.display()))?;
-
-    if !status.success() {
-        bail!("qemu-img failed to create system disk {}", output.display());
-    }
-
-    Ok(())
 }
 
 fn default_boot_order(args: &VmCreateArgs) -> String {
