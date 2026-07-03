@@ -89,7 +89,18 @@ function VmRow({ vm, onAction }: { vm: VmSummary; onAction: (name: string, actio
       </TableCell>
       <TableCell><Badge variant={vm.state === 'running' ? 'default' : 'secondary'}>{vm.state}</Badge></TableCell>
       <TableCell>{vm.id ?? '-'}</TableCell>
-      <TableCell>{vm.vnc ? vm.vncEndpoint ?? 'enabled' : 'disabled'}</TableCell>
+      <TableCell>
+        {vm.vnc ? (
+          <Button variant='outline' size='sm' asChild>
+            <Link to='/vms/$name/console' params={{ name: vm.name }}>
+              <MonitorPlay className='size-4' />
+              Console
+            </Link>
+          </Button>
+        ) : (
+          'disabled'
+        )}
+      </TableCell>
       <TableCell className='max-w-64 truncate'>{vm.serialLog ?? '-'}</TableCell>
       <TableCell>
         <DropdownMenu>

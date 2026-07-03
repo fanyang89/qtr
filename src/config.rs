@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,9 @@ pub enum Command {
     #[command(about = "Configure host prerequisites")]
     Host(HostArgs),
 
+    #[command(about = "Manage external storage backends")]
+    Storage(StorageArgs),
+
     #[command(about = "Manage libvirt virtual networks")]
     Net(NetArgs),
 
@@ -26,6 +29,24 @@ pub enum Command {
 
     #[command(about = "Manage regular QEMU virtual machines")]
     Vm(VmArgs),
+
+    #[command(about = "Serve the qtr Web UI and API")]
+    Web(WebArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WebArgs {
+    /// HTTP listen address.
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    pub listen: SocketAddr,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+
+    /// Directory containing the built Web UI assets.
+    #[arg(long, default_value = "web/dist")]
+    pub web_dir: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -120,6 +141,79 @@ pub struct SetupLibvirtAccessArgs {
     /// Print actions without changing the host.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StorageArgs {
+    /// Storage state file.
+    #[arg(long, default_value = ".qtr/storage.yaml")]
+    pub config: PathBuf,
+
+    #[command(subcommand)]
+    pub command: StorageCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StorageCommand {
+    #[command(about = "Print host storage prerequisites")]
+    Status,
+
+    #[command(about = "Register a storage backend")]
+    Add(StorageAddArgs),
+
+    #[command(about = "List registered storage backends")]
+    List,
+
+    #[command(about = "Scan a storage backend for volumes")]
+    Scan(StorageBackendArgs),
+
+    #[command(about = "List volumes from a storage backend")]
+    Volumes(StorageBackendArgs),
+
+    #[command(about = "Connect a storage volume to the host")]
+    Connect(StorageVolumeArgs),
+
+    #[command(about = "Disconnect a storage volume from the host")]
+    Disconnect(StorageVolumeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StorageAddArgs {
+    #[command(subcommand)]
+    pub command: StorageAddCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StorageAddCommand {
+    #[command(about = "Register an iSCSI storage backend")]
+    Iscsi(StorageAddIscsiArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StorageAddIscsiArgs {
+    /// Backend name shown by qtr.
+    #[arg(long)]
+    pub name: String,
+
+    /// Storage service address.
+    #[arg(long)]
+    pub address: String,
+
+    /// Storage service port.
+    #[arg(long, default_value_t = 3260)]
+    pub port: u16,
+}
+
+#[derive(Debug, Args)]
+pub struct StorageBackendArgs {
+    /// Backend name.
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct StorageVolumeArgs {
+    /// Volume reference, for example backend/volume.
+    pub volume: String,
 }
 
 #[derive(Debug, Args)]

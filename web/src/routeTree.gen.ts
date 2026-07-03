@@ -18,7 +18,8 @@ import { Route as errors404RouteImport } from './routes/(errors)/404'
 import { Route as errors403RouteImport } from './routes/(errors)/403'
 import { Route as errors401RouteImport } from './routes/(errors)/401'
 import { Route as AuthenticatedVmsIndexRouteImport } from './routes/_authenticated/vms/index'
-import { Route as AuthenticatedVmsNameRouteImport } from './routes/_authenticated/vms/$name'
+import { Route as AuthenticatedVmsNameRouteRouteImport } from './routes/_authenticated/vms/$name/route'
+import { Route as AuthenticatedVmsNameIndexRouteImport } from './routes/_authenticated/vms/$name/index'
 import { Route as AuthenticatedVmsNameConsoleRouteImport } from './routes/_authenticated/vms/$name/console'
 
 const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
@@ -65,16 +66,23 @@ const AuthenticatedVmsIndexRoute = AuthenticatedVmsIndexRouteImport.update({
   path: '/vms/',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
-const AuthenticatedVmsNameRoute = AuthenticatedVmsNameRouteImport.update({
-  id: '/vms/$name',
-  path: '/vms/$name',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
+const AuthenticatedVmsNameRouteRoute =
+  AuthenticatedVmsNameRouteRouteImport.update({
+    id: '/vms/$name',
+    path: '/vms/$name',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedVmsNameIndexRoute =
+  AuthenticatedVmsNameIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => AuthenticatedVmsNameRouteRoute,
+  } as any)
 const AuthenticatedVmsNameConsoleRoute =
   AuthenticatedVmsNameConsoleRouteImport.update({
     id: '/console',
     path: '/console',
-    getParentRoute: () => AuthenticatedVmsNameRoute,
+    getParentRoute: () => AuthenticatedVmsNameRouteRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
@@ -85,9 +93,10 @@ export interface FileRoutesByFullPath {
   '/500': typeof errors500Route
   '/503': typeof errors503Route
   '/settings': typeof AuthenticatedSettingsRoute
-  '/vms/$name': typeof AuthenticatedVmsNameRouteWithChildren
+  '/vms/$name': typeof AuthenticatedVmsNameRouteRouteWithChildren
   '/vms/': typeof AuthenticatedVmsIndexRoute
   '/vms/$name/console': typeof AuthenticatedVmsNameConsoleRoute
+  '/vms/$name/': typeof AuthenticatedVmsNameIndexRoute
 }
 export interface FileRoutesByTo {
   '/401': typeof errors401Route
@@ -97,9 +106,9 @@ export interface FileRoutesByTo {
   '/503': typeof errors503Route
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
-  '/vms/$name': typeof AuthenticatedVmsNameRouteWithChildren
   '/vms': typeof AuthenticatedVmsIndexRoute
   '/vms/$name/console': typeof AuthenticatedVmsNameConsoleRoute
+  '/vms/$name': typeof AuthenticatedVmsNameIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -111,9 +120,10 @@ export interface FileRoutesById {
   '/(errors)/503': typeof errors503Route
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
-  '/_authenticated/vms/$name': typeof AuthenticatedVmsNameRouteWithChildren
+  '/_authenticated/vms/$name': typeof AuthenticatedVmsNameRouteRouteWithChildren
   '/_authenticated/vms/': typeof AuthenticatedVmsIndexRoute
   '/_authenticated/vms/$name/console': typeof AuthenticatedVmsNameConsoleRoute
+  '/_authenticated/vms/$name/': typeof AuthenticatedVmsNameIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -128,6 +138,7 @@ export interface FileRouteTypes {
     | '/vms/$name'
     | '/vms/'
     | '/vms/$name/console'
+    | '/vms/$name/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/401'
@@ -137,9 +148,9 @@ export interface FileRouteTypes {
     | '/503'
     | '/settings'
     | '/'
-    | '/vms/$name'
     | '/vms'
     | '/vms/$name/console'
+    | '/vms/$name'
   id:
     | '__root__'
     | '/_authenticated'
@@ -153,6 +164,7 @@ export interface FileRouteTypes {
     | '/_authenticated/vms/$name'
     | '/_authenticated/vms/'
     | '/_authenticated/vms/$name/console'
+    | '/_authenticated/vms/$name/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -233,41 +245,53 @@ declare module '@tanstack/react-router' {
       id: '/_authenticated/vms/$name'
       path: '/vms/$name'
       fullPath: '/vms/$name'
-      preLoaderRoute: typeof AuthenticatedVmsNameRouteImport
+      preLoaderRoute: typeof AuthenticatedVmsNameRouteRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/vms/$name/': {
+      id: '/_authenticated/vms/$name/'
+      path: '/'
+      fullPath: '/vms/$name/'
+      preLoaderRoute: typeof AuthenticatedVmsNameIndexRouteImport
+      parentRoute: typeof AuthenticatedVmsNameRouteRoute
     }
     '/_authenticated/vms/$name/console': {
       id: '/_authenticated/vms/$name/console'
       path: '/console'
       fullPath: '/vms/$name/console'
       preLoaderRoute: typeof AuthenticatedVmsNameConsoleRouteImport
-      parentRoute: typeof AuthenticatedVmsNameRoute
+      parentRoute: typeof AuthenticatedVmsNameRouteRoute
     }
   }
 }
 
-interface AuthenticatedVmsNameRouteChildren {
+interface AuthenticatedVmsNameRouteRouteChildren {
   AuthenticatedVmsNameConsoleRoute: typeof AuthenticatedVmsNameConsoleRoute
+  AuthenticatedVmsNameIndexRoute: typeof AuthenticatedVmsNameIndexRoute
 }
 
-const AuthenticatedVmsNameRouteChildren: AuthenticatedVmsNameRouteChildren = {
-  AuthenticatedVmsNameConsoleRoute: AuthenticatedVmsNameConsoleRoute,
-}
+const AuthenticatedVmsNameRouteRouteChildren: AuthenticatedVmsNameRouteRouteChildren =
+  {
+    AuthenticatedVmsNameConsoleRoute: AuthenticatedVmsNameConsoleRoute,
+    AuthenticatedVmsNameIndexRoute: AuthenticatedVmsNameIndexRoute,
+  }
 
-const AuthenticatedVmsNameRouteWithChildren =
-  AuthenticatedVmsNameRoute._addFileChildren(AuthenticatedVmsNameRouteChildren)
+const AuthenticatedVmsNameRouteRouteWithChildren =
+  AuthenticatedVmsNameRouteRoute._addFileChildren(
+    AuthenticatedVmsNameRouteRouteChildren,
+  )
 
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
-  AuthenticatedVmsNameRoute: typeof AuthenticatedVmsNameRouteWithChildren
+  AuthenticatedVmsNameRouteRoute: typeof AuthenticatedVmsNameRouteRouteWithChildren
   AuthenticatedVmsIndexRoute: typeof AuthenticatedVmsIndexRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
-  AuthenticatedVmsNameRoute: AuthenticatedVmsNameRouteWithChildren,
+  AuthenticatedVmsNameRouteRoute: AuthenticatedVmsNameRouteRouteWithChildren,
   AuthenticatedVmsIndexRoute: AuthenticatedVmsIndexRoute,
 }
 

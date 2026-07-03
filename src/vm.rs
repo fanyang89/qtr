@@ -70,6 +70,20 @@ struct VmManifest {
     serial_log: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmSummary {
+    pub name: String,
+    pub state: &'static str,
+    pub id: Option<String>,
+    pub vnc: bool,
+    pub vnc_endpoint: Option<String>,
+    pub serial_log: Option<String>,
+    pub memory_mib: Option<u64>,
+    pub vcpus: Option<u32>,
+    pub network: Option<String>,
+}
+
 fn default_vm_memory_gib() -> u64 {
     4
 }
@@ -886,7 +900,7 @@ fn manifest_boot_order(manifest: &VmManifest) -> String {
 }
 
 fn list(args: VmListArgs) -> Result<()> {
-    let conn = connect(&args.connect_uri)?;
+    let conn = connect_read_only(&args.connect_uri)?;
     let flags = sys::VIR_CONNECT_LIST_DOMAINS_ACTIVE | sys::VIR_CONNECT_LIST_DOMAINS_INACTIVE;
     let mut rows = conn
         .list_all_domains(flags)
@@ -903,6 +917,69 @@ fn list(args: VmListArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn list_summaries(connect_uri: &str) -> Result<Vec<VmSummary>> {
+    let conn = connect_read_only(connect_uri)?;
+    let flags = sys::VIR_CONNECT_LIST_DOMAINS_ACTIVE | sys::VIR_CONNECT_LIST_DOMAINS_INACTIVE;
+    let mut summaries = conn
+        .list_all_domains(flags)
+        .context("failed to list domains")?
+        .into_iter()
+        .map(|domain| domain_summary(&domain))
+        .collect::<Result<Vec<_>>>()?;
+
+    summaries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(summaries)
+}
+
+pub fn get_summary(connect_uri: &str, name: &str) -> Result<VmSummary> {
+    let conn = connect_read_only(connect_uri)?;
+    let domain = lookup_domain(&conn, name)?;
+    domain_summary(&domain)
+}
+
+fn domain_summary(domain: &Domain) -> Result<VmSummary> {
+    let name = domain.get_name().context("failed to query domain name")?;
+    let (state, _) = domain
+        .get_state()
+        .with_context(|| format!("failed to query domain {name} state"))?;
+    let id = domain.get_id().map(|id| id.to_string());
+    let xml = domain
+        .get_xml_desc(0)
+        .with_context(|| format!("failed to query domain {name} XML"))?;
+    let vnc = xml.contains("<graphics type='vnc'") || xml.contains("<graphics type=\"vnc\"");
+    let vnc_endpoint = parse_vnc_endpoint(&xml, "127.0.0.1").map(|endpoint| endpoint.display());
+    let serial_log = parse_serial_log(&xml);
+    let (memory_mib, vcpus, network) = parse_summary_resources(&xml);
+
+    Ok(VmSummary {
+        name,
+        state: domain_state_name(state),
+        id,
+        vnc,
+        vnc_endpoint,
+        serial_log,
+        memory_mib,
+        vcpus,
+        network,
+    })
+}
+
+fn parse_summary_resources(xml: &str) -> (Option<u64>, Option<u32>, Option<String>) {
+    let Ok(doc) = Document::parse(xml) else {
+        return (None, None, None);
+    };
+    let domain = doc.root_element();
+    let memory = memory_mib(domain).ok();
+    let vcpus = required_child_text(domain, "vcpu")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    let network = required_child(domain, "devices")
+        .ok()
+        .and_then(|devices| network_name(devices).ok());
+
+    (memory, vcpus, network)
 }
 
 struct DomainListRow {
@@ -1150,6 +1227,76 @@ fn undefine(args: VmNameArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn start_by_name(connect_uri: &str, name: &str) -> Result<()> {
+    let conn = connect(connect_uri)?;
+    let domain = lookup_domain(&conn, name)?;
+    start_domain(&domain, name)
+}
+
+pub fn shutdown_by_name(connect_uri: &str, name: &str, wait: bool) -> Result<()> {
+    let conn = connect(connect_uri)?;
+    let domain = lookup_domain(&conn, name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))?
+    {
+        return Ok(());
+    }
+
+    domain
+        .shutdown()
+        .with_context(|| format!("failed to request shutdown for domain {name}"))?;
+    if wait {
+        wait_shutdown_domain(&domain, name)?;
+    }
+
+    Ok(())
+}
+
+pub fn destroy_by_name(connect_uri: &str, name: &str) -> Result<()> {
+    let conn = connect(connect_uri)?;
+    let domain = lookup_domain(&conn, name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))?
+    {
+        return Ok(());
+    }
+
+    domain
+        .destroy()
+        .with_context(|| format!("failed to destroy domain {name}"))
+}
+
+pub fn undefine_by_name(connect_uri: &str, name: &str) -> Result<()> {
+    let conn = connect(connect_uri)?;
+    let domain = lookup_domain(&conn, name)?;
+    if domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))?
+    {
+        bail!("domain {name} is active; shutdown or destroy it first");
+    }
+
+    domain
+        .undefine()
+        .with_context(|| format!("failed to undefine domain {name}"))
+}
+
+pub fn vnc_endpoint_by_name(connect_uri: &str, name: &str) -> Result<VncEndpoint> {
+    let conn = connect_read_only(connect_uri)?;
+    let domain = lookup_domain(&conn, name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))?
+    {
+        bail!("domain {name} is not active");
+    }
+
+    query_vnc_endpoint_spec(&domain, "127.0.0.1")?
+        .with_context(|| format!("domain {name} does not expose an active VNC endpoint"))
+}
+
 fn connect(uri: &str) -> Result<Connect> {
     Connect::open(Some(uri)).with_context(|| format!("failed to connect to libvirt at {uri}"))
 }
@@ -1306,15 +1453,29 @@ fn parse_serial_log(xml: &str) -> Option<String> {
     parse_attr(&source_xml[..source_end], "path")
 }
 
-#[derive(Debug)]
-struct VncEndpoint {
-    listen: String,
-    port: String,
+#[derive(Clone, Debug)]
+pub struct VncEndpoint {
+    pub listen: String,
+    pub port: String,
 }
 
 impl VncEndpoint {
-    fn display(&self) -> String {
+    pub fn display(&self) -> String {
         format_endpoint(&self.listen, &self.port)
+    }
+
+    pub fn connect_host(&self) -> &str {
+        match self.listen.as_str() {
+            "0.0.0.0" => "127.0.0.1",
+            "::" => "::1",
+            host => host,
+        }
+    }
+
+    pub fn port_number(&self) -> Result<u16> {
+        self.port
+            .parse()
+            .with_context(|| format!("failed to parse VNC port {}", self.port))
     }
 
     fn is_wildcard(&self) -> bool {

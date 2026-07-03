@@ -8,6 +8,7 @@ Fedora:
 
 ```bash
 sudo dnf install \
+  iscsi-initiator-utils \
   libvirt-client \
   libvirt-daemon \
   libvirt-daemon-driver-qemu \
@@ -25,6 +26,7 @@ The important libvirt pieces are:
 - `libvirt-daemon-config-network`: provides the default libvirt NAT network config.
 - `libvirt-daemon-kvm`: pulls in the KVM/QEMU daemon integration.
 - `libvirt-devel`: required to build the Rust `virt` bindings.
+- `iscsi-initiator-utils`: provides `iscsid` and `iscsiadm` for external block storage.
 
 Start libvirt:
 
@@ -60,6 +62,33 @@ qemu:///system
 ```
 
 If `virsh` reports `no connection driver available for qemu:///system`, install `libvirt-daemon-driver-qemu` and restart `libvirtd`.
+
+## External Storage
+
+qtr exposes external storage as backends and volumes. iSCSI protocol details are handled internally by the storage driver.
+
+Check host storage prerequisites:
+
+```bash
+cargo run -- storage status
+```
+
+Register and scan an iSCSI-backed storage service:
+
+```bash
+cargo run -- storage add iscsi --name lab-san --address 10.0.0.10
+cargo run -- storage scan lab-san
+cargo run -- storage volumes lab-san
+```
+
+Connect or disconnect a discovered volume:
+
+```bash
+cargo run -- storage connect lab-san/db-data-01
+cargo run -- storage disconnect lab-san/db-data-01
+```
+
+Storage state is written to `.qtr/storage.yaml` by default. Use `--config` to choose another state file.
 
 ## Minimal VM Launch
 
