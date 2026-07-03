@@ -1,6 +1,9 @@
 use std::{
+    collections::BTreeSet,
     env,
+    net::IpAddr,
     path::{Path, PathBuf},
+    process::Command,
     thread,
     time::Duration,
 };
@@ -161,9 +164,7 @@ fn start(args: VmNameArgs) -> Result<()> {
     let domain = lookup_domain(&conn, &args.name)?;
     start_domain(&domain, &args.name)?;
 
-    if let Some(endpoint) = query_vnc_endpoint(&domain, "127.0.0.1")? {
-        eprintln!("[qtr] VNC: {endpoint}");
-    }
+    print_vnc_endpoint(&domain, "127.0.0.1")?;
 
     Ok(())
 }
@@ -332,8 +333,19 @@ fn default_boot_order(args: &VmCreateArgs) -> String {
 }
 
 fn print_vnc_endpoint(domain: &Domain, fallback_listen: &str) -> Result<()> {
-    match query_vnc_endpoint(domain, fallback_listen)? {
-        Some(endpoint) => eprintln!("[qtr] VNC: {endpoint}"),
+    match query_vnc_endpoint_spec(domain, fallback_listen)? {
+        Some(endpoint) => {
+            eprintln!("[qtr] VNC: {}", endpoint.display());
+            if endpoint.is_wildcard() {
+                let endpoints = local_vnc_endpoints(&endpoint.port);
+                if !endpoints.is_empty() {
+                    eprintln!("[qtr] VNC endpoints:");
+                    for endpoint in endpoints {
+                        eprintln!("[qtr]   {endpoint}");
+                    }
+                }
+            }
+        }
         None => eprintln!("[qtr] VNC: enabled, but port was not found in domain XML"),
     }
 
@@ -341,13 +353,33 @@ fn print_vnc_endpoint(domain: &Domain, fallback_listen: &str) -> Result<()> {
 }
 
 fn query_vnc_endpoint(domain: &Domain, fallback_listen: &str) -> Result<Option<String>> {
+    Ok(query_vnc_endpoint_spec(domain, fallback_listen)?.map(|endpoint| endpoint.display()))
+}
+
+fn query_vnc_endpoint_spec(domain: &Domain, fallback_listen: &str) -> Result<Option<VncEndpoint>> {
     let xml = domain
         .get_xml_desc(0)
         .context("failed to query domain XML")?;
     Ok(parse_vnc_endpoint(&xml, fallback_listen))
 }
 
-fn parse_vnc_endpoint(xml: &str, fallback_listen: &str) -> Option<String> {
+#[derive(Debug)]
+struct VncEndpoint {
+    listen: String,
+    port: String,
+}
+
+impl VncEndpoint {
+    fn display(&self) -> String {
+        format_endpoint(&self.listen, &self.port)
+    }
+
+    fn is_wildcard(&self) -> bool {
+        matches!(self.listen.as_str(), "0.0.0.0" | "::")
+    }
+}
+
+fn parse_vnc_endpoint(xml: &str, fallback_listen: &str) -> Option<VncEndpoint> {
     let graphics_start = xml.find("<graphics type='vnc'")?;
     let graphics = &xml[graphics_start..];
     let graphics_end = graphics.find('>')?;
@@ -361,7 +393,51 @@ fn parse_vnc_endpoint(xml: &str, fallback_listen: &str) -> Option<String> {
         .or_else(|| parse_nested_listen(graphics))
         .unwrap_or_else(|| fallback_listen.to_string());
 
-    Some(format!("{listen}:{port}"))
+    Some(VncEndpoint { listen, port })
+}
+
+fn local_vnc_endpoints(port: &str) -> Vec<String> {
+    let output = match Command::new("ip").args(["-o", "addr", "show"]).output() {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    let stdout = match String::from_utf8(output.stdout) {
+        Ok(stdout) => stdout,
+        Err(_) => return Vec::new(),
+    };
+
+    let ips = stdout
+        .lines()
+        .flat_map(local_ips_from_ip_addr_line)
+        .collect();
+    format_vnc_endpoints(ips, port)
+}
+
+fn local_ips_from_ip_addr_line(line: &str) -> Vec<IpAddr> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    fields
+        .windows(2)
+        .filter_map(|window| match window {
+            ["inet" | "inet6", value] => value.split_once('/').map(|(addr, _)| addr),
+            _ => None,
+        })
+        .filter_map(|addr| addr.parse::<IpAddr>().ok())
+        .filter(|addr| !addr.is_unspecified())
+        .collect()
+}
+
+fn format_vnc_endpoints(ips: BTreeSet<IpAddr>, port: &str) -> Vec<String> {
+    ips.into_iter()
+        .map(|ip| format_endpoint(&ip.to_string(), port))
+        .collect()
+}
+
+fn format_endpoint(host: &str, port: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 fn parse_nested_listen(graphics_xml: &str) -> Option<String> {
