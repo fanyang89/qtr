@@ -1,0 +1,89 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: "3"
+
+vars:
+  DISK_PATH: /home/fanmi/workspace/qtr/.tmp/disks/vm-data.raw
+  DISK_SIZE: 20G
+  DM_NAME: burst_backend
+  VM_NAME: c7-957
+  DATA_DEVICE: /dev/vdb
+  VG_NAME: qtr_kworker
+  LV_NAME: data
+  MOUNT_POINT: /mnt/data
+  MOUNT_OPTIONS: defaults
+  READ_DELAY_MS: 0
+  WRITE_DELAY_MS: 100
+  FLUSH_DELAY_MS: 0
+  VM_EXEC_TIMEOUT_SECS: 420
+
+tasks:
+  setup:
+    desc: Set up kworker e2e resources
+    cmds:
+      - task: setup-disk
+
+  teardown:
+    desc: Tear down kworker e2e resources
+    cmds:
+      - task: teardown-disk
+
+  prepare-vm-filesystem:
+    desc: Prepare the kworker e2e guest filesystem
+    cmds:
+      - qtr vm exec {{.VM_NAME}} -- "if mountpoint -q {{.MOUNT_POINT}}; then sudo umount {{.MOUNT_POINT}}; fi"
+      - qtr vm exec {{.VM_NAME}} -- "if sudo vgs --noheadings {{.VG_NAME}} >/dev/null 2>&1; then sudo vgremove -ff -y {{.VG_NAME}}; fi"
+      - qtr vm exec {{.VM_NAME}} -- "sudo wipefs -a {{.DATA_DEVICE}}"
+      - qtr vm exec {{.VM_NAME}} -- "sudo pvcreate -ff -y {{.DATA_DEVICE}}"
+      - qtr vm exec {{.VM_NAME}} -- "sudo vgcreate {{.VG_NAME}} {{.DATA_DEVICE}}"
+      - qtr vm exec {{.VM_NAME}} -- "sudo lvcreate -y -n {{.LV_NAME}} -l 100%FREE {{.VG_NAME}}"
+      - qtr vm exec {{.VM_NAME}} -- "sudo mkfs.xfs -f /dev/{{.VG_NAME}}/{{.LV_NAME}}"
+      - qtr vm exec {{.VM_NAME}} -- "sudo mkdir -p {{.MOUNT_POINT}}"
+      - qtr vm exec {{.VM_NAME}} -- "sudo mount -o {{.MOUNT_OPTIONS}} /dev/{{.VG_NAME}}/{{.LV_NAME}} {{.MOUNT_POINT}}"
+
+  run-vm-fio:
+    desc: Run the kworker e2e fio workload
+    cmds:
+      - qtr vm exec {{.VM_NAME}} --timeout-secs {{.VM_EXEC_TIMEOUT_SECS}} --script "{{.TASKFILE_DIR}}/run-fio.sh"
+
+  setup-disk:
+    internal: true
+    cmds:
+      - mkdir -p "$(dirname "{{.DISK_PATH}}")"
+      - fallocate -l "{{.DISK_SIZE}}" "{{.DISK_PATH}}"
+      - task: setup-burst-backend
+
+  setup-burst-backend:
+    internal: true
+    vars:
+      LOOP:
+        sh: sudo losetup --find --show "{{.DISK_PATH}}"
+      SECTORS:
+        sh: sudo blockdev --getsz "{{.LOOP}}"
+    cmds:
+      # Defaults: read=0ms, write=100ms, flush=0ms
+      - echo "0 {{.SECTORS}} delay {{.LOOP}} 0 {{.READ_DELAY_MS}} {{.LOOP}} 0 {{.WRITE_DELAY_MS}} {{.LOOP}} 0 {{.FLUSH_DELAY_MS}}" | sudo dmsetup create "{{.DM_NAME}}"
+
+  teardown-disk:
+    internal: true
+    cmds:
+      - task: remove-burst-backend
+      - task: detach-vm-data-loop
+      - rm -f "{{.DISK_PATH}}"
+
+  remove-burst-backend:
+    internal: true
+    status:
+      - '! sudo dmsetup info "{{.DM_NAME}}" >/dev/null 2>&1'
+    cmds:
+      - sudo dmsetup remove "{{.DM_NAME}}"
+
+  detach-vm-data-loop:
+    internal: true
+    vars:
+      LOOP:
+        sh: 'sudo losetup -j "{{.DISK_PATH}}" | cut -d: -f1'
+    status:
+      - 'test -z "{{.LOOP}}"'
+    cmds:
+      - sudo losetup -d "{{.LOOP}}"
