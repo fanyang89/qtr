@@ -422,6 +422,10 @@ pub struct VmDumpArgs {
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
+    /// Print raw inactive libvirt domain XML instead of YAML.
+    #[arg(long)]
+    pub xml: bool,
+
     /// Libvirt connection URI.
     #[arg(long, default_value = "qemu:///system")]
     pub connect_uri: String,

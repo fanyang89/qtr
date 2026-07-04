@@ -482,9 +482,13 @@ fn disk_target(disk: &VmDisk, index: usize) -> String {
 
 fn dump(args: VmDumpArgs) -> Result<()> {
     let xml = existing_domain_xml(&args.connect_uri, &args.name)?;
-    let manifest = manifest_from_domain_xml(&xml)?;
-    let yaml = serde_yaml::to_string(&manifest)
-        .with_context(|| format!("failed to serialize VM {} as YAML", args.name))?;
+    let output = if args.xml {
+        xml
+    } else {
+        let manifest = manifest_from_domain_xml(&xml)?;
+        serde_yaml::to_string(&manifest)
+            .with_context(|| format!("failed to serialize VM {} as YAML", args.name))?
+    };
 
     match args.output {
         Some(path) => {
@@ -492,10 +496,10 @@ fn dump(args: VmDumpArgs) -> Result<()> {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("failed to create directory {}", parent.display()))?;
             }
-            fs::write(&path, yaml)
-                .with_context(|| format!("failed to write VM YAML {}", path.display()))?;
+            fs::write(&path, output)
+                .with_context(|| format!("failed to write VM dump {}", path.display()))?;
         }
-        None => print!("{yaml}"),
+        None => print!("{output}"),
     }
 
     Ok(())
