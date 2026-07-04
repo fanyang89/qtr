@@ -2,10 +2,10 @@ use std::{
     collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use duct::cmd;
 
 use crate::config::{HostArgs, HostCommand, SetupLibvirtAccessArgs};
 
@@ -177,8 +177,7 @@ fn require_root(dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let uid = command_stdout(Command::new("id").arg("-u"))?;
-    if uid.trim() != "0" {
+    if !nix::unistd::geteuid().is_root() {
         bail!("host setup requires root; run with sudo");
     }
 
@@ -186,22 +185,39 @@ fn require_root(dry_run: bool) -> Result<()> {
 }
 
 fn ensure_user_exists(user: &str) -> Result<()> {
-    run_status(Command::new("id").arg("-u").arg(user))
-        .with_context(|| format!("user {user} does not exist"))
+    cmd!("id", "-u", user)
+        .stdout_null()
+        .stderr_null()
+        .run()
+        .with_context(|| format!("user {user} does not exist"))?;
+
+    Ok(())
 }
 
 fn ensure_group_exists(group: &str) -> Result<()> {
-    run_status(Command::new("getent").arg("group").arg(group))
-        .with_context(|| format!("group {group} does not exist"))
+    cmd!("getent", "group", group)
+        .stdout_null()
+        .stderr_null()
+        .run()
+        .with_context(|| format!("group {group} does not exist"))?;
+
+    Ok(())
 }
 
 fn ensure_setfacl_exists() -> Result<()> {
-    run_status(Command::new("setfacl").arg("--version")).context("setfacl is required")
+    which::which("setfacl")
+        .map(|_| ())
+        .context("setfacl is required")
 }
 
 fn add_user_to_group(user: &str, group: &str) -> Result<()> {
-    run_status(Command::new("usermod").arg("-aG").arg(group).arg(user))
-        .with_context(|| format!("failed to add user {user} to group {group}"))
+    cmd!("usermod", "-aG", group, user)
+        .stdout_null()
+        .stderr_null()
+        .run()
+        .with_context(|| format!("failed to add user {user} to group {group}"))?;
+
+    Ok(())
 }
 
 fn write_polkit_rule(path: &Path, rule: &str) -> Result<()> {
@@ -302,8 +318,16 @@ fn print_setfacl_command(user: &str, perms: &str, path: &Path, default_acl: bool
 
 fn set_user_acl(user: &str, perms: &str, path: &Path, default_acl: bool) -> Result<()> {
     let entry = acl_entry(user, perms, default_acl);
-    run_status(Command::new("setfacl").arg("-m").arg(entry).arg(path))
-        .with_context(|| format!("failed to set qemu ACL on {}", path.display()))
+    duct::cmd(
+        "setfacl",
+        ["-m".into(), entry.into(), path.as_os_str().to_os_string()],
+    )
+    .stdout_null()
+    .stderr_null()
+    .run()
+    .with_context(|| format!("failed to set qemu ACL on {}", path.display()))?;
+
+    Ok(())
 }
 
 fn acl_entry(user: &str, perms: &str, default_acl: bool) -> String {
@@ -315,47 +339,19 @@ fn acl_entry(user: &str, perms: &str, default_acl: bool) -> String {
 }
 
 fn build_polkit_rule(group: &str) -> String {
+    let action = serde_json::to_string(LIBVIRT_MANAGE_ACTION)
+        .expect("libvirt action should serialize as JSON string");
+    let group = serde_json::to_string(group).expect("group should serialize as JSON string");
+
     format!(
         r#"polkit.addRule(function(action, subject) {{
-  if (action.id == "{action}" &&
-      subject.isInGroup("{group}")) {{
+  if (action.id == {action} &&
+      subject.isInGroup({group})) {{
     return polkit.Result.YES;
   }}
 }});
 "#,
-        action = LIBVIRT_MANAGE_ACTION,
-        group = escape_js_string(group),
+        action = action,
+        group = group,
     )
-}
-
-fn run_status(command: &mut Command) -> Result<()> {
-    let status = command
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to run {}", command_name(command)))?;
-    if !status.success() {
-        bail!("{} exited with {status}", command_name(command));
-    }
-
-    Ok(())
-}
-
-fn command_stdout(command: &mut Command) -> Result<String> {
-    let output = command
-        .output()
-        .with_context(|| format!("failed to run {}", command_name(command)))?;
-    if !output.status.success() {
-        bail!("{} exited with {}", command_name(command), output.status);
-    }
-
-    String::from_utf8(output.stdout).context("command output was not UTF-8")
-}
-
-fn command_name(command: &Command) -> String {
-    command.get_program().to_string_lossy().into_owned()
-}
-
-fn escape_js_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }

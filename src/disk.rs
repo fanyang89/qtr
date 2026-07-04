@@ -1,6 +1,6 @@
-use std::{fs, path::Path, process::Command};
+use std::{ffi::OsString, fs, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::config::{DiskArgs, DiskCommand, DiskFormat};
 
@@ -22,18 +22,18 @@ pub fn run(args: DiskArgs) -> Result<()> {
 pub fn create_image(path: &Path, format: DiskFormat, size: &str) -> Result<()> {
     prepare_output(path)?;
 
-    let status = Command::new("qemu-img")
-        .arg("create")
-        .arg("-f")
-        .arg(format.as_qemu_arg())
-        .arg(path)
-        .arg(size)
-        .status()
-        .with_context(|| format!("failed to run qemu-img for {}", path.display()))?;
-
-    if !status.success() {
-        bail!("qemu-img failed to create disk {}", path.display());
-    }
+    duct::cmd(
+        "qemu-img",
+        [
+            OsString::from("create"),
+            OsString::from("-f"),
+            OsString::from(format.as_qemu_arg()),
+            path.as_os_str().to_os_string(),
+            OsString::from(size),
+        ],
+    )
+    .run()
+    .with_context(|| format!("failed to run qemu-img for {}", path.display()))?;
 
     Ok(())
 }
@@ -45,21 +45,21 @@ pub fn create_overlay(path: &Path, backing_file: &Path, backing_format: DiskForm
 
     prepare_output(path)?;
 
-    let status = Command::new("qemu-img")
-        .arg("create")
-        .arg("-f")
-        .arg(DiskFormat::Qcow2.as_qemu_arg())
-        .arg("-F")
-        .arg(backing_format.as_qemu_arg())
-        .arg("-b")
-        .arg(backing_file)
-        .arg(path)
-        .status()
-        .with_context(|| format!("failed to run qemu-img for {}", path.display()))?;
-
-    if !status.success() {
-        bail!("qemu-img failed to create overlay {}", path.display());
-    }
+    duct::cmd(
+        "qemu-img",
+        [
+            OsString::from("create"),
+            OsString::from("-f"),
+            OsString::from(DiskFormat::Qcow2.as_qemu_arg()),
+            OsString::from("-F"),
+            OsString::from(backing_format.as_qemu_arg()),
+            OsString::from("-b"),
+            backing_file.as_os_str().to_os_string(),
+            path.as_os_str().to_os_string(),
+        ],
+    )
+    .run()
+    .with_context(|| format!("failed to run qemu-img for {}", path.display()))?;
 
     Ok(())
 }

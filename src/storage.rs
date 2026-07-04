@@ -1,10 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command as ProcessCommand, Stdio},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use duct::cmd;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
@@ -83,12 +83,14 @@ struct IscsiDevice {
 }
 
 fn status() -> Result<()> {
-    let iscsiadm = command_success(ProcessCommand::new(ISCSIADM).arg("--version"));
-    let iscsid = command_success(
-        ProcessCommand::new("systemctl")
-            .arg("is-active")
-            .arg("--quiet")
-            .arg(ISCSID_SERVICE),
+    let iscsiadm = which::which(ISCSIADM).is_ok();
+    let iscsid = matches!(
+        cmd!("systemctl", "is-active", "--quiet", ISCSID_SERVICE)
+            .stdout_null()
+            .stderr_null()
+            .unchecked()
+            .run(),
+        Ok(output) if output.status.success()
     );
 
     println!(
@@ -227,24 +229,29 @@ impl IscsiAdm {
 
     fn discover(&self, address: &str, port: u16) -> Result<Vec<IscsiNode>> {
         let endpoint = format!("{address}:{port}");
-        let output = command_stdout(
-            ProcessCommand::new(ISCSIADM)
-                .arg("-m")
-                .arg("discovery")
-                .arg("-t")
-                .arg("sendtargets")
-                .arg("-p")
-                .arg(endpoint),
-        )?;
+        let output = duct::cmd(
+            ISCSIADM,
+            [
+                "-m".to_string(),
+                "discovery".to_string(),
+                "-t".to_string(),
+                "sendtargets".to_string(),
+                "-p".to_string(),
+                endpoint,
+            ],
+        )
+        .read()
+        .context("failed to run iscsiadm")?;
 
         Ok(parse_discovery_nodes(&output))
     }
 
     fn sessions(&self) -> Result<Vec<IscsiSession>> {
-        let output = ProcessCommand::new(ISCSIADM)
-            .arg("-m")
-            .arg("session")
-            .output()
+        let output = duct::cmd(ISCSIADM, ["-m", "session"])
+            .stdout_capture()
+            .stderr_capture()
+            .unchecked()
+            .run()
             .context("failed to run iscsiadm")?;
 
         if !output.status.success() {
@@ -260,29 +267,41 @@ impl IscsiAdm {
     }
 
     fn login(&self, volume: &IscsiVolume) -> Result<()> {
-        command_status(
-            ProcessCommand::new(ISCSIADM)
-                .arg("-m")
-                .arg("node")
-                .arg("-T")
-                .arg(&volume.target)
-                .arg("-p")
-                .arg(&volume.portal)
-                .arg("--login"),
+        duct::cmd(
+            ISCSIADM,
+            [
+                "-m",
+                "node",
+                "-T",
+                volume.target.as_str(),
+                "-p",
+                volume.portal.as_str(),
+                "--login",
+            ],
         )
+        .run()
+        .context("failed to run iscsiadm")?;
+
+        Ok(())
     }
 
     fn logout(&self, volume: &IscsiVolume) -> Result<()> {
-        command_status(
-            ProcessCommand::new(ISCSIADM)
-                .arg("-m")
-                .arg("node")
-                .arg("-T")
-                .arg(&volume.target)
-                .arg("-p")
-                .arg(&volume.portal)
-                .arg("--logout"),
+        duct::cmd(
+            ISCSIADM,
+            [
+                "-m",
+                "node",
+                "-T",
+                volume.target.as_str(),
+                "-p",
+                volume.portal.as_str(),
+                "--logout",
+            ],
         )
+        .run()
+        .context("failed to run iscsiadm")?;
+
+        Ok(())
     }
 }
 
@@ -515,29 +534,6 @@ fn validate_name(kind: &str, name: &str) -> Result<()> {
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
         bail!("{kind} name may only contain ASCII letters, digits, '-', '_' and '.'");
-    }
-
-    Ok(())
-}
-
-fn command_success(command: &mut ProcessCommand) -> bool {
-    command.stdout(Stdio::null()).stderr(Stdio::null());
-    matches!(command.status(), Ok(status) if status.success())
-}
-
-fn command_stdout(command: &mut ProcessCommand) -> Result<String> {
-    let output = command.output().context("failed to run iscsiadm")?;
-    if !output.status.success() {
-        bail!("iscsiadm command failed");
-    }
-
-    String::from_utf8(output.stdout).context("iscsiadm output was not UTF-8")
-}
-
-fn command_status(command: &mut ProcessCommand) -> Result<()> {
-    let status = command.status().context("failed to run iscsiadm")?;
-    if !status.success() {
-        bail!("iscsiadm command failed");
     }
 
     Ok(())
