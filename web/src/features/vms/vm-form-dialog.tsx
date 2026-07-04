@@ -30,6 +30,20 @@ import {
 } from '@/components/ui/select'
 import type { VmCreateInput, VmSummary, VmUpdateInput } from '@/lib/api'
 
+const emptyStringToUndefined = (value: string | undefined) => (value === '' ? undefined : value)
+
+const optionalStringSchema = z.string().optional()
+const optionalString = z.preprocess<string | undefined, typeof optionalStringSchema, string | undefined>(
+  emptyStringToUndefined,
+  optionalStringSchema
+)
+
+const optionalPortSchema = z.coerce.number<string>().int().optional()
+const optionalPort = z.preprocess<string | undefined, typeof optionalPortSchema, string | undefined>(
+  emptyStringToUndefined,
+  optionalPortSchema
+)
+
 const vmFormSchema = z.object({
   name: z
     .string()
@@ -39,19 +53,20 @@ const vmFormSchema = z.object({
       'Name can only contain letters, numbers, hyphens, underscores and dots'
     ),
   systemDisk: z.string().min(1, 'System disk path is required'),
-  createSystemDisk: z.string().optional(),
-  cdrom: z.string().optional(),
-  boot: z.string().optional(),
-  memoryGiB: z.number().int().min(1).max(512),
-  vcpus: z.number().int().min(1).max(128),
+  createSystemDisk: optionalString,
+  cdrom: optionalString,
+  boot: z.string().default('hd').transform((value) => value.split(',').filter(Boolean)),
+  memoryGiB: z.coerce.number<string | number>().int().min(1).max(512),
+  vcpus: z.coerce.number<string | number>().int().min(1).max(128),
   network: z.string().min(1, 'Network is required'),
   graphics: z.enum(['vnc', 'none']),
-  vncListen: z.string().optional(),
-  vncPort: z.string().optional(),
-  serialLog: z.string().optional(),
+  vncListen: z.string().transform((value) => value || '127.0.0.1'),
+  vncPort: optionalPort,
+  serialLog: optionalString,
 })
 
-type VmFormValues = z.infer<typeof vmFormSchema>
+type VmFormInput = z.input<typeof vmFormSchema>
+type VmFormValues = z.output<typeof vmFormSchema>
 
 type VmFormDialogProps = {
   open: boolean
@@ -62,7 +77,7 @@ type VmFormDialogProps = {
   isLoading?: boolean
 }
 
-const defaultValues: VmFormValues = {
+const defaultValues: VmFormInput = {
   name: '',
   systemDisk: '',
   createSystemDisk: '',
@@ -77,7 +92,7 @@ const defaultValues: VmFormValues = {
   serialLog: '',
 }
 
-function summaryToDefaultValues(vm: VmSummary): VmFormValues {
+function summaryToDefaultValues(vm: VmSummary): VmFormInput {
   return {
     name: vm.name,
     systemDisk: vm.systemDisk ?? '',
@@ -102,8 +117,8 @@ export function VmFormDialog({
   onSubmit,
   isLoading,
 }: VmFormDialogProps) {
-  const form = useForm<VmFormValues>({
-    resolver: zodResolver(vmFormSchema),
+  const form = useForm<VmFormInput>({
+    resolver: zodResolver(vmFormSchema, undefined, { raw: true }),
     defaultValues,
   })
 
@@ -116,25 +131,14 @@ export function VmFormDialog({
   const graphics = useWatch({ control: form.control, name: 'graphics' })
   const isEdit = mode === 'edit'
 
-  async function handleSubmit(values: VmFormValues) {
-    const base = {
-      name: values.name,
-      systemDisk: values.systemDisk,
-      cdrom: values.cdrom || undefined,
-      boot: (values.boot || 'hd').split(',').filter(Boolean),
-      memoryGiB: values.memoryGiB,
-      vcpus: values.vcpus,
-      network: values.network,
-      graphics: values.graphics,
-      vncListen: values.vncListen || '127.0.0.1',
-      vncPort: values.vncPort ? Number(values.vncPort) : undefined,
-      serialLog: values.serialLog || undefined,
-    }
+  async function handleSubmit(rawValues: VmFormInput) {
+    const values: VmFormValues = vmFormSchema.parse(rawValues)
+    const { createSystemDisk, ...base } = values
 
     if (mode === 'create') {
       const input: VmCreateInput = {
         ...base,
-        createSystemDisk: values.createSystemDisk || undefined,
+        createSystemDisk,
       }
       await onSubmit(input)
     } else {
@@ -230,7 +234,6 @@ export function VmFormDialog({
                         {...field}
                         type='number'
                         min={1}
-                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
                       />
                     </FormControl>
                     <FormMessage />
@@ -248,7 +251,6 @@ export function VmFormDialog({
                         {...field}
                         type='number'
                         min={1}
-                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
                       />
                     </FormControl>
                     <FormMessage />
