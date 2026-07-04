@@ -4,6 +4,10 @@ version: "3"
 
 vars:
   NFPM: nfpm
+  INVENTORY: deploy/inventory.ini
+  LIMIT: qtr
+  RPM: dist/qtr-{{.QTR_VERSION}}-1.x86_64.rpm
+  ANSIBLE_PLAYBOOK: deploy/playbooks/install-rpm.yml
   QTR_VERSION:
     sh: cargo pkgid | cut -d# -f2
 
@@ -25,6 +29,23 @@ tasks:
     desc: Build all release packages
     deps:
       - package:rpm
+
+  ansible:sync:
+    desc: Sync the uv-managed Ansible environment
+    cmds:
+      - uv sync --locked
+
+  ansible:ping:
+    desc: Ping qtr deploy targets
+    cmds:
+      - uv run ansible "{{.LIMIT}}" -i "{{.INVENTORY}}" -m ping
+
+  deploy:rpm:
+    desc: Build and install the qtr RPM on Fedora 44 targets
+    cmds:
+      - task: package:rpm
+      - task: ansible:sync
+      - uv run ansible-playbook -i "{{.INVENTORY}}" --limit "{{.LIMIT}}" "{{.ANSIBLE_PLAYBOOK}}" -e "qtr_rpm_path={{.RPM}}"
 
   clean:dist:
     desc: Remove release package artifacts

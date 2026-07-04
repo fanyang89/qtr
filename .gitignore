@@ -1,4 +1,6 @@
 /target
 /dist
+/.venv
+/deploy/inventory.ini
 .tmp/
 .opencode/

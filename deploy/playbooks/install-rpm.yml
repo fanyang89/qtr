@@ -1,0 +1,75 @@
+---
+- name: Install qtr RPM on Fedora 44
+  hosts: qtr
+  gather_facts: true
+  become: true
+
+  vars:
+    qtr_remote_rpm_path: "/tmp/{{ qtr_rpm_path | basename }}"
+
+  pre_tasks:
+    - name: Require qtr_rpm_path
+      ansible.builtin.assert:
+        that:
+          - qtr_rpm_path is defined
+          - qtr_rpm_path | length > 0
+        fail_msg: "Pass the local RPM path with -e qtr_rpm_path=dist/qtr-...rpm"
+
+    - name: Check local RPM exists
+      ansible.builtin.stat:
+        path: "{{ qtr_rpm_path }}"
+      delegate_to: localhost
+      become: false
+      register: qtr_local_rpm
+
+    - name: Require local RPM file
+      ansible.builtin.assert:
+        that:
+          - qtr_local_rpm.stat.exists
+          - qtr_local_rpm.stat.isreg
+        fail_msg: "Local RPM not found: {{ qtr_rpm_path }}"
+
+    - name: Require Fedora 44 target
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Fedora"
+          - ansible_distribution_major_version == "44"
+        fail_msg: "This deploy playbook supports Fedora 44 targets only."
+
+  tasks:
+    - name: Copy qtr RPM to target
+      ansible.builtin.copy:
+        src: "{{ qtr_rpm_path }}"
+        dest: "{{ qtr_remote_rpm_path }}"
+        mode: "0644"
+
+    - name: Check dnf5 Python bindings
+      ansible.builtin.command: rpm -q python3-libdnf5
+      changed_when: false
+      failed_when: false
+      register: qtr_python3_libdnf5
+
+    - name: Install dnf5 Python bindings
+      ansible.builtin.command: dnf5 install -y python3-libdnf5
+      when: qtr_python3_libdnf5.rc != 0
+
+    - name: Install qtr RPM
+      ansible.builtin.dnf5:
+        name: "{{ qtr_remote_rpm_path }}"
+        state: present
+        disable_gpg_check: true
+
+    - name: Enable and start libvirtd
+      ansible.builtin.systemd_service:
+        name: libvirtd
+        enabled: true
+        state: started
+
+    - name: Verify qtr installation
+      ansible.builtin.command: qtr --version
+      changed_when: false
+      register: qtr_version
+
+    - name: Print qtr version
+      ansible.builtin.debug:
+        msg: "{{ qtr_version.stdout }}"

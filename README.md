@@ -84,6 +84,16 @@ sudo qtr host setup-libvirt-access \
 newgrp libvirt
 ```
 
+Deploy the RPM to Fedora 44 hosts with the uv-managed Ansible playbook:
+
+```bash
+uv sync
+cp deploy/inventory.example.ini deploy/inventory.ini
+task deploy:rpm LIMIT=fedora44
+```
+
+The deploy playbook copies the local RPM to the target, installs it with `dnf5`, and enables `libvirtd`.
+
 ## External Storage
 
 qtr exposes external storage as backends and volumes. iSCSI protocol details are handled internally by the storage driver.
