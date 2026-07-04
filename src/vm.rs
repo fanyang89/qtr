@@ -22,8 +22,8 @@ use virt::{
 
 use crate::{
     config::{
-        ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCreateArgs,
-        VmDumpArgs, VmExecArgs, VmInitArgs, VmLaunchArgs, VmListArgs, VmNameArgs, VmShutdownArgs,
+        ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmDumpArgs,
+        VmExecArgs, VmInitArgs, VmListArgs, VmNameArgs, VmRemoveArgs, VmStartArgs, VmStopArgs,
     },
     disk,
     domain_xml::{
@@ -41,15 +41,11 @@ pub fn run(args: VmArgs) -> Result<()> {
         VmCommand::Apply(args) => apply(args),
         VmCommand::Dump(args) => dump(args),
         VmCommand::List(args) => list(args),
-        VmCommand::Create(args) => create(args).map(|_| ()),
-        VmCommand::Launch(args) => launch(args),
         VmCommand::Start(args) => start(args),
+        VmCommand::Stop(args) => stop(args),
+        VmCommand::Rm(args) => remove(args),
         VmCommand::Vnc(args) => vnc(args),
         VmCommand::Exec(args) => exec(args),
-        VmCommand::WaitShutdown(args) => wait_shutdown_command(args),
-        VmCommand::Shutdown(args) => shutdown(args),
-        VmCommand::Destroy(args) => destroy(args),
-        VmCommand::Undefine(args) => undefine(args),
     }
 }
 
@@ -172,6 +168,13 @@ fn init(args: VmInitArgs) -> Result<()> {
 }
 
 fn apply(args: VmApplyArgs) -> Result<()> {
+    if args.wait_shutdown && !args.start {
+        bail!("--wait-shutdown requires --start");
+    }
+    if args.rm_after_shutdown && !args.wait_shutdown {
+        bail!("--rm-after-shutdown requires --wait-shutdown");
+    }
+
     let manifest_path = absolute_path(&args.file)?;
     let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let manifest_text = fs::read_to_string(&manifest_path)
@@ -180,7 +183,12 @@ fn apply(args: VmApplyArgs) -> Result<()> {
         .with_context(|| format!("failed to parse VM definition {}", manifest_path.display()))?;
 
     normalize_manifest_paths(&mut manifest, manifest_dir)?;
-    validate_manifest(&manifest)?;
+    if let Some(size) = args.create_system_disk.as_deref()
+        && !args.dry_run
+    {
+        disk::create_image(&manifest.system_disk, DiskFormat::Qcow2, size)?;
+    }
+    validate_manifest(&manifest, args.create_system_disk.is_some())?;
 
     let boot = manifest_boot_order(&manifest);
     let boot_devices = domain_xml::parse_boot_devices(&boot)?;
@@ -218,6 +226,24 @@ fn apply(args: VmApplyArgs) -> Result<()> {
         .with_context(|| format!("failed to apply VM definition {}", manifest.name))?;
 
     eprintln!("[qtr] applied VM: {}", manifest.name);
+    if args.start {
+        start_domain(&domain, &manifest.name)?;
+        if manifest.graphics == GraphicsMode::Vnc {
+            print_vnc_endpoint(&domain, &manifest.vnc_listen)?;
+        }
+        print_serial_log(&domain)?;
+
+        if args.wait_shutdown {
+            eprintln!("[qtr] waiting for guest shutdown...");
+            wait_shutdown_domain(&domain, &manifest.name)?;
+            if args.rm_after_shutdown {
+                undefine_domain(&domain, &manifest.name)?;
+            }
+        }
+
+        return Ok(());
+    }
+
     if domain
         .is_active()
         .with_context(|| format!("failed to query domain {} state", manifest.name))?
@@ -941,8 +967,8 @@ fn manifest_relative_path(base_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn validate_manifest(manifest: &VmManifest) -> Result<()> {
-    if !manifest.system_disk.exists() {
+fn validate_manifest(manifest: &VmManifest, allow_missing_system_disk: bool) -> Result<()> {
+    if !allow_missing_system_disk && !manifest.system_disk.exists() {
         bail!(
             "system disk {} does not exist",
             manifest.system_disk.display()
@@ -1219,81 +1245,11 @@ fn domain_state_name(state: sys::virDomainState) -> &'static str {
     }
 }
 
-fn create(mut args: VmCreateArgs) -> Result<Domain> {
-    normalize_create_args(&mut args)?;
-    let serial_log = args.serial_log.clone();
-    let domain = create_normalized(args)?;
-    if let Some(serial_log) = serial_log {
-        eprintln!("[qtr] serial log: {}", serial_log.display());
+fn start(args: VmStartArgs) -> Result<()> {
+    if args.rm_after_shutdown && !args.wait_shutdown {
+        bail!("--rm-after-shutdown requires --wait-shutdown");
     }
 
-    Ok(domain)
-}
-
-fn create_normalized(args: VmCreateArgs) -> Result<Domain> {
-    prepare_system_disk(&args)?;
-
-    let boot = default_boot_order(&args);
-    let boot_devices = domain_xml::parse_boot_devices(&boot)?;
-    if boot_devices.contains(&BootDevice::Cdrom) && args.cdrom.is_none() {
-        bail!("boot order contains cdrom but --cdrom was not provided");
-    }
-
-    let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
-        name: &args.name,
-        memory_mib: args.memory_mib,
-        vcpus: args.vcpus,
-        system_disk: &args.system_disk,
-        cdrom: args.cdrom.as_deref(),
-        serial_log: args.serial_log.as_deref(),
-        boot_devices: &boot_devices,
-        network: &args.network,
-        graphics: GraphicsSpec {
-            mode: args.graphics,
-            vnc_listen: &args.vnc_listen,
-            vnc_port: args.vnc_port,
-        },
-    });
-
-    let conn = connect(&args.connect_uri)?;
-    let domain = Domain::define_xml(&conn, &xml)
-        .with_context(|| format!("failed to define domain {}", args.name))?;
-
-    eprintln!("[qtr] defined VM: {}", args.name);
-    Ok(domain)
-}
-
-fn launch(mut args: VmLaunchArgs) -> Result<()> {
-    normalize_create_args(&mut args.create)?;
-
-    let name = args.create.name.clone();
-    let graphics = args.create.graphics;
-    let vnc_listen = args.create.vnc_listen.clone();
-    let system_disk = args.create.system_disk.clone();
-    let wait = args.wait_shutdown;
-    let domain = create_normalized(args.create)?;
-
-    start_domain(&domain, &name)?;
-
-    if graphics == GraphicsMode::Vnc {
-        print_vnc_endpoint(&domain, &vnc_listen)?;
-    }
-    print_serial_log(&domain)?;
-
-    if wait {
-        eprintln!("[qtr] waiting for guest shutdown...");
-        wait_shutdown_domain(&domain, &name)?;
-        domain
-            .undefine()
-            .with_context(|| format!("failed to undefine domain {name}"))?;
-        eprintln!("[qtr] undefined VM: {name}");
-        eprintln!("[qtr] system disk saved: {}", system_disk.display());
-    }
-
-    Ok(())
-}
-
-fn start(args: VmNameArgs) -> Result<()> {
     let conn = connect(&args.connect_uri)?;
     let domain = lookup_domain(&conn, &args.name)?;
     start_domain(&domain, &args.name)?;
@@ -1301,7 +1257,68 @@ fn start(args: VmNameArgs) -> Result<()> {
     print_vnc_endpoint(&domain, "127.0.0.1")?;
     print_serial_log(&domain)?;
 
+    if args.wait_shutdown {
+        eprintln!("[qtr] waiting for guest shutdown...");
+        wait_shutdown_domain(&domain, &args.name)?;
+        if args.rm_after_shutdown {
+            undefine_domain(&domain, &args.name)?;
+        }
+    }
+
     Ok(())
+}
+
+fn stop(args: VmStopArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {} state", args.name))?
+    {
+        eprintln!("[qtr] VM already stopped: {}", args.name);
+        return Ok(());
+    }
+
+    if args.force {
+        domain
+            .destroy()
+            .with_context(|| format!("failed to destroy domain {}", args.name))?;
+        eprintln!("[qtr] force stopped VM: {}", args.name);
+    } else {
+        domain
+            .shutdown()
+            .with_context(|| format!("failed to request shutdown for domain {}", args.name))?;
+        eprintln!("[qtr] shutdown requested: {}", args.name);
+    }
+
+    if args.wait {
+        wait_shutdown_domain(&domain, &args.name)?;
+    }
+
+    Ok(())
+}
+
+fn remove(args: VmRemoveArgs) -> Result<()> {
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    if domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {} state", args.name))?
+    {
+        if !args.force_stop {
+            bail!(
+                "domain {} is active; stop it first or pass --force-stop",
+                args.name
+            );
+        }
+
+        domain
+            .destroy()
+            .with_context(|| format!("failed to destroy domain {}", args.name))?;
+        eprintln!("[qtr] force stopped VM: {}", args.name);
+    }
+
+    undefine_domain(&domain, &args.name)
 }
 
 fn vnc(args: VmNameArgs) -> Result<()> {
@@ -1353,76 +1370,6 @@ fn exec(args: VmExecArgs) -> Result<()> {
     if result.exitcode != 0 {
         bail!("guest command exited with {}", result.exitcode);
     }
-
-    Ok(())
-}
-
-fn wait_shutdown_command(args: VmNameArgs) -> Result<()> {
-    let conn = connect(&args.connect_uri)?;
-    let domain = lookup_domain(&conn, &args.name)?;
-    eprintln!("[qtr] waiting for guest shutdown...");
-    wait_shutdown_domain(&domain, &args.name)
-}
-
-fn shutdown(args: VmShutdownArgs) -> Result<()> {
-    let conn = connect(&args.connect_uri)?;
-    let domain = lookup_domain(&conn, &args.name)?;
-    if !domain
-        .is_active()
-        .with_context(|| format!("failed to query domain {} state", args.name))?
-    {
-        eprintln!("[qtr] VM already stopped: {}", args.name);
-        return Ok(());
-    }
-
-    domain
-        .shutdown()
-        .with_context(|| format!("failed to request shutdown for domain {}", args.name))?;
-    eprintln!("[qtr] shutdown requested: {}", args.name);
-
-    if args.wait {
-        wait_shutdown_domain(&domain, &args.name)?;
-    }
-
-    Ok(())
-}
-
-fn destroy(args: VmNameArgs) -> Result<()> {
-    let conn = connect(&args.connect_uri)?;
-    let domain = lookup_domain(&conn, &args.name)?;
-    if !domain
-        .is_active()
-        .with_context(|| format!("failed to query domain {} state", args.name))?
-    {
-        eprintln!("[qtr] VM already stopped: {}", args.name);
-        return Ok(());
-    }
-
-    domain
-        .destroy()
-        .with_context(|| format!("failed to destroy domain {}", args.name))?;
-    eprintln!("[qtr] destroyed VM: {}", args.name);
-
-    Ok(())
-}
-
-fn undefine(args: VmNameArgs) -> Result<()> {
-    let conn = connect(&args.connect_uri)?;
-    let domain = lookup_domain(&conn, &args.name)?;
-    if domain
-        .is_active()
-        .with_context(|| format!("failed to query domain {} state", args.name))?
-    {
-        bail!(
-            "domain {} is active; shutdown or destroy it first",
-            args.name
-        );
-    }
-
-    domain
-        .undefine()
-        .with_context(|| format!("failed to undefine domain {}", args.name))?;
-    eprintln!("[qtr] undefined VM: {}", args.name);
 
     Ok(())
 }
@@ -1490,35 +1437,36 @@ pub fn create_by_manifest(
 ) -> Result<VmSummary> {
     let base_dir = env::current_dir().context("failed to determine current directory")?;
     normalize_manifest_paths(&mut manifest, &base_dir)?;
-    validate_manifest(&manifest)?;
+    if let Some(size) = create_system_disk.as_deref() {
+        disk::create_image(&manifest.system_disk, DiskFormat::Qcow2, size)?;
+    }
+    validate_manifest(&manifest, create_system_disk.is_some())?;
 
-    let args = VmCreateArgs {
-        name: manifest.name,
-        system_disk: manifest.system_disk,
-        create_system_disk,
-        cdrom: manifest.cdrom,
-        boot: manifest.boot.map(|boot| boot.join(",")),
-        memory_mib: manifest
-            .memory_gib
-            .checked_mul(1024)
-            .context("memoryGiB is too large")?,
-        vcpus: manifest.vcpus,
-        graphics: manifest.graphics,
-        vnc_listen: manifest.vnc_listen,
-        vnc_port: manifest.vnc_port,
-        serial_log: manifest.serial_log,
-        network: manifest.network,
-        connect_uri: connect_uri.to_string(),
-    };
+    let boot = manifest_boot_order(&manifest);
+    let boot_devices = parse_boot_devices(&boot)?;
+    if boot_devices.contains(&BootDevice::Cdrom) && manifest.cdrom.is_none() {
+        bail!("boot order contains cdrom but cdrom was not provided");
+    }
 
-    let domain = create_normalized(args)?;
+    let memory_mib = manifest
+        .memory_gib
+        .checked_mul(1024)
+        .context("memoryGiB is too large")?;
+    let xml = build_manifest_domain_xml(&manifest, &boot_devices, memory_mib);
+
+    prepare_serial_log_path(manifest.serial_log.as_deref())?;
+
+    let conn = connect(connect_uri)?;
+    let domain = Domain::define_xml(&conn, &xml)
+        .with_context(|| format!("failed to define domain {}", manifest.name))?;
+
     domain_summary(&domain)
 }
 
 pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> Result<VmSummary> {
     let base_dir = env::current_dir().context("failed to determine current directory")?;
     normalize_manifest_paths(&mut manifest, &base_dir)?;
-    validate_manifest(&manifest)?;
+    validate_manifest(&manifest, false)?;
 
     let boot = manifest_boot_order(&manifest);
     let boot_devices = parse_boot_devices(&boot)?;
@@ -1591,23 +1539,13 @@ fn start_domain(domain: &Domain, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn prepare_system_disk(args: &VmCreateArgs) -> Result<()> {
-    match &args.create_system_disk {
-        Some(size) => disk::create_image(&args.system_disk, DiskFormat::Qcow2, size),
-        None => {
-            if !args.system_disk.exists() {
-                bail!(
-                    "system disk {} does not exist; pass --create-system-disk to create it",
-                    args.system_disk.display()
-                );
-            }
-            Ok(())
-        }
-    }
-}
+fn undefine_domain(domain: &Domain, name: &str) -> Result<()> {
+    domain
+        .undefine()
+        .with_context(|| format!("failed to undefine domain {name}"))?;
+    eprintln!("[qtr] undefined VM: {name}");
 
-fn prepare_serial_log(args: &VmCreateArgs) -> Result<()> {
-    prepare_serial_log_path(args.serial_log.as_deref())
+    Ok(())
 }
 
 fn prepare_serial_log_path(path: Option<&Path>) -> Result<()> {
@@ -1620,28 +1558,6 @@ fn prepare_serial_log_path(path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn normalize_create_args(args: &mut VmCreateArgs) -> Result<()> {
-    args.system_disk = absolute_path(&args.system_disk)?;
-
-    let serial_log = args
-        .serial_log
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(format!(".tmp/logs/{}.serial.log", args.name)));
-    args.serial_log = Some(absolute_path(&serial_log)?);
-
-    if let Some(cdrom) = &args.cdrom {
-        let cdrom = absolute_path(cdrom)?;
-        if !cdrom.exists() {
-            bail!("cdrom ISO {} does not exist", cdrom.display());
-        }
-        args.cdrom = Some(cdrom);
-    }
-
-    prepare_serial_log(args)?;
-
-    Ok(())
-}
-
 fn absolute_path(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
         return Ok(path.to_path_buf());
@@ -1650,14 +1566,6 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
     Ok(env::current_dir()
         .context("failed to determine current directory")?
         .join(path))
-}
-
-fn default_boot_order(args: &VmCreateArgs) -> String {
-    match &args.boot {
-        Some(boot) => boot.clone(),
-        None if args.cdrom.is_some() => "cdrom,hd".to_string(),
-        None => "hd".to_string(),
-    }
 }
 
 fn print_vnc_endpoint(domain: &Domain, fallback_listen: &str) -> Result<()> {

@@ -92,21 +92,14 @@ Storage state is written to `.qtr/storage.yaml` by default. Use `--config` to ch
 
 ## Minimal VM Launch
 
-Create a qcow2 system disk and boot an installer ISO with VNC exposed:
+Generate a starter VM definition, edit `cdrom`, then create the system disk and boot the VM:
 
 ```bash
-cargo run -- vm launch \
-  --name install-os \
-  --system-disk .tmp/disks/sys.qcow2 \
-  --create-system-disk 40G \
-  --cdrom .tmp/iso/CentOS-7-x86_64-Everything-2207-02.iso \
-  --boot cdrom,hd \
-  --vnc-listen 0.0.0.0
+cargo run -- vm init --name install-os -o vm.yaml
+cargo run -- vm apply -f vm.yaml --create-system-disk 40G --start
 ```
 
-`vm create` only defines a VM. Use `vm launch`, or run `vm start` after `vm create`.
-
-VMs write serial console output to `.tmp/logs/<name>.serial.log` by default. Override it with `--serial-log`.
+VMs write serial console output to `.tmp/logs/<name>.serial.log` by default. Override it with `serialLog` in the YAML definition.
 
 ## Declarative VM Config
 
@@ -116,11 +109,7 @@ Generate a starter VM definition:
 cargo run -- vm init --name install-os -o vm.yaml
 ```
 
-Edit `cdrom` to point at the installer ISO, and create or point `systemDisk` to a qcow2 disk.
-
-```bash
-cargo run -- disk create --path .tmp/disks/install-os.qcow2 --format qcow2 --size 40G
-```
+Edit `cdrom` to point at the installer ISO. `vm apply --create-system-disk` creates the qcow2 disk when needed.
 
 The generated YAML is an installer-oriented template:
 
@@ -142,6 +131,8 @@ Apply it:
 ```bash
 cargo run -- vm apply -f vm.yaml
 cargo run -- vm start install-os
+cargo run -- vm stop install-os --wait
+cargo run -- vm rm install-os
 cargo run -- vm apply -f vm.yaml --dry-run
 cargo run -- vm apply -f vm.yaml --dry-run --color always
 ```
