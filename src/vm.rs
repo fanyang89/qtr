@@ -5,7 +5,6 @@ use std::{
     net::IpAddr,
     ops::Range,
     path::{Path, PathBuf},
-    process::Command,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1732,33 +1731,17 @@ fn parse_vnc_endpoint(xml: &str, fallback_listen: &str) -> Option<VncEndpoint> {
 }
 
 fn local_vnc_endpoints(port: &str) -> Vec<String> {
-    let output = match Command::new("ip").args(["-o", "addr", "show"]).output() {
-        Ok(output) if output.status.success() => output,
-        _ => return Vec::new(),
-    };
-    let stdout = match String::from_utf8(output.stdout) {
-        Ok(stdout) => stdout,
+    let interfaces = match if_addrs::get_if_addrs() {
+        Ok(interfaces) => interfaces,
         Err(_) => return Vec::new(),
     };
 
-    let ips = stdout
-        .lines()
-        .flat_map(local_ips_from_ip_addr_line)
+    let ips = interfaces
+        .into_iter()
+        .map(|interface| interface.ip())
+        .filter(|addr| !addr.is_unspecified())
         .collect();
     format_vnc_endpoints(ips, port)
-}
-
-fn local_ips_from_ip_addr_line(line: &str) -> Vec<IpAddr> {
-    let fields = line.split_whitespace().collect::<Vec<_>>();
-    fields
-        .windows(2)
-        .filter_map(|window| match window {
-            ["inet" | "inet6", value] => value.split_once('/').map(|(addr, _)| addr),
-            _ => None,
-        })
-        .filter_map(|addr| addr.parse::<IpAddr>().ok())
-        .filter(|addr| !addr.is_unspecified())
-        .collect()
 }
 
 fn format_vnc_endpoints(ips: BTreeSet<IpAddr>, port: &str) -> Vec<String> {
