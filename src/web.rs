@@ -24,8 +24,8 @@ use tower_http::{
 };
 use virt::error::clear_error_callback;
 
-use crate::{config::WebArgs, vm};
 use crate::config::GraphicsMode;
+use crate::{config::WebArgs, vm};
 
 #[derive(Clone)]
 struct AppState {
@@ -152,7 +152,10 @@ fn app(connect_uri: String, web_dir: PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/vms", get(list_vms).post(create_vm))
-        .route("/vms/{name}", get(get_vm).put(update_vm).delete(undefine_vm))
+        .route(
+            "/vms/{name}",
+            get(get_vm).put(update_vm).delete(undefine_vm),
+        )
         .route("/vms/{name}/start", post(start_vm))
         .route("/vms/{name}/shutdown", post(shutdown_vm))
         .route("/vms/{name}/destroy", post(destroy_vm))
