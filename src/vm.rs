@@ -594,7 +594,7 @@ fn patch_disks(
         let range = domain_disk.range();
         let start = line_start(xml, range.start);
         let end = line_end(xml, range.end);
-        let desired = domain_xml::build_disk_xml(&launch_disk_spec(manifest_disk, index));
+        let desired = build_patched_disk_xml(xml, domain_disk, manifest_disk, index);
         replacements.push(XmlReplacement {
             range: start..end,
             value: desired,
@@ -602,6 +602,33 @@ fn patch_disks(
     }
 
     Ok(())
+}
+
+fn build_patched_disk_xml(
+    xml: &str,
+    domain_disk: Node<'_, '_>,
+    manifest_disk: &VmDisk,
+    index: usize,
+) -> String {
+    let mut desired = domain_xml::build_disk_xml(&launch_disk_spec(manifest_disk, index));
+    let addresses = domain_disk
+        .children()
+        .filter(|child| child.has_tag_name("address"))
+        .map(|address| {
+            let range = address.range();
+            let start = line_start(xml, range.start);
+            let end = line_end(xml, range.end);
+            &xml[start..end]
+        })
+        .collect::<String>();
+
+    if !addresses.is_empty()
+        && let Some(pos) = desired.rfind("    </disk>\n")
+    {
+        desired.insert_str(pos, &addresses);
+    }
+
+    desired
 }
 
 fn patch_memory(
@@ -2433,9 +2460,9 @@ mod tests {
                 format: DiskFormat::Qcow2,
                 target: Some("vda".to_string()),
                 bus: VmDiskBus::VirtioBlk,
-                cache: None,
-                io: None,
-                queues: None,
+                cache: Some(VmDiskCache::None),
+                io: Some(VmDiskIo::Native),
+                queues: Some(1),
             }],
             cdrom: Some(PathBuf::from(
                 "/home/fanmi/workspace/qtr/.tmp/iso/CentOS-7-x86_64-DVD-2207-02.iso",
@@ -2459,6 +2486,13 @@ mod tests {
         assert!(patched.contains("<uuid>c194be5c-a0ba-4e90-8b23-18c8df0825f1</uuid>"));
         assert!(patched.contains("machine='pc-i440fx-10.2'"));
         assert!(patched.contains("<memory unit='KiB'>4194304</memory>"));
+        assert!(
+            patched
+                .contains("<driver name='qemu' type='qcow2' cache='none' io='native' queues='1'/>")
+        );
+        assert!(patched.contains(
+            "<address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>"
+        ));
         assert!(patched.contains("<video>"));
         assert!(!patched.contains("<boot dev='cdrom'/>"));
         assert!(patched.contains("    <boot dev='hd'/>\n"));
