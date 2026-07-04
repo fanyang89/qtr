@@ -936,10 +936,11 @@ fn list(args: VmListArgs) -> Result<()> {
 
     rows.sort_by(|left, right| left.name.cmp(&right.name));
 
-    println!("{:<32} {:<12} ID", "NAME", "STATE");
-    for row in rows {
-        println!("{:<32} {:<12} {}", row.name, row.state, row.id);
-    }
+    crate::cli_table::print_table(
+        &["NAME", "STATE", "ID"],
+        rows.into_iter()
+            .map(|row| vec![row.name, row.state.to_string(), row.id]),
+    );
 
     Ok(())
 }

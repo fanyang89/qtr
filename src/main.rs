@@ -1,3 +1,4 @@
+mod cli_table;
 mod config;
 mod disk;
 mod domain_xml;

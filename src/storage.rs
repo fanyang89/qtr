@@ -137,10 +137,13 @@ fn add_iscsi(config_path: &Path, args: StorageAddIscsiArgs) -> Result<()> {
 fn list(config_path: &Path) -> Result<()> {
     let state = load_state(config_path)?;
 
-    println!("{:<24} DRIVER", "NAME");
-    for backend in state.backends {
-        println!("{:<24} {}", backend.name, backend.driver.name());
-    }
+    crate::cli_table::print_table(
+        &["NAME", "DRIVER"],
+        state
+            .backends
+            .into_iter()
+            .map(|backend| vec![backend.name, backend.driver.name().to_string()]),
+    );
 
     Ok(())
 }
@@ -384,20 +387,22 @@ fn print_iscsi_volumes(
     sessions: &[IscsiSession],
     devices: &[IscsiDevice],
 ) {
-    println!("{:<24} {:<12} DEVICE", "VOLUME", "STATE");
-    for volume in volumes {
-        let connected = sessions
-            .iter()
-            .any(|session| session.target == volume.target);
-        let device = devices
-            .iter()
-            .find(|device| device.target == volume.target)
-            .map(|device| device.path.display().to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let state = if connected { "connected" } else { "available" };
+    crate::cli_table::print_table(
+        &["VOLUME", "STATE", "DEVICE"],
+        volumes.iter().map(|volume| {
+            let connected = sessions
+                .iter()
+                .any(|session| session.target == volume.target);
+            let device = devices
+                .iter()
+                .find(|device| device.target == volume.target)
+                .map(|device| device.path.display().to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let state = if connected { "connected" } else { "available" };
 
-        println!("{:<24} {:<12} {}", volume.name, state, device);
-    }
+            vec![volume.name.clone(), state.to_string(), device]
+        }),
+    );
 }
 
 fn find_device_for_target(target: &str) -> Result<Option<IscsiDevice>> {

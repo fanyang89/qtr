@@ -8,6 +8,7 @@ anyhow = "1.0"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
+comfy-table = "7.2"
 duct = "1"
 futures-util = "0.3"
 if-addrs = "0.14"
