@@ -39,6 +39,18 @@ describe('handleServerError', () => {
     expect(toastError).toHaveBeenCalledWith('Validation failed')
   })
 
+  it('uses the backend error field when the Axios response has one', () => {
+    const error = new AxiosError('Conflict')
+    error.response = {
+      status: 409,
+      data: { error: 'VM is already running' },
+    } as AxiosError['response']
+
+    handleServerError(error)
+
+    expect(toastError).toHaveBeenCalledWith('VM is already running')
+  })
+
   it('falls back to the generic message when Axios response has no data.title', () => {
     const error = new AxiosError('Request failed')
     error.response = {

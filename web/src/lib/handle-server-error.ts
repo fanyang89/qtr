@@ -1,5 +1,12 @@
-import { AxiosError } from 'axios'
+import { z } from 'zod'
+import axios from 'axios'
 import { toast } from 'sonner'
+
+const serverErrorSchema = z.object({
+  title: z.string().min(1).optional(),
+  error: z.string().min(1).optional(),
+  message: z.string().min(1).optional(),
+})
 
 export function handleServerError(error: unknown) {
   if (import.meta.env.DEV) {
@@ -18,10 +25,18 @@ export function handleServerError(error: unknown) {
     errMsg = 'No content.'
   }
 
-  if (error instanceof AxiosError) {
-    const title = error.response?.data?.title
-    if (typeof title === 'string' && title.length > 0) {
-      errMsg = title
+  if (axios.isAxiosError(error)) {
+    const data = error.response?.data
+    if (typeof data === 'string' && data.length > 0) {
+      errMsg = data
+    } else {
+      const parsed = serverErrorSchema.safeParse(data)
+      const message = parsed.success
+        ? (parsed.data.title ?? parsed.data.error ?? parsed.data.message)
+        : undefined
+      if (message) {
+        errMsg = message
+      }
     }
   }
 

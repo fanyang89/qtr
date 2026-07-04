@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
+import { useForm, useWatch } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import type { VmCreateInput, VmSummary, VmUpdateInput } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -28,21 +29,23 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import type { VmCreateInput, VmSummary, VmUpdateInput } from '@/lib/api'
 
-const emptyStringToUndefined = (value: string | undefined) => (value === '' ? undefined : value)
+const emptyStringToUndefined = (value: string | undefined) =>
+  value === '' ? undefined : value
 
 const optionalStringSchema = z.string().optional()
-const optionalString = z.preprocess<string | undefined, typeof optionalStringSchema, string | undefined>(
-  emptyStringToUndefined,
-  optionalStringSchema
-)
+const optionalString = z.preprocess<
+  string | undefined,
+  typeof optionalStringSchema,
+  string | undefined
+>(emptyStringToUndefined, optionalStringSchema)
 
 const optionalPortSchema = z.coerce.number<string>().int().optional()
-const optionalPort = z.preprocess<string | undefined, typeof optionalPortSchema, string | undefined>(
-  emptyStringToUndefined,
-  optionalPortSchema
-)
+const optionalPort = z.preprocess<
+  string | undefined,
+  typeof optionalPortSchema,
+  string | undefined
+>(emptyStringToUndefined, optionalPortSchema)
 
 const vmFormSchema = z.object({
   name: z
@@ -55,7 +58,10 @@ const vmFormSchema = z.object({
   systemDisk: z.string().min(1, 'System disk path is required'),
   createSystemDisk: optionalString,
   cdrom: optionalString,
-  boot: z.string().default('hd').transform((value) => value.split(',').filter(Boolean)),
+  boot: z
+    .string()
+    .default('hd')
+    .transform((value) => value.split(',').filter(Boolean)),
   memoryGiB: z.coerce.number<string | number>().int().min(1).max(512),
   vcpus: z.coerce.number<string | number>().int().min(1).max(128),
   network: z.string().min(1, 'Network is required'),
@@ -151,7 +157,9 @@ export function VmFormDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='max-w-2xl'>
         <DialogHeader>
-          <DialogTitle>{isEdit ? 'Edit Virtual Machine' : 'Create Virtual Machine'}</DialogTitle>
+          <DialogTitle>
+            {isEdit ? 'Edit Virtual Machine' : 'Create Virtual Machine'}
+          </DialogTitle>
           <DialogDescription>
             {isEdit
               ? 'Update the libvirt domain definition.'
@@ -159,7 +167,11 @@ export function VmFormDialog({
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form id='vm-form' onSubmit={form.handleSubmit(handleSubmit)} className='grid gap-4 py-2'>
+          <form
+            id='vm-form'
+            onSubmit={form.handleSubmit(handleSubmit)}
+            className='grid gap-4 py-2'
+          >
             <FormField
               control={form.control}
               name='name'
@@ -167,7 +179,11 @@ export function VmFormDialog({
                 <FormItem>
                   <FormLabel>Name</FormLabel>
                   <FormControl>
-                    <Input {...field} disabled={isEdit} placeholder='install-os' />
+                    <Input
+                      {...field}
+                      disabled={isEdit}
+                      placeholder='install-os'
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -183,7 +199,9 @@ export function VmFormDialog({
                   <FormControl>
                     <Input {...field} placeholder='.tmp/disks/sys.qcow2' />
                   </FormControl>
-                  <FormDescription>Path to the qcow2 system disk.</FormDescription>
+                  <FormDescription>
+                    Path to the qcow2 system disk.
+                  </FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -215,7 +233,10 @@ export function VmFormDialog({
                 <FormItem>
                   <FormLabel>CDROM / ISO Path</FormLabel>
                   <FormControl>
-                    <Input {...field} placeholder='.tmp/iso/os.iso (optional)' />
+                    <Input
+                      {...field}
+                      placeholder='.tmp/iso/os.iso (optional)'
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -230,11 +251,7 @@ export function VmFormDialog({
                   <FormItem>
                     <FormLabel>Memory (GiB)</FormLabel>
                     <FormControl>
-                      <Input
-                        {...field}
-                        type='number'
-                        min={1}
-                      />
+                      <Input {...field} type='number' min={1} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -247,11 +264,7 @@ export function VmFormDialog({
                   <FormItem>
                     <FormLabel>vCPUs</FormLabel>
                     <FormControl>
-                      <Input
-                        {...field}
-                        type='number'
-                        min={1}
-                      />
+                      <Input {...field} type='number' min={1} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -320,7 +333,9 @@ export function VmFormDialog({
                       <FormControl>
                         <Input {...field} placeholder='Auto (optional)' />
                       </FormControl>
-                      <FormDescription>Leave empty for auto-assignment.</FormDescription>
+                      <FormDescription>
+                        Leave empty for auto-assignment.
+                      </FormDescription>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -358,7 +373,10 @@ export function VmFormDialog({
                 <FormItem>
                   <FormLabel>Serial Log Path</FormLabel>
                   <FormControl>
-                    <Input {...field} placeholder='.tmp/logs/<name>.serial.log (optional)' />
+                    <Input
+                      {...field}
+                      placeholder='.tmp/logs/<name>.serial.log (optional)'
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -367,7 +385,11 @@ export function VmFormDialog({
           </form>
         </Form>
         <DialogFooter>
-          <Button variant='outline' onClick={() => onOpenChange(false)} disabled={isLoading}>
+          <Button
+            variant='outline'
+            onClick={() => onOpenChange(false)}
+            disabled={isLoading}
+          >
             Cancel
           </Button>
           <Button type='submit' form='vm-form' disabled={isLoading}>

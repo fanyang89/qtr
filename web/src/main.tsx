@@ -1,6 +1,6 @@
 import { StrictMode } from 'react'
 import ReactDOM from 'react-dom/client'
-import { AxiosError } from 'axios'
+import axios from 'axios'
 import {
   QueryCache,
   QueryClient,
@@ -28,7 +28,7 @@ const queryClient = new QueryClient({
         if (failureCount > 3 && import.meta.env.PROD) return false
 
         return !(
-          error instanceof AxiosError &&
+          axios.isAxiosError(error) &&
           [401, 403].includes(error.response?.status ?? 0)
         )
       },
@@ -39,7 +39,7 @@ const queryClient = new QueryClient({
       onError: (error) => {
         handleServerError(error)
 
-        if (error instanceof AxiosError) {
+        if (axios.isAxiosError(error)) {
           if (error.response?.status === 304) {
             toast.error('Content not modified!')
           }
@@ -49,10 +49,10 @@ const queryClient = new QueryClient({
   },
   queryCache: new QueryCache({
     onError: (error) => {
-        if (error instanceof AxiosError) {
-          if (error.response?.status === 401) {
-            toast.error('Unauthorized request')
-          }
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 401) {
+          toast.error('Unauthorized request')
+        }
         if (error.response?.status === 500) {
           toast.error('Internal Server Error!')
           // Only navigate to error page in production to avoid disrupting HMR in development

@@ -1,39 +1,56 @@
-export type VmState =
-  | 'running'
-  | 'shutoff'
-  | 'paused'
-  | 'blocked'
-  | 'crashed'
-  | 'shutdown'
-  | 'unknown'
+import { z } from 'zod'
+import axios, { type AxiosResponse } from 'axios'
 
-export type VmSummary = {
-  name: string
-  state: VmState
-  id: string | null
-  vnc: boolean
-  vncEndpoint?: string
-  serialLog?: string
-  memoryMiB?: number
-  vcpus?: number
-  network?: string
-  systemDisk?: string
-  cdrom?: string
-  boot?: string[]
-  graphics?: 'vnc' | 'none'
-  vncListen?: string
-  vncPort?: number
-  metrics?: VmMetrics | null
-}
+const vmStateSchema = z.enum([
+  'running',
+  'shutoff',
+  'paused',
+  'blocked',
+  'crashed',
+  'shutdown',
+  'unknown',
+])
 
-export type VmMetrics = {
-  cpuTimeNs: number
-  memoryUsedMiB: number
-  memoryTotalMiB: number
-  txBytes: number
-  rxBytes: number
-  sampledAtMs: number
-}
+const vmMetricsSchema = z.object({
+  cpuTimeNs: z.number(),
+  memoryUsedMiB: z.number(),
+  memoryTotalMiB: z.number(),
+  txBytes: z.number(),
+  rxBytes: z.number(),
+  sampledAtMs: z.number(),
+})
+
+const vmSummarySchema = z.object({
+  name: z.string(),
+  state: vmStateSchema,
+  id: z.string().nullable(),
+  vnc: z.boolean(),
+  vncEndpoint: z.string().nullish(),
+  serialLog: z.string().nullish(),
+  memoryMiB: z.number().nullish(),
+  vcpus: z.number().nullish(),
+  network: z.string().nullish(),
+  systemDisk: z.string().nullish(),
+  cdrom: z.string().nullish(),
+  boot: z.array(z.string()).nullish(),
+  graphics: z.enum(['vnc', 'none']).nullish(),
+  vncListen: z.string().nullish(),
+  vncPort: z.number().nullish(),
+  metrics: vmMetricsSchema.nullish(),
+})
+
+const vmSummaryArraySchema = z.array(vmSummarySchema)
+
+const healthStatusSchema = z.object({
+  ok: z.boolean(),
+  libvirtUri: z.string(),
+  version: z.string().optional(),
+})
+
+export type VmState = z.infer<typeof vmStateSchema>
+export type VmMetrics = z.infer<typeof vmMetricsSchema>
+export type VmSummary = z.infer<typeof vmSummarySchema>
+export type HealthStatus = z.infer<typeof healthStatusSchema>
 
 export type VmCreateInput = {
   name: string
@@ -52,124 +69,56 @@ export type VmCreateInput = {
 
 export type VmUpdateInput = Omit<VmCreateInput, 'createSystemDisk'>
 
-export type HealthStatus = {
-  ok: boolean
-  libvirtUri: string
-  version?: string
-}
+const apiClient = axios.create({ baseURL: '/api' })
 
-const sampleStartedAtMs = Date.now()
-
-function sampleVms(): VmSummary[] {
-  const now = Date.now()
-  const elapsedSeconds = Math.max((now - sampleStartedAtMs) / 1000, 0)
-
-  return [
-    {
-      name: 'install-os',
-      state: 'running',
-      id: '3',
-      vnc: true,
-      vncEndpoint: '127.0.0.1:5900',
-      serialLog: '.tmp/logs/install-os.serial.log',
-      memoryMiB: 4096,
-      vcpus: 2,
-      network: 'default',
-      metrics: {
-        cpuTimeNs: Math.round(elapsedSeconds * 0.42 * 2 * 1_000_000_000),
-        memoryUsedMiB: 1610,
-        memoryTotalMiB: 4096,
-        txBytes: Math.round(90 * 1024 * 1024 + elapsedSeconds * 1.2 * 1024 * 1024),
-        rxBytes: Math.round(240 * 1024 * 1024 + elapsedSeconds * 2.7 * 1024 * 1024),
-        sampledAtMs: now,
-      },
-    },
-    {
-      name: 'smoke-fedora',
-      state: 'shutoff',
-      id: null,
-      vnc: false,
-      serialLog: '.tmp/logs/smoke-fedora.serial.log',
-      memoryMiB: 2048,
-      vcpus: 2,
-      network: 'default',
-      metrics: null,
-    },
-  ]
-}
-
-async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, options)
-  if (!response.ok) {
-    const text = await response.text().catch(() => 'Request failed')
-    throw new Error(text)
-  }
-  return response.json() as Promise<T>
+async function parseResponse<T>(
+  request: Promise<AxiosResponse<unknown>>,
+  schema: z.ZodType<T>
+): Promise<T> {
+  const { data } = await request
+  return schema.parse(data)
 }
 
 export async function getHealth(): Promise<HealthStatus> {
   try {
-    return await requestJson<HealthStatus>('/api/health')
+    return await parseResponse(apiClient.get('/health'), healthStatusSchema)
   } catch {
     return { ok: false, libvirtUri: 'qemu:///system' }
   }
 }
 
 export async function getVms(): Promise<VmSummary[]> {
-  try {
-    return await requestJson<VmSummary[]>('/api/vms')
-  } catch {
-    return sampleVms()
-  }
+  return parseResponse(apiClient.get('/vms'), vmSummaryArraySchema)
 }
 
 export async function getVm(name: string): Promise<VmSummary> {
-  try {
-    return await requestJson<VmSummary>(`/api/vms/${encodeURIComponent(name)}`)
-  } catch {
-    return (
-      sampleVms().find((vm) => vm.name === name) ?? {
-        name,
-        state: 'unknown',
-        id: null,
-        vnc: false,
-      }
-    )
-  }
+  return parseResponse(
+    apiClient.get(`/vms/${encodeURIComponent(name)}`),
+    vmSummarySchema
+  )
 }
 
-export async function postVmAction(name: string, action: string): Promise<void> {
-  const response = await fetch(`/api/vms/${encodeURIComponent(name)}/${action}`, {
-    method: 'POST',
-  })
-  if (!response.ok) {
-    const text = await response.text().catch(() => 'VM action failed')
-    throw new Error(text)
-  }
+export async function postVmAction(
+  name: string,
+  action: string
+): Promise<void> {
+  await apiClient.post(`/vms/${encodeURIComponent(name)}/${action}`)
 }
 
 export async function createVm(input: VmCreateInput): Promise<VmSummary> {
-  return requestJson<VmSummary>('/api/vms', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  })
+  return parseResponse(apiClient.post('/vms', input), vmSummarySchema)
 }
 
-export async function updateVm(name: string, input: VmUpdateInput): Promise<VmSummary> {
-  return requestJson<VmSummary>(`/api/vms/${encodeURIComponent(name)}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  })
+export async function updateVm(
+  name: string,
+  input: VmUpdateInput
+): Promise<VmSummary> {
+  return parseResponse(
+    apiClient.put(`/vms/${encodeURIComponent(name)}`, input),
+    vmSummarySchema
+  )
 }
 
 export async function deleteVm(name: string): Promise<void> {
-  const response = await fetch(`/api/vms/${encodeURIComponent(name)}`, {
-    method: 'DELETE',
-  })
-  if (!response.ok) {
-    const text = await response.text().catch(() => 'Failed to delete VM')
-    throw new Error(text)
-  }
+  await apiClient.delete(`/vms/${encodeURIComponent(name)}`)
 }
