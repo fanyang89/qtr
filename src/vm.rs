@@ -1665,14 +1665,14 @@ fn query_serial_log(domain: &Domain) -> Result<Option<String>> {
 }
 
 fn parse_serial_log(xml: &str) -> Option<String> {
-    let console_start = xml.find("<console type='file'")?;
-    let console_xml = &xml[console_start..];
-    let console_end = console_xml.find("</console>")?;
-    let console_xml = &console_xml[..console_end];
-    let source_start = console_xml.find("<source ")?;
-    let source_xml = &console_xml[source_start..];
-    let source_end = source_xml.find('>')?;
-    parse_attr(&source_xml[..source_end], "path")
+    let doc = Document::parse(xml).ok()?;
+    let console = doc
+        .descendants()
+        .find(|node| node.has_tag_name("console") && node.attribute("type") == Some("file"))?;
+
+    optional_child(console, "source")?
+        .attribute("path")
+        .map(str::to_string)
 }
 
 #[derive(Clone, Debug)]
@@ -1706,20 +1706,29 @@ impl VncEndpoint {
 }
 
 fn parse_vnc_endpoint(xml: &str, fallback_listen: &str) -> Option<VncEndpoint> {
-    let graphics_start = xml.find("<graphics type='vnc'")?;
-    let graphics = &xml[graphics_start..];
-    let graphics_end = graphics.find('>')?;
-    let graphics_tag = &graphics[..graphics_end];
-    let port = parse_attr(graphics_tag, "port")?;
+    let doc = Document::parse(xml).ok()?;
+    let graphics = doc
+        .descendants()
+        .find(|node| node.has_tag_name("graphics") && node.attribute("type") == Some("vnc"))?;
+    let port = graphics.attribute("port")?;
     if port == "-1" {
         return None;
     }
 
-    let listen = parse_attr(graphics_tag, "listen")
-        .or_else(|| parse_nested_listen(graphics))
+    let listen = graphics
+        .attribute("listen")
+        .map(str::to_string)
+        .or_else(|| {
+            optional_child(graphics, "listen")
+                .and_then(|listen| listen.attribute("address"))
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| fallback_listen.to_string());
 
-    Some(VncEndpoint { listen, port })
+    Some(VncEndpoint {
+        listen,
+        port: port.to_string(),
+    })
 }
 
 fn local_vnc_endpoints(port: &str) -> Vec<String> {
@@ -1764,31 +1773,6 @@ fn format_endpoint(host: &str, port: &str) -> String {
     } else {
         format!("{host}:{port}")
     }
-}
-
-fn parse_nested_listen(graphics_xml: &str) -> Option<String> {
-    let listen_start = graphics_xml.find("<listen ")?;
-    let listen = &graphics_xml[listen_start..];
-    let listen_end = listen.find('>')?;
-    parse_attr(&listen[..listen_end], "address")
-}
-
-fn parse_attr(tag: &str, name: &str) -> Option<String> {
-    let single = format!("{name}='");
-    if let Some(start) = tag.find(&single) {
-        let value = &tag[start + single.len()..];
-        let end = value.find('\'')?;
-        return Some(value[..end].to_string());
-    }
-
-    let double = format!("{name}=\"");
-    if let Some(start) = tag.find(&double) {
-        let value = &tag[start + double.len()..];
-        let end = value.find('"')?;
-        return Some(value[..end].to_string());
-    }
-
-    None
 }
 
 fn wait_shutdown_domain(domain: &Domain, name: &str) -> Result<()> {
