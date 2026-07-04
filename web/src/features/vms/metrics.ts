@@ -9,6 +9,17 @@ export type VmRuntimeMetrics = {
   rx: string
 }
 
+const percentFormatter = new Intl.NumberFormat('en-US', {
+  style: 'percent',
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+})
+
+const mibRateFormatter = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
+
 export function vmMetricsByName(vms: VmSummary[]): Map<string, VmMetricSnapshot> {
   return new Map(
     vms
@@ -46,7 +57,7 @@ function formatCpuUsage(vm: VmSummary, previous?: VmMetricSnapshot): string {
   }
 
   const usage = (cpuDeltaNs / (elapsedMs * 1_000_000) / vm.vcpus) * 100
-  return `${Math.min(Math.max(usage, 0), 100).toFixed(1)}%`
+  return percentFormatter.format(Math.min(Math.max(usage, 0), 100) / 100)
 }
 
 function formatMemoryUsage(metrics: VmMetricSnapshot): string {
@@ -54,8 +65,8 @@ function formatMemoryUsage(metrics: VmMetricSnapshot): string {
     return '-'
   }
 
-  const percent = (metrics.memoryUsedMiB / metrics.memoryTotalMiB) * 100
-  return `${percent.toFixed(1)}%`
+  const percent = metrics.memoryUsedMiB / metrics.memoryTotalMiB
+  return percentFormatter.format(percent)
 }
 
 function formatByteRate(current?: number, previous?: number, currentAtMs?: number, previousAtMs?: number): string {
@@ -69,5 +80,5 @@ function formatByteRate(current?: number, previous?: number, currentAtMs?: numbe
     return '-'
   }
 
-  return `${(byteDelta / elapsedSeconds / 1024 / 1024).toFixed(2)} MiB/s`
+  return `${mibRateFormatter.format(byteDelta / elapsedSeconds / 1024 / 1024)} MiB/s`
 }
