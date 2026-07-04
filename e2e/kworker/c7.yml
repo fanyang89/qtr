@@ -12,7 +12,7 @@ disks:
     cache: none
     format: raw
     io: native
-    path: /dev/mapper/burst_backend
+    path: /dev/nullb0
     queues: 1
     target: vdb
     type: block

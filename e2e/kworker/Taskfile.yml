@@ -3,30 +3,26 @@
 version: "3"
 
 vars:
-  DISK_PATH: /home/fanmi/workspace/qtr/.tmp/disks/vm-data.raw
-  DISK_SIZE: 100G
-  DM_NAME: burst_backend
+  NULLB_NAME: nullb0
+  NULLB_SIZE_MIB: 102400
   VM_NAME: c7-957
   DATA_DEVICE: /dev/vdb
   VG_NAME: qtr_kworker
   LV_NAME: data
   MOUNT_POINT: /mnt/data
-  MOUNT_OPTIONS: defaults
-  READ_DELAY_MS: 0
-  WRITE_DELAY_MS: 100
-  FLUSH_DELAY_MS: 0
-  VM_EXEC_TIMEOUT_SECS: 420
+  MOUNT_OPTIONS: defaults,nobarrier
+  VM_EXEC_TIMEOUT_SECS: 900
 
 tasks:
   setup:
     desc: Set up kworker e2e resources
     cmds:
-      - task: setup-disk
+      - task: setup-nullb
 
   teardown:
     desc: Tear down kworker e2e resources
     cmds:
-      - task: teardown-disk
+      - task: teardown-nullb
 
   prepare-vm-filesystem:
     desc: Prepare the kworker e2e guest filesystem
@@ -46,44 +42,37 @@ tasks:
     cmds:
       - qtr vm exec {{.VM_NAME}} --timeout-secs {{.VM_EXEC_TIMEOUT_SECS}} --script "{{.TASKFILE_DIR}}/run-fio.sh"
 
-  setup-disk:
+  setup-nullb:
     internal: true
     cmds:
-      - mkdir -p "$(dirname "{{.DISK_PATH}}")"
-      - fallocate -l "{{.DISK_SIZE}}" "{{.DISK_PATH}}"
-      - task: setup-burst-backend
+      - sudo modprobe null_blk nr_devices=0
+      - if ! mountpoint -q /sys/kernel/config; then sudo mount -t configfs configfs /sys/kernel/config; fi
+      - |
+        set -eu
+        config_dir="/sys/kernel/config/nullb/{{.NULLB_NAME}}"
+        if [ -b "/dev/{{.NULLB_NAME}}" ]; then
+          exit 0
+        fi
+        if [ ! -d "$config_dir" ]; then
+          sudo mkdir "$config_dir"
+        fi
+        printf '2\n' | sudo tee "$config_dir/queue_mode" >/dev/null
+        printf '1\n' | sudo tee "$config_dir/memory_backed" >/dev/null
+        printf '{{.NULLB_SIZE_MIB}}\n' | sudo tee "$config_dir/size" >/dev/null
+        printf '1\n' | sudo tee "$config_dir/power" >/dev/null
+        test -b "/dev/{{.NULLB_NAME}}"
 
-  setup-burst-backend:
-    internal: true
-    vars:
-      LOOP:
-        sh: sudo losetup --find --show "{{.DISK_PATH}}"
-      SECTORS:
-        sh: sudo blockdev --getsz "{{.LOOP}}"
-    cmds:
-      # Defaults: read=0ms, write=100ms, flush=0ms
-      - echo "0 {{.SECTORS}} delay {{.LOOP}} 0 {{.READ_DELAY_MS}} {{.LOOP}} 0 {{.WRITE_DELAY_MS}} {{.LOOP}} 0 {{.FLUSH_DELAY_MS}}" | sudo dmsetup create "{{.DM_NAME}}"
-
-  teardown-disk:
-    internal: true
-    cmds:
-      - task: remove-burst-backend
-      - task: detach-vm-data-loop
-      - rm -f "{{.DISK_PATH}}"
-
-  remove-burst-backend:
+  teardown-nullb:
     internal: true
     status:
-      - '! sudo dmsetup info "{{.DM_NAME}}" >/dev/null 2>&1'
+      - 'test ! -d /sys/kernel/config/nullb/{{.NULLB_NAME}}'
     cmds:
-      - sudo dmsetup remove "{{.DM_NAME}}"
-
-  detach-vm-data-loop:
-    internal: true
-    vars:
-      LOOP:
-        sh: 'sudo losetup -j "{{.DISK_PATH}}" | cut -d: -f1'
-    status:
-      - 'test -z "{{.LOOP}}"'
-    cmds:
-      - sudo losetup -d "{{.LOOP}}"
+      - |
+        set -eu
+        config_dir="/sys/kernel/config/nullb/{{.NULLB_NAME}}"
+        if [ -d "$config_dir" ]; then
+          if [ -e "$config_dir/power" ]; then
+            printf '0\n' | sudo tee "$config_dir/power" >/dev/null || true
+          fi
+          sudo rmdir "$config_dir"
+        fi
