@@ -161,7 +161,7 @@ cargo run -- vm cp install-os ./fio.conf guest:/tmp/fio.conf
 cargo run -- vm cp install-os guest:/tmp/qtr-fio.json ./results/qtr-fio.json --parents
 ```
 
-`vm exec --script` uploads a local script to a temporary guest path, runs it with `/bin/sh`, captures stdout/stderr, then removes the guest copy. `--output` writes a JSON result with exit code, elapsed time, stdout and stderr. The guest needs QEMU Guest Agent running.
+`vm exec --script` uploads a local script to a temporary guest path, runs it with `/bin/sh`, streams stdout/stderr, then removes the guest copy. `--output` disables streaming and writes a JSON result with exit code, elapsed time, stdout and stderr. The guest needs QEMU Guest Agent running.
 
 If `vm exec` reports that `guest-exec` is disabled, enable the `guest-exec` RPC in the guest's `qemu-ga` configuration. Remove it from `block-rpcs`/`blacklist`, or add it to `allow-rpcs`, then restart `qemu-guest-agent` inside the guest.
 

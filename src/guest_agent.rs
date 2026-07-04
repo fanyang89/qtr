@@ -16,6 +16,22 @@ pub struct GuestExecResult {
     pub stderr: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub struct GuestExecChild {
+    pub pid: i64,
+}
+
+#[derive(Debug)]
+pub struct GuestExecStatus {
+    pub exited: bool,
+    pub exitcode: Option<i32>,
+}
+
+pub struct GuestFileChunk {
+    pub data: Vec<u8>,
+    pub eof: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct GuestExecStartResponse {
     #[serde(rename = "return")]
@@ -92,6 +108,17 @@ struct GuestFileReadReturn {
     eof: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct GuestFileSeekResponse {
+    #[serde(rename = "return")]
+    result: GuestFileSeekReturn,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestFileSeekReturn {
+    position: i64,
+}
+
 #[derive(Debug, Serialize)]
 struct GuestExecArgs<'a> {
     path: &'a str,
@@ -117,6 +144,16 @@ pub fn wait_ready(domain: &Domain, timeout: Duration) -> Result<()> {
 }
 
 pub fn run_command(domain: &Domain, command: &str, timeout: Duration) -> Result<GuestExecResult> {
+    let child = start_command(domain, command, true)?;
+
+    wait_exec_status(domain, child.pid, timeout)
+}
+
+pub fn start_command(
+    domain: &Domain,
+    command: &str,
+    capture_output: bool,
+) -> Result<GuestExecChild> {
     if matches!(guest_command_enabled(domain, "guest-exec"), Ok(Some(false))) {
         bail!(guest_exec_disabled_message());
     }
@@ -124,7 +161,7 @@ pub fn run_command(domain: &Domain, command: &str, timeout: Duration) -> Result<
     let args = GuestExecArgs {
         path: "/bin/sh",
         arg: vec!["-lc", command],
-        capture_output: true,
+        capture_output,
     };
     let request = json!({
         "execute": "guest-exec",
@@ -140,7 +177,9 @@ pub fn run_command(domain: &Domain, command: &str, timeout: Duration) -> Result<
     let start: GuestExecStartResponse = serde_json::from_str(&response)
         .with_context(|| format!("failed to parse guest-exec response: {response}"))?;
 
-    wait_exec_status(domain, start.result.pid, timeout)
+    Ok(GuestExecChild {
+        pid: start.result.pid,
+    })
 }
 
 fn guest_command_enabled(domain: &Domain, command: &str) -> Result<Option<bool>> {
@@ -200,9 +239,22 @@ pub fn read_file(domain: &Domain, path: &str) -> Result<Vec<u8>> {
     Ok(contents)
 }
 
-struct GuestFileChunk {
-    data: Vec<u8>,
-    eof: bool,
+pub fn read_file_from(
+    domain: &Domain,
+    path: &str,
+    offset: i64,
+    count: i64,
+) -> Result<GuestFileChunk> {
+    let handle = open_file(domain, path, "r")?;
+    let read_result: Result<GuestFileChunk> = (|| {
+        seek_file(domain, handle, offset)?;
+        read_file_chunk(domain, handle, count)
+    })();
+    let close_result = close_file(domain, handle);
+    let chunk = read_result?;
+    close_result?;
+
+    Ok(chunk)
 }
 
 fn open_file(domain: &Domain, path: &str, mode: &str) -> Result<i64> {
@@ -274,6 +326,30 @@ fn read_file_chunk(domain: &Domain, handle: i64, count: i64) -> Result<GuestFile
     })
 }
 
+fn seek_file(domain: &Domain, handle: i64, offset: i64) -> Result<()> {
+    let request = json!({
+        "execute": "guest-file-seek",
+        "arguments": {
+            "handle": handle,
+            "offset": offset,
+            "whence": "set",
+        },
+    });
+    let response = send_command(domain, &request.to_string())
+        .with_context(|| format!("failed to seek guest file handle {handle}"))?;
+    let seek: GuestFileSeekResponse = serde_json::from_str(&response)
+        .with_context(|| format!("failed to parse guest-file-seek response: {response}"))?;
+    if seek.result.position != offset {
+        bail!(
+            "guest file seek landed at {} instead of {}",
+            seek.result.position,
+            offset
+        );
+    }
+
+    Ok(())
+}
+
 fn flush_file(domain: &Domain, handle: i64) -> Result<()> {
     let request = json!({
         "execute": "guest-file-flush",
@@ -300,21 +376,10 @@ fn wait_exec_status(domain: &Domain, pid: i64, timeout: Duration) -> Result<Gues
     let started = Instant::now();
 
     loop {
-        let request = json!({
-            "execute": "guest-exec-status",
-            "arguments": { "pid": pid },
-        });
-        let response = send_command(domain, &request.to_string())
-            .with_context(|| format!("failed to query guest command pid {pid}"))?;
-        let status: GuestExecStatusResponse = serde_json::from_str(&response)
-            .with_context(|| format!("failed to parse guest-exec-status response: {response}"))?;
+        let status = query_raw_exec_status(domain, pid)?;
 
         if status.result.exited {
-            let exitcode = match (status.result.exitcode, status.result.signal) {
-                (Some(code), _) => code,
-                (None, Some(signal)) => 128 + signal,
-                (None, None) => return Err(anyhow!("guest command exited without exit code")),
-            };
+            let exitcode = exec_status_exitcode(&status.result)?;
             let stdout = decode_output(status.result.out_data.as_deref(), "stdout")?;
             let stderr = decode_output(status.result.err_data.as_deref(), "stderr")?;
 
@@ -330,6 +395,39 @@ fn wait_exec_status(domain: &Domain, pid: i64, timeout: Duration) -> Result<Gues
         }
 
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+pub fn query_exec_status(domain: &Domain, pid: i64) -> Result<GuestExecStatus> {
+    let status = query_raw_exec_status(domain, pid)?;
+    let exitcode = if status.result.exited {
+        Some(exec_status_exitcode(&status.result)?)
+    } else {
+        None
+    };
+
+    Ok(GuestExecStatus {
+        exited: status.result.exited,
+        exitcode,
+    })
+}
+
+fn query_raw_exec_status(domain: &Domain, pid: i64) -> Result<GuestExecStatusResponse> {
+    let request = json!({
+        "execute": "guest-exec-status",
+        "arguments": { "pid": pid },
+    });
+    let response = send_command(domain, &request.to_string())
+        .with_context(|| format!("failed to query guest command pid {pid}"))?;
+    serde_json::from_str(&response)
+        .with_context(|| format!("failed to parse guest-exec-status response: {response}"))
+}
+
+fn exec_status_exitcode(status: &GuestExecStatusReturn) -> Result<i32> {
+    match (status.exitcode, status.signal) {
+        (Some(code), _) => Ok(code),
+        (None, Some(signal)) => Ok(128 + signal),
+        (None, None) => Err(anyhow!("guest command exited without exit code")),
     }
 }
 

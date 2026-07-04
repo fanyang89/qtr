@@ -245,6 +245,12 @@ enum VmCopyEndpoint {
     Guest(String),
 }
 
+#[derive(Debug)]
+struct GuestOutputStream {
+    path: String,
+    offset: i64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VmMetrics {
@@ -1903,7 +1909,11 @@ fn exec(args: VmExecArgs) -> Result<()> {
     };
 
     let started = Instant::now();
-    let exec_result = guest_agent::run_command(&domain, &command, timeout);
+    let exec_result = if args.output.is_some() {
+        guest_agent::run_command(&domain, &command, timeout)
+    } else {
+        stream_guest_command(&domain, &command, timeout)
+    };
     let elapsed_ms = started.elapsed().as_millis();
     if let Some(guest_path) = &guest_path {
         let cleanup = format!("rm -f {}", shell_quote(guest_path));
@@ -1942,6 +1952,139 @@ fn exec(args: VmExecArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn stream_guest_command(
+    domain: &Domain,
+    command: &str,
+    timeout: Duration,
+) -> Result<guest_agent::GuestExecResult> {
+    const STREAM_CHUNK_SIZE: i64 = 48 * 1024;
+
+    let id = Uuid::new_v4();
+    let stdout_path = format!("/tmp/qtr-exec-{id}.stdout");
+    let stderr_path = format!("/tmp/qtr-exec-{id}.stderr");
+    let mut stdout_stream = GuestOutputStream {
+        path: stdout_path.clone(),
+        offset: 0,
+    };
+    let mut stderr_stream = GuestOutputStream {
+        path: stderr_path.clone(),
+        offset: 0,
+    };
+
+    guest_agent::write_file(domain, &stdout_path, b"")
+        .with_context(|| format!("failed to create guest stdout file {stdout_path}"))?;
+    guest_agent::write_file(domain, &stderr_path, b"")
+        .with_context(|| format!("failed to create guest stderr file {stderr_path}"))?;
+
+    let run_result = (|| {
+        let wrapped_command = format!(
+            "( {} ) > {} 2> {}",
+            command,
+            shell_quote(&stdout_path),
+            shell_quote(&stderr_path)
+        );
+        let child = guest_agent::start_command(domain, &wrapped_command, false)?;
+        let started = Instant::now();
+
+        loop {
+            drain_guest_output_stream(
+                domain,
+                &mut stdout_stream,
+                &mut io::stdout(),
+                "stdout",
+                STREAM_CHUNK_SIZE,
+            )?;
+            drain_guest_output_stream(
+                domain,
+                &mut stderr_stream,
+                &mut io::stderr(),
+                "stderr",
+                STREAM_CHUNK_SIZE,
+            )?;
+
+            let status = guest_agent::query_exec_status(domain, child.pid)?;
+            if status.exited {
+                drain_guest_output_stream(
+                    domain,
+                    &mut stdout_stream,
+                    &mut io::stdout(),
+                    "stdout",
+                    STREAM_CHUNK_SIZE,
+                )?;
+                drain_guest_output_stream(
+                    domain,
+                    &mut stderr_stream,
+                    &mut io::stderr(),
+                    "stderr",
+                    STREAM_CHUNK_SIZE,
+                )?;
+
+                return Ok(guest_agent::GuestExecResult {
+                    exitcode: status
+                        .exitcode
+                        .context("guest command exited without exit code")?,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+
+            if started.elapsed() >= timeout {
+                bail!("timed out waiting for guest command pid {}", child.pid);
+            }
+
+            thread::sleep(Duration::from_secs(1));
+        }
+    })();
+
+    cleanup_guest_paths(domain, &[&stdout_path, &stderr_path]);
+
+    run_result
+}
+
+fn drain_guest_output_stream<W: Write>(
+    domain: &Domain,
+    stream: &mut GuestOutputStream,
+    writer: &mut W,
+    stream_name: &str,
+    chunk_size: i64,
+) -> Result<()> {
+    loop {
+        let chunk = guest_agent::read_file_from(domain, &stream.path, stream.offset, chunk_size)
+            .with_context(|| format!("failed to read guest {stream_name} file {}", stream.path))?;
+        if chunk.data.is_empty() {
+            return Ok(());
+        }
+
+        writer
+            .write_all(&chunk.data)
+            .with_context(|| format!("failed to write guest {stream_name}"))?;
+        writer
+            .flush()
+            .with_context(|| format!("failed to flush guest {stream_name}"))?;
+        stream.offset += chunk.data.len() as i64;
+
+        if chunk.eof {
+            return Ok(());
+        }
+    }
+}
+
+fn cleanup_guest_paths(domain: &Domain, paths: &[&str]) {
+    if paths.is_empty() {
+        return;
+    }
+
+    let quoted_paths = paths
+        .iter()
+        .map(|path| shell_quote(path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleanup = format!("rm -f {quoted_paths}");
+    if let Err(err) = guest_agent::run_command(domain, &cleanup, Duration::from_secs(30)) {
+        eprintln!("[qtr] warning: failed to remove guest output files: {err}");
+    }
 }
 
 fn write_exec_output(path: &Path, output: &VmExecOutput) -> Result<()> {
