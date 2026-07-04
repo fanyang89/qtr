@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: "3"
+
+vars:
+  NFPM: nfpm
+  QTR_VERSION:
+    sh: cargo pkgid | cut -d# -f2
+
+tasks:
+  build:
+    desc: Build the qtr release binary
+    cmds:
+      - cargo build --release
+
+  package:rpm:
+    desc: Build the qtr RPM package
+    deps:
+      - build
+    cmds:
+      - mkdir -p dist
+      - QTR_VERSION="{{.QTR_VERSION}}" {{.NFPM}} pkg --packager rpm --target dist/
+
+  package:
+    desc: Build all release packages
+    deps:
+      - package:rpm
+
+  clean:dist:
+    desc: Remove release package artifacts
+    cmds:
+      - rm -rf dist

@@ -1,0 +1,34 @@
+name: qtr
+arch: amd64
+platform: linux
+version: ${QTR_VERSION}
+version_schema: semver
+release: 1
+maintainer: fanyang
+description: QEMU/libvirt VM manager
+license: MIT
+vendor: qtr
+
+contents:
+  - src: ./target/release/qtr
+    dst: /usr/bin/qtr
+    file_info:
+      mode: 0755
+
+depends:
+  - acl
+  - iscsi-initiator-utils
+  - libvirt-client
+  - libvirt-daemon
+  - libvirt-daemon-config-network
+  - libvirt-daemon-driver-qemu
+  - libvirt-daemon-kvm
+  - libvirt-libs
+  - polkit
+  - qemu-img
+  - qemu-kvm
+  - shadow-utils
+  - systemd
+
+rpm:
+  group: Applications/System

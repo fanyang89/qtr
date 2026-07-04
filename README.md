@@ -63,6 +63,27 @@ qemu:///system
 
 If `virsh` reports `no connection driver available for qemu:///system`, install `libvirt-daemon-driver-qemu` and restart `libvirtd`.
 
+## RPM Packaging
+
+Build the RPM package with nFPM:
+
+```bash
+task package:rpm
+```
+
+The package installs `qtr` to `/usr/bin/qtr` and depends on the libvirt, QEMU, iSCSI, ACL, polkit and systemd packages needed by the CLI. The Web UI is still in development and is not included in the RPM.
+
+After installing the RPM, start libvirt and grant user access for the VM media directories you use:
+
+```bash
+sudo systemctl enable --now libvirtd
+sudo qtr host setup-libvirt-access \
+  --qemu-rw-dir /path/to/disks \
+  --qemu-rw-dir /path/to/logs \
+  --qemu-ro-dir /path/to/iso
+newgrp libvirt
+```
+
 ## External Storage
 
 qtr exposes external storage as backends and volumes. iSCSI protocol details are handled internally by the storage driver.
