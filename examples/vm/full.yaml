@@ -12,6 +12,7 @@ disks:
   bus: virtio-scsi
   cache: none
   io: native
+  queues: 4
 cdrom: /path/to/installer.iso
 boot:
 - cdrom

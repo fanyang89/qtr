@@ -82,6 +82,7 @@ const vmFormSchema = z.object({
           ])
           .optional(),
         io: z.enum(['threads', 'native', 'io_uring']).optional(),
+        queues: z.number().int().positive().optional(),
       })
     )
     .min(1, 'At least one disk is required'),

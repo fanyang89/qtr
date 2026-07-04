@@ -24,6 +24,7 @@ pub struct VmLaunchDiskSpec<'a> {
     pub bus: String,
     pub cache: Option<&'a str>,
     pub io: Option<&'a str>,
+    pub queues: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,10 +139,14 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         .map(|cache| format!(" cache='{cache}'"))
         .unwrap_or_default();
     let io = disk.io.map(|io| format!(" io='{io}'")).unwrap_or_default();
+    let queues = disk
+        .queues
+        .map(|queues| format!(" queues='{queues}'"))
+        .unwrap_or_default();
 
     format!(
         r#"    <disk type='{disk_type}' device='disk'>
-      <driver name='qemu' type='{format}'{cache}{io}/>
+      <driver name='qemu' type='{format}'{cache}{io}{queues}/>
       <source {source_attr}='{path}'/>
       <target dev='{target}' bus='{bus}'/>
     </disk>
@@ -150,6 +155,7 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         format = disk.format.as_qemu_arg(),
         cache = cache,
         io = io,
+        queues = queues,
         source_attr = source_attr,
         path = escape_xml(&disk.path.display().to_string()),
         target = escape_xml(&disk.target),

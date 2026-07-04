@@ -179,6 +179,7 @@ disks:
   bus: virtio-scsi
   cache: none
   io: native
+  queues: 4
 ```
 
-Prefer stable `/dev/disk/by-id/...` paths, ensure the host is not using the device, and expose it as a non-boot disk such as `target: sda` for performance tests.
+Prefer stable `/dev/disk/by-id/...` paths, ensure the host is not using the device, and expose it as a non-boot disk such as `target: sda` for performance tests. Omit `queues` to use the QEMU default; set `queues: 1` for explicit single-queue mode.

@@ -91,6 +91,8 @@ pub struct VmDisk {
     pub cache: Option<VmDiskCache>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub io: Option<VmDiskIo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queues: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -213,6 +215,7 @@ pub struct VmSummaryDisk {
     pub bus: VmDiskBus,
     pub cache: Option<VmDiskCache>,
     pub io: Option<VmDiskIo>,
+    pub queues: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -293,6 +296,7 @@ fn init(args: VmInitArgs) -> Result<()> {
             bus: VmDiskBus::VirtioBlk,
             cache: None,
             io: None,
+            queues: None,
         })
         .collect();
     let serial_log = PathBuf::from(format!(".tmp/logs/{}.serial.log", args.name));
@@ -459,6 +463,7 @@ fn launch_disk_spec(disk: &VmDisk, index: usize) -> VmLaunchDiskSpec<'_> {
         bus: disk.bus.target_bus().to_string(),
         cache: disk.cache.map(VmDiskCache::as_xml),
         io: disk.io.map(VmDiskIo::as_xml),
+        queues: disk.queues,
     }
 }
 
@@ -1030,6 +1035,10 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 .and_then(|driver| driver.attribute("io"))
                 .map(parse_disk_io)
                 .transpose()?;
+            let queues = driver
+                .and_then(|driver| driver.attribute("queues"))
+                .map(parse_disk_queues)
+                .transpose()?;
 
             Ok(VmDisk {
                 disk_type,
@@ -1039,6 +1048,7 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 bus,
                 cache,
                 io,
+                queues,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1094,6 +1104,17 @@ fn parse_disk_io(value: &str) -> Result<VmDiskIo> {
         "io_uring" => Ok(VmDiskIo::IoUring),
         _ => bail!("unsupported disk io mode {value:?}"),
     }
+}
+
+fn parse_disk_queues(value: &str) -> Result<u16> {
+    let queues = value
+        .parse::<u16>()
+        .with_context(|| format!("failed to parse disk queues {value:?}"))?;
+    if queues == 0 {
+        bail!("disk queues must be greater than 0");
+    }
+
+    Ok(queues)
 }
 
 fn optional_disk_source_path(
@@ -1313,6 +1334,9 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
                 bail!("virtio-scsi disk target {target} must start with sd")
             }
             _ => {}
+        }
+        if disk.queues == Some(0) {
+            bail!("disk queues must be greater than 0");
         }
 
         if !disk.path.exists() {
@@ -1565,6 +1589,7 @@ fn parse_summary_definition(
                 bus: disk.bus,
                 cache: disk.cache,
                 io: disk.io,
+                queues: disk.queues,
             })
             .collect()
     });
@@ -2262,6 +2287,7 @@ mod tests {
                 bus: "virtio".to_string(),
                 cache: None,
                 io: None,
+                queues: None,
             },
             VmLaunchDiskSpec {
                 path: PathBuf::from("/dev/disk/by-id/qtr-test-disk"),
@@ -2271,6 +2297,7 @@ mod tests {
                 bus: "scsi".to_string(),
                 cache: Some("none"),
                 io: Some("native"),
+                queues: Some(4),
             },
         ];
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
@@ -2310,6 +2337,7 @@ mod tests {
         assert_eq!(manifest.disks[1].bus, VmDiskBus::VirtioScsi);
         assert_eq!(manifest.disks[1].cache, Some(VmDiskCache::None));
         assert_eq!(manifest.disks[1].io, Some(VmDiskIo::Native));
+        assert_eq!(manifest.disks[1].queues, Some(4));
         assert!(xml.contains("<controller type='scsi' index='0' model='virtio-scsi'/>"));
         assert_eq!(manifest.cdrom, Some(PathBuf::from("/isos/os.iso")));
         assert_eq!(
@@ -2407,6 +2435,7 @@ mod tests {
                 bus: VmDiskBus::VirtioBlk,
                 cache: None,
                 io: None,
+                queues: None,
             }],
             cdrom: Some(PathBuf::from(
                 "/home/fanmi/workspace/qtr/.tmp/iso/CentOS-7-x86_64-DVD-2207-02.iso",

@@ -37,6 +37,7 @@ const vmDiskSchema = z.object({
     ])
     .optional(),
   io: z.enum(['threads', 'native', 'io_uring']).optional(),
+  queues: z.number().int().positive().optional(),
 })
 
 const vmSummarySchema = z.object({
