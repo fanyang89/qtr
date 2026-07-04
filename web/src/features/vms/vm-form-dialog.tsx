@@ -1,7 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { z } from 'zod'
 import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
+import { Lock, Plus, Trash2 } from 'lucide-react'
 import type { VmCreateInput, VmSummary, VmUpdateInput } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import {
@@ -12,6 +13,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import {
   Form,
   FormControl,
@@ -29,6 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 
 const emptyStringToUndefined = (value: string | undefined) =>
   value === '' ? undefined : value
@@ -60,8 +68,10 @@ const vmFormSchema = z.object({
   cdrom: optionalString,
   boot: z
     .string()
-    .default('hd')
-    .transform((value) => value.split(',').filter(Boolean)),
+    .optional()
+    .transform((value) =>
+      value ? value.split(',').filter(Boolean) : undefined
+    ),
   memoryGiB: z.coerce.number<string | number>().int().min(1).max(512),
   vcpus: z.coerce.number<string | number>().int().min(1).max(128),
   network: z.string().min(1, 'Network is required'),
@@ -82,6 +92,27 @@ type VmFormDialogProps = {
   onSubmit: (input: VmCreateInput | VmUpdateInput) => Promise<void>
   isLoading?: boolean
 }
+
+type HardwareType =
+  | 'resources'
+  | 'systemDisk'
+  | 'network'
+  | 'graphics'
+  | 'cdrom'
+  | 'serialLog'
+
+type OptionalHardwareType = 'cdrom' | 'serialLog'
+
+type HardwareState = {
+  key: string
+  enabledOptional: OptionalHardwareType[]
+  selectedHardware: HardwareType
+}
+
+const OPTIONAL_HARDWARE: { type: OptionalHardwareType; label: string }[] = [
+  { type: 'cdrom', label: 'CDROM / ISO' },
+  { type: 'serialLog', label: 'Serial Log' },
+]
 
 const defaultValues: VmFormInput = {
   name: '',
@@ -115,6 +146,24 @@ function summaryToDefaultValues(vm: VmSummary): VmFormInput {
   }
 }
 
+function detectOptionalHardware(vm: VmSummary): OptionalHardwareType[] {
+  const enabled: OptionalHardwareType[] = []
+  if (vm.cdrom) enabled.push('cdrom')
+  if (vm.serialLog) enabled.push('serialLog')
+  return enabled
+}
+
+function initialHardwareState(
+  key: string,
+  vm?: VmSummary | null
+): HardwareState {
+  return {
+    key,
+    enabledOptional: vm ? detectOptionalHardware(vm) : [],
+    selectedHardware: 'resources',
+  }
+}
+
 export function VmFormDialog({
   open,
   onOpenChange,
@@ -127,6 +176,15 @@ export function VmFormDialog({
     resolver: zodResolver(vmFormSchema, undefined, { raw: true }),
     defaultValues,
   })
+  const hardwareKey = open ? `${mode}:${vm?.name ?? 'new'}` : 'closed'
+  const [hardwareState, setHardwareState] = useState<HardwareState>(() =>
+    initialHardwareState(hardwareKey, vm)
+  )
+  const currentHardware =
+    hardwareState.key === hardwareKey
+      ? hardwareState
+      : initialHardwareState(hardwareKey, vm)
+  const { enabledOptional, selectedHardware } = currentHardware
 
   useEffect(() => {
     if (open) {
@@ -134,11 +192,66 @@ export function VmFormDialog({
     }
   }, [open, vm, form])
 
-  const graphics = useWatch({ control: form.control, name: 'graphics' })
+  const [
+    graphics,
+    vcpus,
+    memoryGiB,
+    systemDisk,
+    network,
+    cdrom,
+    serialLog,
+    vncListen,
+    vncPort,
+  ] = useWatch({
+    control: form.control,
+    name: [
+      'graphics',
+      'vcpus',
+      'memoryGiB',
+      'systemDisk',
+      'network',
+      'cdrom',
+      'serialLog',
+      'vncListen',
+      'vncPort',
+    ],
+  })
   const isEdit = mode === 'edit'
 
+  function addOptional(type: OptionalHardwareType) {
+    setHardwareState({
+      key: hardwareKey,
+      enabledOptional: [...enabledOptional, type],
+      selectedHardware: type,
+    })
+    if (type === 'cdrom') form.setValue('cdrom', '')
+    if (type === 'serialLog') form.setValue('serialLog', '')
+  }
+
+  function removeOptional(type: OptionalHardwareType) {
+    setHardwareState({
+      key: hardwareKey,
+      enabledOptional: enabledOptional.filter((t) => t !== type),
+      selectedHardware: 'resources',
+    })
+    if (type === 'cdrom') form.setValue('cdrom', '')
+    if (type === 'serialLog') form.setValue('serialLog', '')
+  }
+
+  function selectHardware(type: HardwareType) {
+    setHardwareState({
+      key: hardwareKey,
+      enabledOptional,
+      selectedHardware: type,
+    })
+  }
+
   async function handleSubmit(rawValues: VmFormInput) {
-    const values: VmFormValues = vmFormSchema.parse(rawValues)
+    const cleaned: VmFormInput = { ...rawValues }
+    if (!enabledOptional.includes('cdrom')) cleaned.cdrom = ''
+    if (!enabledOptional.includes('serialLog')) cleaned.serialLog = ''
+
+    const values: VmFormValues = vmFormSchema.parse(cleaned)
     const { createSystemDisk, ...base } = values
 
     if (mode === 'create') {
@@ -153,9 +266,77 @@ export function VmFormDialog({
     }
   }
 
+  const hardwareList = useMemo(
+    () => [
+      {
+        type: 'resources' as const,
+        label: 'CPU & Memory',
+        summary: `${vcpus ?? 2} vCPU(s) · ${memoryGiB ?? 4} GiB`,
+        locked: true,
+      },
+      {
+        type: 'systemDisk' as const,
+        label: 'System Disk',
+        summary: systemDisk || 'Not set',
+        locked: true,
+      },
+      {
+        type: 'network' as const,
+        label: 'Network',
+        summary: network || 'Not set',
+        locked: true,
+      },
+      {
+        type: 'graphics' as const,
+        label: 'Graphics',
+        summary:
+          graphics === 'vnc'
+            ? `VNC @ ${vncListen || '127.0.0.1'}${vncPort ? `:${vncPort}` : ''}`
+            : 'None',
+        locked: true,
+      },
+      ...(enabledOptional.includes('cdrom')
+        ? [
+            {
+              type: 'cdrom' as const,
+              label: 'CDROM / ISO',
+              summary: cdrom || 'Not set',
+              locked: false,
+            },
+          ]
+        : []),
+      ...(enabledOptional.includes('serialLog')
+        ? [
+            {
+              type: 'serialLog' as const,
+              label: 'Serial Log',
+              summary: serialLog || 'Not set',
+              locked: false,
+            },
+          ]
+        : []),
+    ],
+    [
+      vcpus,
+      memoryGiB,
+      systemDisk,
+      network,
+      graphics,
+      vncListen,
+      vncPort,
+      cdrom,
+      serialLog,
+      enabledOptional,
+    ]
+  )
+
+  const availableOptional = OPTIONAL_HARDWARE.filter(
+    (h) => !enabledOptional.includes(h.type)
+  )
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='max-w-2xl'>
+      <DialogContent className='w-[90vw] max-w-5xl'>
         <DialogHeader>
           <DialogTitle>
             {isEdit ? 'Edit Virtual Machine' : 'Create Virtual Machine'}
@@ -190,198 +371,90 @@ export function VmFormDialog({
               )}
             />
 
-            <FormField
-              control={form.control}
-              name='systemDisk'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>System Disk Path</FormLabel>
-                  <FormControl>
-                    <Input {...field} placeholder='.tmp/disks/sys.qcow2' />
-                  </FormControl>
-                  <FormDescription>
-                    Path to the qcow2 system disk.
-                  </FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
+            <div className='grid gap-4 md:grid-cols-[18rem_1fr]'>
+              <div className='flex min-h-[28rem] flex-col gap-3'>
+                <div className='rounded-lg border'>
+                  <Table>
+                    <TableBody>
+                      {hardwareList.map((hw) => (
+                        <TableRow
+                          key={hw.type}
+                          data-selected={selectedHardware === hw.type}
+                          className='cursor-pointer data-[selected=true]:bg-muted'
+                          onClick={() => selectHardware(hw.type)}
+                        >
+                          <TableCell className='py-3'>
+                            <div className='flex items-center justify-between gap-2'>
+                              <div>
+                                <div className='flex items-center gap-1.5 font-medium'>
+                                  {hw.label}
+                                  {hw.locked && (
+                                    <Lock className='size-3 text-muted-foreground' />
+                                  )}
+                                </div>
+                                <div className='max-w-[14rem] truncate text-xs text-muted-foreground'>
+                                  {hw.summary}
+                                </div>
+                              </div>
+                              {!hw.locked && (
+                                <Button
+                                  type='button'
+                                  variant='ghost'
+                                  size='icon'
+                                  className='size-6'
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    removeOptional(
+                                      hw.type as OptionalHardwareType
+                                    )
+                                  }}
+                                >
+                                  <Trash2 className='size-3.5 text-destructive' />
+                                </Button>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant='outline'
+                      size='sm'
+                      disabled={availableOptional.length === 0}
+                    >
+                      <Plus className='size-4' />
+                      Add hardware
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align='start'>
+                    {availableOptional.map((h) => (
+                      <DropdownMenuItem
+                        key={h.type}
+                        onClick={() => addOptional(h.type)}
+                      >
+                        {h.label}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
 
-            {!isEdit && (
-              <FormField
-                control={form.control}
-                name='createSystemDisk'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Create System Disk Size</FormLabel>
-                    <FormControl>
-                      <Input {...field} placeholder='40G (optional)' />
-                    </FormControl>
-                    <FormDescription>
-                      Leave empty if the disk already exists.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            )}
-
-            <FormField
-              control={form.control}
-              name='cdrom'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>CDROM / ISO Path</FormLabel>
-                  <FormControl>
-                    <Input
-                      {...field}
-                      placeholder='.tmp/iso/os.iso (optional)'
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
-            <div className='grid gap-4 sm:grid-cols-2'>
-              <FormField
-                control={form.control}
-                name='memoryGiB'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Memory (GiB)</FormLabel>
-                    <FormControl>
-                      <Input {...field} type='number' min={1} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name='vcpus'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>vCPUs</FormLabel>
-                    <FormControl>
-                      <Input {...field} type='number' min={1} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            <div className='grid gap-4 sm:grid-cols-2'>
-              <FormField
-                control={form.control}
-                name='network'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Network</FormLabel>
-                    <FormControl>
-                      <Input {...field} placeholder='default' />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name='graphics'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Graphics</FormLabel>
-                    <Select onValueChange={field.onChange} value={field.value}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value='vnc'>VNC</SelectItem>
-                        <SelectItem value='none'>None</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            {graphics === 'vnc' && (
-              <div className='grid gap-4 sm:grid-cols-2'>
-                <FormField
+              <div className='min-h-[28rem] rounded-lg border bg-card p-4'>
+                <div className='mb-4 text-sm font-medium text-muted-foreground'>
+                  Edit{' '}
+                  {hardwareList.find((h) => h.type === selectedHardware)?.label}
+                </div>
+                <HardwareEditPanel
+                  type={selectedHardware}
                   control={form.control}
-                  name='vncListen'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>VNC Listen Address</FormLabel>
-                      <FormControl>
-                        <Input {...field} placeholder='127.0.0.1' />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name='vncPort'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>VNC Port</FormLabel>
-                      <FormControl>
-                        <Input {...field} placeholder='Auto (optional)' />
-                      </FormControl>
-                      <FormDescription>
-                        Leave empty for auto-assignment.
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
+                  isEdit={isEdit}
                 />
               </div>
-            )}
-
-            <FormField
-              control={form.control}
-              name='boot'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Boot Order</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value='hd'>Hard Disk</SelectItem>
-                      <SelectItem value='cdrom,hd'>CDROM, Hard Disk</SelectItem>
-                      <SelectItem value='hd,cdrom'>Hard Disk, CDROM</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
-            <FormField
-              control={form.control}
-              name='serialLog'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Serial Log Path</FormLabel>
-                  <FormControl>
-                    <Input
-                      {...field}
-                      placeholder='.tmp/logs/<name>.serial.log (optional)'
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
+            </div>
           </form>
         </Form>
         <DialogFooter>
@@ -398,5 +471,229 @@ export function VmFormDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function HardwareEditPanel({
+  type,
+  control,
+  isEdit,
+}: {
+  type: HardwareType
+  control: ReturnType<typeof useForm<VmFormInput>>['control']
+  isEdit: boolean
+}) {
+  switch (type) {
+    case 'resources':
+      return (
+        <div className='grid gap-4 sm:grid-cols-2'>
+          <FormField
+            control={control}
+            name='vcpus'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>vCPUs</FormLabel>
+                <FormControl>
+                  <Input {...field} type='number' min={1} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={control}
+            name='memoryGiB'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Memory (GiB)</FormLabel>
+                <FormControl>
+                  <Input {...field} type='number' min={1} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
+      )
+    case 'systemDisk':
+      return (
+        <div className='grid gap-4'>
+          <FormField
+            control={control}
+            name='systemDisk'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Disk Path</FormLabel>
+                <FormControl>
+                  <Input {...field} placeholder='.tmp/disks/sys.qcow2' />
+                </FormControl>
+                <FormDescription>
+                  Path to the qcow2 system disk.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          {!isEdit && (
+            <FormField
+              control={control}
+              name='createSystemDisk'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Create Disk Size</FormLabel>
+                  <FormControl>
+                    <Input {...field} placeholder='40G (optional)' />
+                  </FormControl>
+                  <FormDescription>
+                    Leave empty if the disk already exists.
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          )}
+          <FormField
+            control={control}
+            name='boot'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Boot Order</FormLabel>
+                <Select onValueChange={field.onChange} value={field.value}>
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value='hd'>Hard Disk</SelectItem>
+                    <SelectItem value='cdrom,hd'>CDROM, Hard Disk</SelectItem>
+                    <SelectItem value='hd,cdrom'>Hard Disk, CDROM</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
+      )
+    case 'network':
+      return (
+        <FormField
+          control={control}
+          name='network'
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Network Name</FormLabel>
+              <FormControl>
+                <Input {...field} placeholder='default' />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      )
+    case 'graphics':
+      return <GraphicsEditPanel control={control} />
+    case 'cdrom':
+      return (
+        <FormField
+          control={control}
+          name='cdrom'
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>ISO Path</FormLabel>
+              <FormControl>
+                <Input {...field} placeholder='.tmp/iso/os.iso' />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      )
+    case 'serialLog':
+      return (
+        <FormField
+          control={control}
+          name='serialLog'
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Log Path</FormLabel>
+              <FormControl>
+                <Input {...field} placeholder='.tmp/logs/<name>.serial.log' />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      )
+    default:
+      return null
+  }
+}
+
+function GraphicsEditPanel({
+  control,
+}: {
+  control: ReturnType<typeof useForm<VmFormInput>>['control']
+}) {
+  const graphics = useWatch({ control, name: 'graphics' })
+
+  return (
+    <div className='grid gap-4'>
+      <FormField
+        control={control}
+        name='graphics'
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Graphics Device</FormLabel>
+            <Select onValueChange={field.onChange} value={field.value}>
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                <SelectItem value='vnc'>VNC</SelectItem>
+                <SelectItem value='none'>None</SelectItem>
+              </SelectContent>
+            </Select>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      {graphics === 'vnc' && (
+        <div className='grid gap-4 sm:grid-cols-2'>
+          <FormField
+            control={control}
+            name='vncListen'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>VNC Listen Address</FormLabel>
+                <FormControl>
+                  <Input {...field} placeholder='127.0.0.1' />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={control}
+            name='vncPort'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>VNC Port</FormLabel>
+                <FormControl>
+                  <Input {...field} placeholder='Auto (optional)' />
+                </FormControl>
+                <FormDescription>
+                  Leave empty for auto-assignment.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
+      )}
+    </div>
   )
 }
