@@ -1,0 +1,24 @@
+name: install-os
+disks:
+- path: .tmp/disks/install-os.qcow2
+  type: file
+  format: qcow2
+  target: vda
+  bus: virtio
+- path: /dev/disk/by-id/example-block-device
+  type: block
+  format: raw
+  target: vdb
+  bus: virtio
+  cache: none
+  io: native
+cdrom: /path/to/installer.iso
+boot:
+- cdrom
+- hd
+memoryGiB: 4
+vcpus: 2
+network: default
+graphics: vnc
+vncListen: 127.0.0.1
+serialLog: .tmp/logs/install-os.serial.log
