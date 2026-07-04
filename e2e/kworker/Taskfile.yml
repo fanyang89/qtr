@@ -4,7 +4,7 @@ version: "3"
 
 vars:
   DISK_PATH: /home/fanmi/workspace/qtr/.tmp/disks/vm-data.raw
-  DISK_SIZE: 20G
+  DISK_SIZE: 100G
   DM_NAME: burst_backend
   VM_NAME: c7-957
   DATA_DEVICE: /dev/vdb

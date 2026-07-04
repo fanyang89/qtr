@@ -1,0 +1,24 @@
+---
+name: c7
+vcpus: 4
+memoryGiB: 8
+disks:
+  - bus: virtio-blk
+    format: qcow2
+    path: /home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2
+    target: vda
+    type: file
+  - bus: virtio-blk
+    cache: none
+    format: raw
+    io: native
+    path: /dev/mapper/burst_backend
+    queues: 1
+    target: vdb
+    type: block
+boot:
+  - hd
+graphics: vnc
+vncListen: 0.0.0.0
+network: default
+serialLog: /home/fanmi/workspace/qtr/.tmp/logs/install-os.serial.log
