@@ -162,6 +162,8 @@ cargo run -- vm cp install-os guest:/tmp/qtr-fio.json ./results/qtr-fio.json --p
 
 `vm exec --script` uploads a local script to a temporary guest path, runs it with `/bin/sh`, captures stdout/stderr, then removes the guest copy. `--output` writes a JSON result with exit code, elapsed time, stdout and stderr. The guest needs QEMU Guest Agent running.
 
+If `vm exec` reports that `guest-exec` is disabled, enable the `guest-exec` RPC in the guest's `qemu-ga` configuration. Remove it from `block-rpcs`/`blacklist`, or add it to `allow-rpcs`, then restart `qemu-guest-agent` inside the guest.
+
 `vm cp` copies one file between host and guest. Prefix the guest path with `guest:`. Exactly one side must be a guest path. Use `--parents` to create the destination parent directory.
 
 Use `type: block` in `disks` to pass a host block device directly to the guest:

@@ -28,6 +28,23 @@ struct GuestExecStartReturn {
 }
 
 #[derive(Debug, Deserialize)]
+struct GuestInfoResponse {
+    #[serde(rename = "return")]
+    result: GuestInfoReturn,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestInfoReturn {
+    supported_commands: Vec<GuestAgentCommandInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestAgentCommandInfo {
+    name: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct GuestExecStatusResponse {
     #[serde(rename = "return")]
     result: GuestExecStatusReturn,
@@ -100,6 +117,10 @@ pub fn wait_ready(domain: &Domain, timeout: Duration) -> Result<()> {
 }
 
 pub fn run_command(domain: &Domain, command: &str, timeout: Duration) -> Result<GuestExecResult> {
+    if matches!(guest_command_enabled(domain, "guest-exec"), Ok(Some(false))) {
+        bail!(guest_exec_disabled_message());
+    }
+
     let args = GuestExecArgs {
         path: "/bin/sh",
         arg: vec!["-lc", command],
@@ -109,12 +130,41 @@ pub fn run_command(domain: &Domain, command: &str, timeout: Duration) -> Result<
         "execute": "guest-exec",
         "arguments": args,
     });
-    let response =
-        send_command(domain, &request.to_string()).context("failed to start guest command")?;
+    let response = match send_command(domain, &request.to_string()) {
+        Ok(response) => response,
+        Err(err) if is_guest_exec_disabled_error(&err) => {
+            return Err(err).context(guest_exec_disabled_message());
+        }
+        Err(err) => return Err(err).context("failed to start guest command"),
+    };
     let start: GuestExecStartResponse = serde_json::from_str(&response)
         .with_context(|| format!("failed to parse guest-exec response: {response}"))?;
 
     wait_exec_status(domain, start.result.pid, timeout)
+}
+
+fn guest_command_enabled(domain: &Domain, command: &str) -> Result<Option<bool>> {
+    let response = send_command(domain, r#"{"execute":"guest-info"}"#)
+        .context("failed to query guest agent command list")?;
+    let info: GuestInfoResponse = serde_json::from_str(&response)
+        .with_context(|| format!("failed to parse guest-info response: {response}"))?;
+
+    Ok(info
+        .result
+        .supported_commands
+        .into_iter()
+        .find(|supported| supported.name == command)
+        .map(|supported| supported.enabled))
+}
+
+fn is_guest_exec_disabled_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    message.contains("guest-exec has been disabled")
+        || message.contains("command guest-exec has been disabled")
+}
+
+fn guest_exec_disabled_message() -> &'static str {
+    "guest-exec is disabled by qemu-guest-agent inside the guest; enable the guest-exec RPC in qemu-ga block-rpcs/allow-rpcs configuration and restart qemu-guest-agent"
 }
 
 pub fn write_file(domain: &Domain, path: &str, contents: &[u8]) -> Result<()> {
