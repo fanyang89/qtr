@@ -88,7 +88,7 @@ impl IntoResponse for AppError {
 #[serde(rename_all = "camelCase")]
 struct CreateVmRequest {
     name: String,
-    system_disk: PathBuf,
+    disks: Vec<vm::VmDisk>,
     cdrom: Option<PathBuf>,
     boot: Option<Vec<String>>,
     #[serde(rename = "memoryGiB")]
@@ -99,14 +99,13 @@ struct CreateVmRequest {
     vnc_listen: String,
     vnc_port: Option<u16>,
     serial_log: Option<PathBuf>,
-    create_system_disk: Option<String>,
 }
 
 impl CreateVmRequest {
     fn into_manifest(self) -> vm::VmManifest {
         vm::VmManifest {
             name: self.name,
-            system_disk: self.system_disk,
+            disks: self.disks,
             cdrom: self.cdrom,
             boot: self.boot,
             memory_gib: self.memory_gib,
@@ -204,12 +203,9 @@ async fn create_vm(
     State(state): State<AppState>,
     Json(request): Json<CreateVmRequest>,
 ) -> AppResult<(StatusCode, Json<vm::VmSummary>)> {
-    let create_system_disk = request.create_system_disk.clone();
     let manifest = request.into_manifest();
     let connect_uri = state.connect_uri;
-    let vm =
-        run_libvirt(move || vm::create_by_manifest(&connect_uri, manifest, create_system_disk))
-            .await?;
+    let vm = run_libvirt(move || vm::create_by_manifest(&connect_uri, manifest)).await?;
     Ok((StatusCode::CREATED, Json(vm)))
 }
 

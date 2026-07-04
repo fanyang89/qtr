@@ -4,6 +4,7 @@ use std::{
     io::{self, IsTerminal, Write},
     net::IpAddr,
     ops::Range,
+    os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -26,10 +27,9 @@ use crate::{
         ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCpArgs, VmDumpArgs,
         VmExecArgs, VmInitArgs, VmListArgs, VmNameArgs, VmRemoveArgs, VmStartArgs, VmStopArgs,
     },
-    disk,
     domain_xml::{
-        self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml,
-        parse_boot_devices,
+        self, BootDevice, GraphicsSpec, VmLaunchDiskSource, VmLaunchDiskSpec, VmLaunchDomainSpec,
+        build_vm_launch_domain_xml, parse_boot_devices,
     },
     guest_agent,
 };
@@ -55,7 +55,7 @@ pub fn run(args: VmArgs) -> Result<()> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VmManifest {
     pub name: String,
-    pub system_disk: PathBuf,
+    pub disks: Vec<VmDisk>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdrom: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,6 +76,75 @@ pub struct VmManifest {
     pub serial_log: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmDisk {
+    #[serde(default = "default_vm_disk_type", rename = "type")]
+    pub disk_type: VmDiskType,
+    pub path: PathBuf,
+    pub format: DiskFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(
+        default = "default_vm_disk_bus",
+        skip_serializing_if = "is_default_vm_disk_bus"
+    )]
+    pub bus: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<VmDiskCache>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io: Option<VmDiskIo>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmDiskType {
+    File,
+    Block,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmDiskCache {
+    Default,
+    None,
+    Writethrough,
+    Writeback,
+    Directsync,
+    Unsafe,
+}
+
+impl VmDiskCache {
+    fn as_xml(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::None => "none",
+            Self::Writethrough => "writethrough",
+            Self::Writeback => "writeback",
+            Self::Directsync => "directsync",
+            Self::Unsafe => "unsafe",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VmDiskIo {
+    Threads,
+    Native,
+    IoUring,
+}
+
+impl VmDiskIo {
+    fn as_xml(self) -> &'static str {
+        match self {
+            Self::Threads => "threads",
+            Self::Native => "native",
+            Self::IoUring => "io_uring",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VmSummary {
@@ -88,13 +157,26 @@ pub struct VmSummary {
     pub memory_mib: Option<u64>,
     pub vcpus: Option<u32>,
     pub network: Option<String>,
-    pub system_disk: Option<String>,
+    pub disks: Option<Vec<VmSummaryDisk>>,
     pub cdrom: Option<String>,
     pub boot: Option<Vec<String>>,
     pub graphics: String,
     pub vnc_listen: Option<String>,
     pub vnc_port: Option<u16>,
     pub metrics: Option<VmMetrics>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmSummaryDisk {
+    #[serde(rename = "type")]
+    pub disk_type: VmDiskType,
+    pub path: String,
+    pub format: DiskFormat,
+    pub target: String,
+    pub bus: String,
+    pub cache: Option<VmDiskCache>,
+    pub io: Option<VmDiskIo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,10 +237,36 @@ fn default_vm_vnc_listen() -> String {
     "127.0.0.1".to_string()
 }
 
+fn default_vm_disk_type() -> VmDiskType {
+    VmDiskType::File
+}
+
+fn default_vm_disk_bus() -> String {
+    "virtio".to_string()
+}
+
+fn is_default_vm_disk_bus(bus: &str) -> bool {
+    bus == "virtio"
+}
+
 fn init(args: VmInitArgs) -> Result<()> {
-    let system_disk = args
-        .system_disk
-        .unwrap_or_else(|| PathBuf::from(format!(".tmp/disks/{}.qcow2", args.name)));
+    let disk_paths = if args.disk.is_empty() {
+        vec![PathBuf::from(format!(".tmp/disks/{}.qcow2", args.name))]
+    } else {
+        args.disk
+    };
+    let disks = disk_paths
+        .into_iter()
+        .map(|path| VmDisk {
+            disk_type: VmDiskType::File,
+            path,
+            format: DiskFormat::Qcow2,
+            target: None,
+            bus: default_vm_disk_bus(),
+            cache: None,
+            io: None,
+        })
+        .collect();
     let serial_log = PathBuf::from(format!(".tmp/logs/{}.serial.log", args.name));
     let boot = if args.no_cdrom {
         vec!["hd".to_string()]
@@ -168,7 +276,7 @@ fn init(args: VmInitArgs) -> Result<()> {
 
     let manifest = VmManifest {
         name: args.name,
-        system_disk,
+        disks,
         cdrom: (!args.no_cdrom).then_some(args.cdrom),
         boot: Some(boot),
         memory_gib: args.memory_gib,
@@ -212,12 +320,7 @@ fn apply(args: VmApplyArgs) -> Result<()> {
         .with_context(|| format!("failed to parse VM definition {}", manifest_path.display()))?;
 
     normalize_manifest_paths(&mut manifest, manifest_dir)?;
-    if let Some(size) = args.create_system_disk.as_deref()
-        && !args.dry_run
-    {
-        disk::create_image(&manifest.system_disk, DiskFormat::Qcow2, size)?;
-    }
-    validate_manifest(&manifest, args.create_system_disk.is_some())?;
+    validate_manifest(&manifest)?;
 
     let boot = manifest_boot_order(&manifest);
     let boot_devices = domain_xml::parse_boot_devices(&boot)?;
@@ -288,11 +391,18 @@ fn build_manifest_domain_xml(
     boot_devices: &[BootDevice],
     memory_mib: u64,
 ) -> String {
+    let disks = manifest
+        .disks
+        .iter()
+        .enumerate()
+        .map(|(index, disk)| launch_disk_spec(disk, index))
+        .collect::<Vec<_>>();
+
     build_vm_launch_domain_xml(VmLaunchDomainSpec {
         name: &manifest.name,
         memory_mib,
         vcpus: manifest.vcpus,
-        system_disk: &manifest.system_disk,
+        disks: &disks,
         cdrom: manifest.cdrom.as_deref(),
         serial_log: manifest.serial_log.as_deref(),
         boot_devices,
@@ -303,6 +413,31 @@ fn build_manifest_domain_xml(
             vnc_port: manifest.vnc_port,
         },
     })
+}
+
+fn disk_launch_source(disk_type: VmDiskType) -> VmLaunchDiskSource {
+    match disk_type {
+        VmDiskType::File => VmLaunchDiskSource::File,
+        VmDiskType::Block => VmLaunchDiskSource::Block,
+    }
+}
+
+fn launch_disk_spec(disk: &VmDisk, index: usize) -> VmLaunchDiskSpec<'_> {
+    VmLaunchDiskSpec {
+        path: disk.path.clone(),
+        format: disk.format,
+        source: disk_launch_source(disk.disk_type),
+        target: disk_target(disk, index),
+        bus: disk.bus.clone(),
+        cache: disk.cache.map(VmDiskCache::as_xml),
+        io: disk.io.map(VmDiskIo::as_xml),
+    }
+}
+
+fn disk_target(disk: &VmDisk, index: usize) -> String {
+    disk.target
+        .clone()
+        .unwrap_or_else(|| domain_xml::virtio_disk_target(index))
 }
 
 fn dump(args: VmDumpArgs) -> Result<()> {
@@ -338,7 +473,7 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
 
     let boot = boot_order(domain)?;
     let devices = required_child(domain, "devices")?;
-    let system_disk = disk_source_path(devices, "disk", Some("vda"))?;
+    let disks = disks_from_domain_xml(devices)?;
     let cdrom = optional_disk_source_path(devices, "cdrom", None)?;
     let network = network_name(devices)?;
     let (graphics, vnc_listen, vnc_port) = graphics_config(devices)?;
@@ -346,7 +481,7 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
 
     Ok(VmManifest {
         name,
-        system_disk,
+        disks,
         cdrom,
         boot: Some(boot),
         memory_gib: memory_mib / 1024,
@@ -385,14 +520,7 @@ fn patch_domain_xml(
         &mut replacements,
     )?;
     patch_boot_order(xml, domain, boot_devices, &mut replacements)?;
-    patch_disk_source(
-        xml,
-        devices,
-        "disk",
-        Some("vda"),
-        &manifest.system_disk,
-        &mut replacements,
-    )?;
+    patch_disks(xml, devices, &manifest.disks, &mut replacements)?;
 
     if let Some(cdrom) = &manifest.cdrom {
         patch_disk_source(xml, devices, "cdrom", None, cdrom, &mut replacements)?;
@@ -406,6 +534,40 @@ fn patch_domain_xml(
     }
 
     Ok(apply_xml_replacements(xml, replacements))
+}
+
+fn patch_disks(
+    xml: &str,
+    devices: Node<'_, '_>,
+    manifest_disks: &[VmDisk],
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let domain_disks = devices
+        .children()
+        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("disk"))
+        .collect::<Vec<_>>();
+    if domain_disks.len() != manifest_disks.len() {
+        bail!(
+            "cannot update existing domain XML disk count from {} to {}; recreate the VM definition",
+            domain_disks.len(),
+            manifest_disks.len()
+        );
+    }
+
+    for (index, (domain_disk, manifest_disk)) in
+        domain_disks.into_iter().zip(manifest_disks).enumerate()
+    {
+        let range = domain_disk.range();
+        let start = line_start(xml, range.start);
+        let end = line_end(xml, range.end);
+        let desired = domain_xml::build_disk_xml(&launch_disk_spec(manifest_disk, index));
+        replacements.push(XmlReplacement {
+            range: start..end,
+            value: desired,
+        });
+    }
+
+    Ok(())
 }
 
 fn patch_memory(
@@ -792,17 +954,100 @@ fn boot_order(domain: Node<'_, '_>) -> Result<Vec<String>> {
     Ok(boot)
 }
 
-fn disk_source_path(
-    devices: Node<'_, '_>,
-    device: &str,
-    target_dev: Option<&str>,
-) -> Result<PathBuf> {
-    optional_disk_source_path(devices, device, target_dev)?.with_context(|| {
-        let target = target_dev
-            .map(|target| format!(" target {target}"))
-            .unwrap_or_default();
-        format!("domain XML is missing {device} disk{target}")
-    })
+fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
+    let disks = devices
+        .children()
+        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("disk"))
+        .map(|disk| {
+            let disk_type = parse_disk_type(disk.attribute("type").unwrap_or("file"))?;
+            let source = optional_child(disk, "source")
+                .context("domain XML disk is missing source element")?;
+            let source_attr = match disk_type {
+                VmDiskType::File => "file",
+                VmDiskType::Block => "dev",
+            };
+            let path = source
+                .attribute(source_attr)
+                .with_context(|| format!("domain XML disk is missing source {source_attr}"))?;
+            let driver = optional_child(disk, "driver");
+            let format = driver
+                .and_then(|driver| driver.attribute("type"))
+                .map(parse_disk_format)
+                .transpose()?
+                .unwrap_or(match disk_type {
+                    VmDiskType::File => DiskFormat::Qcow2,
+                    VmDiskType::Block => DiskFormat::Raw,
+                });
+            let target = optional_child(disk, "target")
+                .context("domain XML disk is missing target element")?;
+            let target_dev = target
+                .attribute("dev")
+                .context("domain XML disk target is missing dev")?
+                .to_string();
+            let bus = target.attribute("bus").unwrap_or("virtio").to_string();
+            let cache = driver
+                .and_then(|driver| driver.attribute("cache"))
+                .map(parse_disk_cache)
+                .transpose()?;
+            let io = driver
+                .and_then(|driver| driver.attribute("io"))
+                .map(parse_disk_io)
+                .transpose()?;
+
+            Ok(VmDisk {
+                disk_type,
+                path: PathBuf::from(path),
+                format,
+                target: Some(target_dev),
+                bus,
+                cache,
+                io,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if disks.is_empty() {
+        bail!("domain XML is missing disk devices");
+    }
+
+    Ok(disks)
+}
+
+fn parse_disk_type(value: &str) -> Result<VmDiskType> {
+    match value {
+        "file" => Ok(VmDiskType::File),
+        "block" => Ok(VmDiskType::Block),
+        _ => bail!("unsupported disk type {value:?}"),
+    }
+}
+
+fn parse_disk_format(value: &str) -> Result<DiskFormat> {
+    match value {
+        "raw" => Ok(DiskFormat::Raw),
+        "qcow2" => Ok(DiskFormat::Qcow2),
+        _ => bail!("unsupported disk format {value:?}"),
+    }
+}
+
+fn parse_disk_cache(value: &str) -> Result<VmDiskCache> {
+    match value {
+        "default" => Ok(VmDiskCache::Default),
+        "none" => Ok(VmDiskCache::None),
+        "writethrough" => Ok(VmDiskCache::Writethrough),
+        "writeback" => Ok(VmDiskCache::Writeback),
+        "directsync" => Ok(VmDiskCache::Directsync),
+        "unsafe" => Ok(VmDiskCache::Unsafe),
+        _ => bail!("unsupported disk cache mode {value:?}"),
+    }
+}
+
+fn parse_disk_io(value: &str) -> Result<VmDiskIo> {
+    match value {
+        "threads" => Ok(VmDiskIo::Threads),
+        "native" => Ok(VmDiskIo::Native),
+        "io_uring" => Ok(VmDiskIo::IoUring),
+        _ => bail!("unsupported disk io mode {value:?}"),
+    }
 }
 
 fn optional_disk_source_path(
@@ -973,7 +1218,11 @@ fn existing_domain_xml(connect_uri: &str, name: &str) -> Result<String> {
 }
 
 fn normalize_manifest_paths(manifest: &mut VmManifest, base_dir: &Path) -> Result<()> {
-    manifest.system_disk = manifest_relative_path(base_dir, &manifest.system_disk);
+    for disk in &mut manifest.disks {
+        if disk.disk_type == VmDiskType::File {
+            disk.path = manifest_relative_path(base_dir, &disk.path);
+        }
+    }
 
     if let Some(cdrom) = &manifest.cdrom {
         manifest.cdrom = Some(manifest_relative_path(base_dir, cdrom));
@@ -996,12 +1245,51 @@ fn manifest_relative_path(base_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn validate_manifest(manifest: &VmManifest, allow_missing_system_disk: bool) -> Result<()> {
-    if !allow_missing_system_disk && !manifest.system_disk.exists() {
-        bail!(
-            "system disk {} does not exist",
-            manifest.system_disk.display()
-        );
+fn validate_manifest(manifest: &VmManifest) -> Result<()> {
+    if manifest.disks.is_empty() {
+        bail!("VM definition must contain at least one disk");
+    }
+
+    let mut targets = BTreeSet::new();
+    for (index, disk) in manifest.disks.iter().enumerate() {
+        let target = disk_target(disk, index);
+        if target.is_empty() {
+            bail!("disk target must not be empty");
+        }
+        if !targets.insert(target.clone()) {
+            bail!("duplicate disk target {target}");
+        }
+        if disk.bus.is_empty() {
+            bail!("disk bus must not be empty");
+        }
+
+        if !disk.path.exists() {
+            bail!("disk {} does not exist", disk.path.display());
+        }
+        match disk.disk_type {
+            VmDiskType::File => {
+                if !disk.path.is_file() {
+                    bail!("file disk {} is not a regular file", disk.path.display());
+                }
+            }
+            VmDiskType::Block => {
+                if !disk.path.is_absolute() {
+                    bail!(
+                        "block disk {} must be an absolute path",
+                        disk.path.display()
+                    );
+                }
+                let metadata = fs::metadata(&disk.path).with_context(|| {
+                    format!("failed to inspect block disk {}", disk.path.display())
+                })?;
+                if !metadata.file_type().is_block_device() {
+                    bail!("block disk {} is not a block device", disk.path.display());
+                }
+                if disk.format != DiskFormat::Raw {
+                    bail!("block disk {} must use format raw", disk.path.display());
+                }
+            }
+        }
     }
 
     if let Some(cdrom) = &manifest.cdrom
@@ -1075,7 +1363,7 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
     let vnc_endpoint = parse_vnc_endpoint(&xml, "127.0.0.1").map(|endpoint| endpoint.display());
     let serial_log = parse_serial_log(&xml);
     let (memory_mib, vcpus, network) = parse_summary_resources(&xml);
-    let (system_disk, cdrom, boot, graphics, vnc_listen, vnc_port) =
+    let (disks, cdrom, boot, graphics, vnc_listen, vnc_port) =
         parse_summary_definition(&xml).unwrap_or_default();
     let metrics = domain_metrics(domain, &xml);
 
@@ -1089,7 +1377,7 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
         memory_mib,
         vcpus,
         network,
-        system_disk,
+        disks,
         cdrom,
         boot,
         graphics,
@@ -1202,7 +1490,7 @@ fn parse_summary_resources(xml: &str) -> (Option<u64>, Option<u32>, Option<Strin
 fn parse_summary_definition(
     xml: &str,
 ) -> Result<(
-    Option<String>,
+    Option<Vec<VmSummaryDisk>>,
     Option<String>,
     Option<Vec<String>>,
     String,
@@ -1213,9 +1501,21 @@ fn parse_summary_definition(
     let domain = doc.root_element();
     let devices = required_child(domain, "devices")?;
 
-    let system_disk = disk_source_path(devices, "disk", Some("vda"))
-        .ok()
-        .map(|path| path.display().to_string());
+    let disks = disks_from_domain_xml(devices).ok().map(|disks| {
+        disks
+            .into_iter()
+            .enumerate()
+            .map(|(index, disk)| VmSummaryDisk {
+                disk_type: disk.disk_type,
+                path: disk.path.display().to_string(),
+                format: disk.format,
+                target: disk_target(&disk, index),
+                bus: disk.bus,
+                cache: disk.cache,
+                io: disk.io,
+            })
+            .collect()
+    });
     let cdrom = optional_disk_source_path(devices, "cdrom", None)
         .ok()
         .flatten()
@@ -1228,7 +1528,7 @@ fn parse_summary_definition(
     };
 
     Ok((
-        system_disk,
+        disks,
         cdrom,
         boot,
         graphics.to_string(),
@@ -1609,17 +1909,10 @@ pub fn undefine_by_name(connect_uri: &str, name: &str) -> Result<()> {
         .with_context(|| format!("failed to undefine domain {name}"))
 }
 
-pub fn create_by_manifest(
-    connect_uri: &str,
-    mut manifest: VmManifest,
-    create_system_disk: Option<String>,
-) -> Result<VmSummary> {
+pub fn create_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> Result<VmSummary> {
     let base_dir = env::current_dir().context("failed to determine current directory")?;
     normalize_manifest_paths(&mut manifest, &base_dir)?;
-    if let Some(size) = create_system_disk.as_deref() {
-        disk::create_image(&manifest.system_disk, DiskFormat::Qcow2, size)?;
-    }
-    validate_manifest(&manifest, create_system_disk.is_some())?;
+    validate_manifest(&manifest)?;
 
     let boot = manifest_boot_order(&manifest);
     let boot_devices = parse_boot_devices(&boot)?;
@@ -1645,7 +1938,7 @@ pub fn create_by_manifest(
 pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> Result<VmSummary> {
     let base_dir = env::current_dir().context("failed to determine current directory")?;
     normalize_manifest_paths(&mut manifest, &base_dir)?;
-    validate_manifest(&manifest, false)?;
+    validate_manifest(&manifest)?;
 
     let boot = manifest_boot_order(&manifest);
     let boot_devices = parse_boot_devices(&boot)?;
@@ -1908,11 +2201,31 @@ mod tests {
     #[test]
     fn dumps_qtr_domain_xml_to_manifest() {
         let boot_devices = [BootDevice::Cdrom, BootDevice::Hd];
+        let disks = [
+            VmLaunchDiskSpec {
+                path: PathBuf::from("/var/lib/libvirt/images/sys.qcow2"),
+                format: DiskFormat::Qcow2,
+                source: VmLaunchDiskSource::File,
+                target: "vda".to_string(),
+                bus: "virtio".to_string(),
+                cache: None,
+                io: None,
+            },
+            VmLaunchDiskSpec {
+                path: PathBuf::from("/dev/disk/by-id/qtr-test-disk"),
+                format: DiskFormat::Raw,
+                source: VmLaunchDiskSource::Block,
+                target: "vdb".to_string(),
+                bus: "virtio".to_string(),
+                cache: Some("none"),
+                io: Some("native"),
+            },
+        ];
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "install-os",
             memory_mib: 4096,
             vcpus: 2,
-            system_disk: Path::new("/var/lib/libvirt/images/sys.qcow2"),
+            disks: &disks,
             cdrom: Some(Path::new("/isos/os.iso")),
             serial_log: Some(Path::new("/logs/install-os.serial.log")),
             boot_devices: &boot_devices,
@@ -1928,9 +2241,22 @@ mod tests {
 
         assert_eq!(manifest.name, "install-os");
         assert_eq!(
-            manifest.system_disk,
+            manifest.disks[0].path,
             PathBuf::from("/var/lib/libvirt/images/sys.qcow2")
         );
+        assert_eq!(manifest.disks[0].disk_type, VmDiskType::File);
+        assert_eq!(manifest.disks[0].format, DiskFormat::Qcow2);
+        assert_eq!(manifest.disks[0].target.as_deref(), Some("vda"));
+        assert_eq!(manifest.disks[0].bus, "virtio");
+        assert_eq!(manifest.disks[1].disk_type, VmDiskType::Block);
+        assert_eq!(
+            manifest.disks[1].path,
+            PathBuf::from("/dev/disk/by-id/qtr-test-disk")
+        );
+        assert_eq!(manifest.disks[1].format, DiskFormat::Raw);
+        assert_eq!(manifest.disks[1].target.as_deref(), Some("vdb"));
+        assert_eq!(manifest.disks[1].cache, Some(VmDiskCache::None));
+        assert_eq!(manifest.disks[1].io, Some(VmDiskIo::Native));
         assert_eq!(manifest.cdrom, Some(PathBuf::from("/isos/os.iso")));
         assert_eq!(
             manifest.boot,
@@ -2019,7 +2345,15 @@ mod tests {
 "#;
         let manifest = VmManifest {
             name: "install-os".to_string(),
-            system_disk: PathBuf::from("/home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2"),
+            disks: vec![VmDisk {
+                disk_type: VmDiskType::File,
+                path: PathBuf::from("/home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2"),
+                format: DiskFormat::Qcow2,
+                target: Some("vda".to_string()),
+                bus: "virtio".to_string(),
+                cache: None,
+                io: None,
+            }],
             cdrom: Some(PathBuf::from(
                 "/home/fanmi/workspace/qtr/.tmp/iso/CentOS-7-x86_64-DVD-2207-02.iso",
             )),
@@ -2042,9 +2376,6 @@ mod tests {
         assert!(patched.contains("<uuid>c194be5c-a0ba-4e90-8b23-18c8df0825f1</uuid>"));
         assert!(patched.contains("machine='pc-i440fx-10.2'"));
         assert!(patched.contains("<memory unit='KiB'>4194304</memory>"));
-        assert!(patched.contains(
-            "<address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>"
-        ));
         assert!(patched.contains("<video>"));
         assert!(!patched.contains("<boot dev='cdrom'/>"));
         assert!(patched.contains("    <boot dev='hd'/>\n"));

@@ -20,6 +20,25 @@ const vmMetricsSchema = z.object({
   sampledAtMs: z.number(),
 })
 
+const vmDiskSchema = z.object({
+  type: z.enum(['file', 'block']).optional(),
+  path: z.string(),
+  format: z.enum(['raw', 'qcow2']),
+  target: z.string().optional(),
+  bus: z.string().optional(),
+  cache: z
+    .enum([
+      'default',
+      'none',
+      'writethrough',
+      'writeback',
+      'directsync',
+      'unsafe',
+    ])
+    .optional(),
+  io: z.enum(['threads', 'native', 'io_uring']).optional(),
+})
+
 const vmSummarySchema = z.object({
   name: z.string(),
   state: vmStateSchema,
@@ -30,7 +49,7 @@ const vmSummarySchema = z.object({
   memoryMiB: z.number().nullish(),
   vcpus: z.number().nullish(),
   network: z.string().nullish(),
-  systemDisk: z.string().nullish(),
+  disks: z.array(vmDiskSchema).nullish(),
   cdrom: z.string().nullish(),
   boot: z.array(z.string()).nullish(),
   graphics: z.enum(['vnc', 'none']).nullish(),
@@ -49,13 +68,13 @@ const healthStatusSchema = z.object({
 
 export type VmState = z.infer<typeof vmStateSchema>
 export type VmMetrics = z.infer<typeof vmMetricsSchema>
+export type VmDisk = z.infer<typeof vmDiskSchema>
 export type VmSummary = z.infer<typeof vmSummarySchema>
 export type HealthStatus = z.infer<typeof healthStatusSchema>
 
 export type VmCreateInput = {
   name: string
-  systemDisk: string
-  createSystemDisk?: string
+  disks: VmDisk[]
   cdrom?: string
   boot?: string[]
   memoryGiB: number
@@ -67,7 +86,7 @@ export type VmCreateInput = {
   serialLog?: string
 }
 
-export type VmUpdateInput = Omit<VmCreateInput, 'createSystemDisk'>
+export type VmUpdateInput = VmCreateInput
 
 const apiClient = axios.create({ baseURL: '/api' })
 

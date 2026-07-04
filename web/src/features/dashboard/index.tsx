@@ -27,7 +27,7 @@ export function Dashboard() {
       <Main>
         <div className='mb-6 flex flex-col gap-2'>
           <h1 className='text-2xl font-bold tracking-tight'>qtr Dashboard</h1>
-          <p className='text-muted-foreground'>QEMU/libvirt test runner control plane.</p>
+          <p className='text-muted-foreground'>QEMU/libvirt VM control plane.</p>
         </div>
         <div className='grid gap-4 sm:grid-cols-2 xl:grid-cols-4'>
           <MetricCard title='Libvirt' value={health?.libvirtUri ?? 'qemu:///system'} icon={TerminalSquare} badge={health?.ok ? 'online' : 'planned'} />

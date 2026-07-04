@@ -1,4 +1,0 @@
-[[case]]
-name = "smoke-threads-none"
-data_disk_io = "threads"
-data_disk_cache = "none"

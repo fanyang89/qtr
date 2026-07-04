@@ -1,7 +1,6 @@
 import {
   Activity,
   Boxes,
-  CirclePlay,
   HardDrive,
   Settings,
   Server,
@@ -19,7 +18,7 @@ export const sidebarData: SidebarData = {
     {
       name: 'qtr',
       logo: TerminalSquare,
-      plan: 'QEMU test runner',
+      plan: 'QEMU VM manager',
     },
   ],
   navGroups: [
@@ -40,12 +39,6 @@ export const sidebarData: SidebarData = {
           title: 'Images',
           url: '/settings',
           icon: HardDrive,
-          badge: 'soon',
-        },
-        {
-          title: 'Runs',
-          url: '/settings',
-          icon: CirclePlay,
           badge: 'soon',
         },
       ],

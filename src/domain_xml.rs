@@ -1,81 +1,35 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use crate::config::GraphicsMode;
-use crate::matrix::TestCase;
-
-pub struct DomainSpec<'a> {
-    pub name: &'a str,
-    pub memory_mib: u64,
-    pub vcpus: u32,
-    pub system_disk: &'a Path,
-    pub data_disk: &'a Path,
-    pub network: &'a str,
-    pub case: &'a TestCase,
-}
-
-pub fn build_domain_xml(spec: DomainSpec<'_>) -> String {
-    format!(
-        r#"<domain type='kvm'>
-  <name>{name}</name>
-  <memory unit='MiB'>{memory_mib}</memory>
-  <currentMemory unit='MiB'>{memory_mib}</currentMemory>
-  <vcpu placement='static'>{vcpus}</vcpu>
-  <os>
-    <type arch='x86_64'>hvm</type>
-    <boot dev='hd'/>
-  </os>
-  <features>
-    <acpi/>
-    <apic/>
-  </features>
-  <cpu mode='host-passthrough' check='none' migratable='off'/>
-  <devices>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
-      <source file='{system_disk}'/>
-      <target dev='vda' bus='virtio'/>
-    </disk>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='raw' cache='{data_disk_cache}' io='{data_disk_io}'/>
-      <source file='{data_disk}'/>
-      <target dev='vdb' bus='virtio'/>
-    </disk>
-    <interface type='network'>
-      <source network='{network}'/>
-      <model type='virtio'/>
-    </interface>
-    <channel type='unix'>
-      <target type='virtio' name='org.qemu.guest_agent.0'/>
-    </channel>
-    <console type='pty'>
-      <target type='serial' port='0'/>
-    </console>
-  </devices>
-</domain>
-"#,
-        name = escape_xml(spec.name),
-        memory_mib = spec.memory_mib,
-        vcpus = spec.vcpus,
-        system_disk = escape_xml(&spec.system_disk.display().to_string()),
-        data_disk = escape_xml(&spec.data_disk.display().to_string()),
-        network = escape_xml(spec.network),
-        data_disk_cache = spec.case.data_disk_cache.as_xml(),
-        data_disk_io = spec.case.data_disk_io.as_xml(),
-    )
-}
+use crate::config::{DiskFormat, GraphicsMode};
 
 pub struct VmLaunchDomainSpec<'a> {
     pub name: &'a str,
     pub memory_mib: u64,
     pub vcpus: u32,
-    pub system_disk: &'a Path,
+    pub disks: &'a [VmLaunchDiskSpec<'a>],
     pub cdrom: Option<&'a Path>,
     pub serial_log: Option<&'a Path>,
     pub boot_devices: &'a [BootDevice],
     pub network: &'a str,
     pub graphics: GraphicsSpec<'a>,
+}
+
+pub struct VmLaunchDiskSpec<'a> {
+    pub path: PathBuf,
+    pub format: DiskFormat,
+    pub source: VmLaunchDiskSource,
+    pub target: String,
+    pub bus: String,
+    pub cache: Option<&'a str>,
+    pub io: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmLaunchDiskSource {
+    File,
+    Block,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +79,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         .iter()
         .map(|device| format!("    <boot dev='{}'/>\n", device.as_xml()))
         .collect::<String>();
+    let disks_xml = spec.disks.iter().map(build_disk_xml).collect::<String>();
     let cdrom_xml = spec.cdrom.map(build_cdrom_xml).unwrap_or_default();
     let console_xml = build_console_xml(spec.serial_log);
     let graphics_xml = build_graphics_xml(spec.graphics);
@@ -144,12 +99,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
   </features>
   <cpu mode='host-passthrough' check='none' migratable='off'/>
   <devices>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
-      <source file='{system_disk}'/>
-      <target dev='vda' bus='virtio'/>
-    </disk>
-{cdrom_xml}    <interface type='network'>
+{disks_xml}{cdrom_xml}    <interface type='network'>
       <source network='{network}'/>
       <model type='virtio'/>
     </interface>
@@ -163,12 +113,57 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         memory_mib = spec.memory_mib,
         vcpus = spec.vcpus,
         boot_xml = boot_xml,
-        system_disk = escape_xml(&spec.system_disk.display().to_string()),
+        disks_xml = disks_xml,
         network = escape_xml(spec.network),
         cdrom_xml = cdrom_xml,
         console_xml = console_xml,
         graphics_xml = graphics_xml,
     )
+}
+
+pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
+    let (disk_type, source_attr) = match disk.source {
+        VmLaunchDiskSource::File => ("file", "file"),
+        VmLaunchDiskSource::Block => ("block", "dev"),
+    };
+    let cache = disk
+        .cache
+        .map(|cache| format!(" cache='{cache}'"))
+        .unwrap_or_default();
+    let io = disk.io.map(|io| format!(" io='{io}'")).unwrap_or_default();
+
+    format!(
+        r#"    <disk type='{disk_type}' device='disk'>
+      <driver name='qemu' type='{format}'{cache}{io}/>
+      <source {source_attr}='{path}'/>
+      <target dev='{target}' bus='{bus}'/>
+    </disk>
+"#,
+        disk_type = disk_type,
+        format = disk.format.as_qemu_arg(),
+        cache = cache,
+        io = io,
+        source_attr = source_attr,
+        path = escape_xml(&disk.path.display().to_string()),
+        target = escape_xml(&disk.target),
+        bus = escape_xml(&disk.bus),
+    )
+}
+
+pub fn virtio_disk_target(mut index: usize) -> String {
+    let mut suffix = Vec::new();
+    loop {
+        suffix.push(char::from(
+            b'a' + u8::try_from(index % 26).expect("modulo fits u8"),
+        ));
+        if index < 26 {
+            break;
+        }
+        index = index / 26 - 1;
+    }
+
+    suffix.reverse();
+    format!("vd{}", suffix.into_iter().collect::<String>())
 }
 
 fn build_cdrom_xml(path: &Path) -> String {

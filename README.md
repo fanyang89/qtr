@@ -1,6 +1,6 @@
 # qtr
 
-QEMU/libvirt based test runner.
+QEMU/libvirt VM manager.
 
 ## Host Dependencies
 
@@ -92,11 +92,12 @@ Storage state is written to `.qtr/storage.yaml` by default. Use `--config` to ch
 
 ## Minimal VM Launch
 
-Generate a starter VM definition, edit `cdrom`, then create the system disk and boot the VM:
+Generate a starter VM definition, edit `cdrom`, create the disk, then boot the VM:
 
 ```bash
 cargo run -- vm init --name install-os -o vm.yaml
-cargo run -- vm apply -f vm.yaml --create-system-disk 40G --start
+cargo run -- disk create --path .tmp/disks/install-os.qcow2 --format qcow2 --size 40G
+cargo run -- vm apply -f vm.yaml --start
 ```
 
 VMs write serial console output to `.tmp/logs/<name>.serial.log` by default. Override it with `serialLog` in the YAML definition.
@@ -109,13 +110,16 @@ Generate a starter VM definition:
 cargo run -- vm init --name install-os -o vm.yaml
 ```
 
-Edit `cdrom` to point at the installer ISO. `vm apply --create-system-disk` creates the qcow2 disk when needed.
+Edit `cdrom` to point at the installer ISO. Create or resize disks with `disk` commands before applying the VM definition.
 
 The generated YAML is an installer-oriented template:
 
 ```yaml
 name: install-os
-systemDisk: .tmp/disks/install-os.qcow2
+disks:
+- path: .tmp/disks/install-os.qcow2
+  type: file
+  format: qcow2
 cdrom: /path/to/installer.iso
 boot: [cdrom, hd]
 memoryGiB: 4
@@ -156,17 +160,23 @@ cargo run -- vm cp install-os ./fio.conf guest:/tmp/fio.conf
 cargo run -- vm cp install-os guest:/tmp/qtr-fio.json ./results/qtr-fio.json --parents
 ```
 
-`vm exec --script` uploads a local script to a temporary guest path, runs it with `/bin/sh`, captures stdout/stderr, then removes the guest copy. `--output` writes a JSON result with exit code, elapsed time, stdout and stderr. The guest needs QEMU Guest Agent running; `examples/kworker-fio.sh` also requires `fio` and tests `/dev/vdb`.
+`vm exec --script` uploads a local script to a temporary guest path, runs it with `/bin/sh`, captures stdout/stderr, then removes the guest copy. `--output` writes a JSON result with exit code, elapsed time, stdout and stderr. The guest needs QEMU Guest Agent running.
 
 `vm cp` copies one file between host and guest. Prefix the guest path with `guest:`. Exactly one side must be a guest path. Use `--parents` to create the destination parent directory.
 
-Single-case disk parameter workflow:
+Use `type: block` in `disks` to pass a host block device directly to the guest:
 
-```bash
-cargo run -- vm apply -f vm-native-none.yaml
-cargo run -- vm start install-os
-cargo run -- vm cp install-os ./fio.conf guest:/tmp/fio.conf
-cargo run -- vm exec install-os --script examples/kworker-fio.sh --output results/native-none.json
-cargo run -- vm cp install-os guest:/tmp/qtr-fio.json ./results/qtr-fio.json --parents
-cargo run -- vm stop install-os --wait
+```yaml
+disks:
+- path: .tmp/disks/install-os.qcow2
+  type: file
+  format: qcow2
+- path: /dev/disk/by-id/example-block-device
+  type: block
+  format: raw
+  target: vdb
+  cache: none
+  io: native
 ```
+
+Prefer stable `/dev/disk/by-id/...` paths, ensure the host is not using the device, and expose it as a non-boot disk such as `target: vdb` for performance tests.

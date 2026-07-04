@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { z } from 'zod'
-import { useForm, useWatch } from 'react-hook-form'
+import { useFieldArray, useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Lock, Plus, Trash2 } from 'lucide-react'
 import type { VmCreateInput, VmSummary, VmUpdateInput } from '@/lib/api'
@@ -63,8 +63,28 @@ const vmFormSchema = z.object({
       /^[a-zA-Z0-9-_.]+$/,
       'Name can only contain letters, numbers, hyphens, underscores and dots'
     ),
-  systemDisk: z.string().min(1, 'System disk path is required'),
-  createSystemDisk: optionalString,
+  disks: z
+    .array(
+      z.object({
+        type: z.enum(['file', 'block']).optional(),
+        path: z.string().min(1, 'Disk path is required'),
+        format: z.enum(['raw', 'qcow2']),
+        target: z.string().optional(),
+        bus: z.string().optional(),
+        cache: z
+          .enum([
+            'default',
+            'none',
+            'writethrough',
+            'writeback',
+            'directsync',
+            'unsafe',
+          ])
+          .optional(),
+        io: z.enum(['threads', 'native', 'io_uring']).optional(),
+      })
+    )
+    .min(1, 'At least one disk is required'),
   cdrom: optionalString,
   boot: z
     .string()
@@ -95,7 +115,7 @@ type VmFormDialogProps = {
 
 type HardwareType =
   | 'resources'
-  | 'systemDisk'
+  | 'disks'
   | 'network'
   | 'graphics'
   | 'cdrom'
@@ -116,8 +136,7 @@ const OPTIONAL_HARDWARE: { type: OptionalHardwareType; label: string }[] = [
 
 const defaultValues: VmFormInput = {
   name: '',
-  systemDisk: '',
-  createSystemDisk: '',
+  disks: [{ path: '', format: 'qcow2' }],
   cdrom: '',
   boot: 'hd',
   memoryGiB: 4,
@@ -132,8 +151,7 @@ const defaultValues: VmFormInput = {
 function summaryToDefaultValues(vm: VmSummary): VmFormInput {
   return {
     name: vm.name,
-    systemDisk: vm.systemDisk ?? '',
-    createSystemDisk: '',
+    disks: vm.disks?.length ? vm.disks : [{ path: '', format: 'qcow2' }],
     cdrom: vm.cdrom ?? '',
     boot: vm.boot?.join(',') ?? 'hd',
     memoryGiB: vm.memoryMiB ? Math.round(vm.memoryMiB / 1024) : 4,
@@ -144,6 +162,12 @@ function summaryToDefaultValues(vm: VmSummary): VmFormInput {
     vncPort: vm.vncPort ? String(vm.vncPort) : '',
     serialLog: vm.serialLog ?? '',
   }
+}
+
+function diskSummary(disks: VmFormInput['disks'] | undefined): string {
+  if (!disks?.length) return 'Not set'
+  const firstPath = disks[0]?.path || 'Not set'
+  return disks.length === 1 ? firstPath : `${disks.length} disks`
 }
 
 function detectOptionalHardware(vm: VmSummary): OptionalHardwareType[] {
@@ -196,7 +220,7 @@ export function VmFormDialog({
     graphics,
     vcpus,
     memoryGiB,
-    systemDisk,
+    disks,
     network,
     cdrom,
     serialLog,
@@ -208,7 +232,7 @@ export function VmFormDialog({
       'graphics',
       'vcpus',
       'memoryGiB',
-      'systemDisk',
+      'disks',
       'network',
       'cdrom',
       'serialLog',
@@ -252,16 +276,11 @@ export function VmFormDialog({
     if (!enabledOptional.includes('serialLog')) cleaned.serialLog = ''
 
     const values: VmFormValues = vmFormSchema.parse(cleaned)
-    const { createSystemDisk, ...base } = values
-
     if (mode === 'create') {
-      const input: VmCreateInput = {
-        ...base,
-        createSystemDisk,
-      }
+      const input: VmCreateInput = values
       await onSubmit(input)
     } else {
-      const input: VmUpdateInput = base
+      const input: VmUpdateInput = values
       await onSubmit(input)
     }
   }
@@ -275,9 +294,9 @@ export function VmFormDialog({
         locked: true,
       },
       {
-        type: 'systemDisk' as const,
-        label: 'System Disk',
-        summary: systemDisk || 'Not set',
+        type: 'disks' as const,
+        label: 'Disks',
+        summary: diskSummary(disks),
         locked: true,
       },
       {
@@ -319,7 +338,7 @@ export function VmFormDialog({
     [
       vcpus,
       memoryGiB,
-      systemDisk,
+      disks,
       network,
       graphics,
       vncListen,
@@ -451,7 +470,6 @@ export function VmFormDialog({
                 <HardwareEditPanel
                   type={selectedHardware}
                   control={form.control}
-                  isEdit={isEdit}
                 />
               </div>
             </div>
@@ -477,11 +495,9 @@ export function VmFormDialog({
 function HardwareEditPanel({
   type,
   control,
-  isEdit,
 }: {
   type: HardwareType
   control: ReturnType<typeof useForm<VmFormInput>>['control']
-  isEdit: boolean
 }) {
   switch (type) {
     case 'resources':
@@ -515,67 +531,8 @@ function HardwareEditPanel({
           />
         </div>
       )
-    case 'systemDisk':
-      return (
-        <div className='grid gap-4'>
-          <FormField
-            control={control}
-            name='systemDisk'
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Disk Path</FormLabel>
-                <FormControl>
-                  <Input {...field} placeholder='.tmp/disks/sys.qcow2' />
-                </FormControl>
-                <FormDescription>
-                  Path to the qcow2 system disk.
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          {!isEdit && (
-            <FormField
-              control={control}
-              name='createSystemDisk'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Create Disk Size</FormLabel>
-                  <FormControl>
-                    <Input {...field} placeholder='40G (optional)' />
-                  </FormControl>
-                  <FormDescription>
-                    Leave empty if the disk already exists.
-                  </FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          )}
-          <FormField
-            control={control}
-            name='boot'
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Boot Order</FormLabel>
-                <Select onValueChange={field.onChange} value={field.value}>
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    <SelectItem value='hd'>Hard Disk</SelectItem>
-                    <SelectItem value='cdrom,hd'>CDROM, Hard Disk</SelectItem>
-                    <SelectItem value='hd,cdrom'>Hard Disk, CDROM</SelectItem>
-                  </SelectContent>
-                </Select>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-        </div>
-      )
+    case 'disks':
+      return <DisksEditPanel control={control} />
     case 'network':
       return (
         <FormField
@@ -629,6 +586,107 @@ function HardwareEditPanel({
     default:
       return null
   }
+}
+
+function DisksEditPanel({
+  control,
+}: {
+  control: ReturnType<typeof useForm<VmFormInput>>['control']
+}) {
+  const { fields, append, remove } = useFieldArray({
+    control,
+    name: 'disks',
+  })
+
+  return (
+    <div className='grid gap-4'>
+      {fields.map((disk, index) => (
+        <div key={disk.id} className='grid gap-3 rounded-lg border p-3'>
+          <div className='flex items-center justify-between gap-2'>
+            <div className='text-sm font-medium'>Disk {index + 1}</div>
+            {fields.length > 1 && (
+              <Button
+                type='button'
+                variant='ghost'
+                size='icon'
+                className='size-7'
+                onClick={() => remove(index)}
+              >
+                <Trash2 className='size-4 text-destructive' />
+              </Button>
+            )}
+          </div>
+          <div className='grid gap-4 sm:grid-cols-[1fr_10rem]'>
+            <FormField
+              control={control}
+              name={`disks.${index}.path` as const}
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Path</FormLabel>
+                  <FormControl>
+                    <Input {...field} placeholder='.tmp/disks/vm.qcow2' />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={control}
+              name={`disks.${index}.format` as const}
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Format</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value='qcow2'>qcow2</SelectItem>
+                      <SelectItem value='raw'>raw</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        </div>
+      ))}
+      <Button
+        type='button'
+        variant='outline'
+        size='sm'
+        onClick={() => append({ path: '', format: 'qcow2' })}
+      >
+        <Plus className='size-4' />
+        Add Disk
+      </Button>
+      <FormField
+        control={control}
+        name='boot'
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Boot Order</FormLabel>
+            <Select onValueChange={field.onChange} value={field.value}>
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                <SelectItem value='hd'>Hard Disk</SelectItem>
+                <SelectItem value='cdrom,hd'>CDROM, Hard Disk</SelectItem>
+                <SelectItem value='hd,cdrom'>Hard Disk, CDROM</SelectItem>
+              </SelectContent>
+            </Select>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    </div>
+  )
 }
 
 function GraphicsEditPanel({
