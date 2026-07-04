@@ -7,14 +7,187 @@ use std::{
 use anyhow::{Context, Result, bail};
 use duct::cmd;
 
-use crate::config::{HostArgs, HostCommand, SetupLibvirtAccessArgs};
+use crate::{
+    config::{FixVmPermsArgs, HostArgs, HostCommand, SetupLibvirtAccessArgs},
+    vm::{VmDiskType, VmManifest},
+};
 
 const LIBVIRT_MANAGE_ACTION: &str = "org.libvirt.unix.manage";
 
 pub fn run(args: HostArgs) -> Result<()> {
     match args.command {
         HostCommand::SetupLibvirtAccess(args) => setup_libvirt_access(args),
+        HostCommand::FixVmPerms(args) => fix_vm_perms(args),
     }
+}
+
+fn fix_vm_perms(args: FixVmPermsArgs) -> Result<()> {
+    let plan = vm_perms_plan(&args.file)?;
+
+    require_root(args.dry_run)?;
+    ensure_user_exists(&args.qemu_user)?;
+    ensure_setfacl_exists()?;
+
+    if args.dry_run {
+        print_vm_perms_plan(&args.qemu_user, &plan);
+        return Ok(());
+    }
+
+    apply_vm_perms_plan(&args.qemu_user, &plan)?;
+
+    eprintln!(
+        "[qtr] granted qemu access for VM definition {}",
+        plan.manifest_path.display()
+    );
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct VmPermsPlan {
+    manifest_path: PathBuf,
+    writable_dirs: BTreeSet<PathBuf>,
+    read_write_files: BTreeSet<PathBuf>,
+    read_only_files: BTreeSet<PathBuf>,
+}
+
+fn vm_perms_plan(file: &Path) -> Result<VmPermsPlan> {
+    let manifest_path = absolute_path(file)?;
+    let manifest_dir = manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read VM definition {}", manifest_path.display()))?;
+    let manifest: VmManifest = serde_yaml::from_str(&manifest_text)
+        .with_context(|| format!("failed to parse VM definition {}", manifest_path.display()))?;
+
+    let mut plan = VmPermsPlan {
+        manifest_path,
+        writable_dirs: BTreeSet::new(),
+        read_write_files: BTreeSet::new(),
+        read_only_files: BTreeSet::new(),
+    };
+
+    for disk in &manifest.disks {
+        if disk.disk_type == VmDiskType::File {
+            let path = manifest_path_ref(&manifest_dir, &disk.path);
+            ensure_regular_file(&path, "disk")?;
+            plan.read_write_files.insert(path);
+        }
+    }
+
+    if let Some(cdrom) = &manifest.cdrom {
+        let path = manifest_path_ref(&manifest_dir, cdrom);
+        ensure_regular_file(&path, "cdrom ISO")?;
+        plan.read_only_files.insert(path);
+    }
+
+    let serial_log = manifest
+        .serial_log
+        .unwrap_or_else(|| PathBuf::from(format!(".tmp/logs/{}.serial.log", manifest.name)));
+    let serial_log = manifest_path_ref(&manifest_dir, &serial_log);
+    if let Some(parent) = serial_log
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        plan.writable_dirs.insert(parent.to_path_buf());
+    }
+    if serial_log.exists() {
+        ensure_regular_file(&serial_log, "serial log")?;
+        plan.read_write_files.insert(serial_log);
+    }
+
+    for path in &plan.read_write_files {
+        plan.read_only_files.remove(path);
+    }
+
+    Ok(plan)
+}
+
+fn manifest_path_ref(base_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
+fn ensure_regular_file(path: &Path, kind: &str) -> Result<()> {
+    if !path.exists() {
+        bail!("{kind} {} does not exist", path.display());
+    }
+    if !path.is_file() {
+        bail!("{kind} {} is not a regular file", path.display());
+    }
+
+    Ok(())
+}
+
+fn print_vm_perms_plan(user: &str, plan: &VmPermsPlan) {
+    for dir in &plan.writable_dirs {
+        if !dir.exists() {
+            println!("would create directory: {}", dir.display());
+        }
+        print_path_access_plan(user, dir, "rwx", true);
+        print_setfacl_command(user, "rwx", dir, true);
+    }
+    for path in &plan.read_write_files {
+        print_path_access_plan(user, path, "rw-", false);
+    }
+    for path in &plan.read_only_files {
+        print_path_access_plan(user, path, "r--", false);
+    }
+}
+
+fn apply_vm_perms_plan(user: &str, plan: &VmPermsPlan) -> Result<()> {
+    for dir in &plan.writable_dirs {
+        fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create directory {}", dir.display()))?;
+        apply_path_access(user, dir, "rwx", true)?;
+        set_user_acl(user, "rwx", dir, true)?;
+    }
+    for path in &plan.read_write_files {
+        apply_path_access(user, path, "rw-", false)?;
+    }
+    for path in &plan.read_only_files {
+        apply_path_access(user, path, "r--", false)?;
+    }
+
+    Ok(())
+}
+
+fn print_path_access_plan(user: &str, path: &Path, perms: &str, directory: bool) {
+    for ancestor in path_acl_ancestors(path, directory) {
+        print_setfacl_command(user, "--x", &ancestor, false);
+    }
+    print_setfacl_command(user, perms, path, false);
+}
+
+fn apply_path_access(user: &str, path: &Path, perms: &str, directory: bool) -> Result<()> {
+    for ancestor in path_acl_ancestors(path, directory) {
+        set_user_acl(user, "--x", &ancestor, false)?;
+    }
+    set_user_acl(user, perms, path, false)
+}
+
+fn path_acl_ancestors(path: &Path, directory: bool) -> BTreeSet<PathBuf> {
+    let mut ancestors = BTreeSet::new();
+    let mut current = if directory {
+        path.parent()
+    } else {
+        path.parent().or(Some(path))
+    };
+
+    while let Some(path) = current {
+        if path.parent().is_none() {
+            break;
+        }
+        ancestors.insert(path.to_path_buf());
+        current = path.parent();
+    }
+
+    ancestors
 }
 
 fn setup_libvirt_access(args: SetupLibvirtAccessArgs) -> Result<()> {

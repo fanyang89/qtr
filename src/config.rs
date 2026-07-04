@@ -118,6 +118,24 @@ pub struct HostArgs {
 pub enum HostCommand {
     #[command(about = "Allow a user to manage qemu:///system without a polkit agent")]
     SetupLibvirtAccess(SetupLibvirtAccessArgs),
+
+    #[command(about = "Grant QEMU filesystem access for a VM YAML definition")]
+    FixVmPerms(FixVmPermsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct FixVmPermsArgs {
+    /// YAML VM definition file.
+    #[arg(short, long, value_name = "FILE")]
+    pub file: PathBuf,
+
+    /// QEMU process user to grant filesystem ACLs to.
+    #[arg(long, default_value = "qemu")]
+    pub qemu_user: String,
+
+    /// Print actions without changing the host.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
