@@ -110,29 +110,47 @@ VMs write serial console output to `.tmp/logs/<name>.serial.log` by default. Ove
 
 ## Declarative VM Config
 
-Define or update a VM from YAML:
+Generate a starter VM definition:
+
+```bash
+cargo run -- vm init --name install-os -o vm.yaml
+```
+
+Edit `cdrom` to point at the installer ISO, and create or point `systemDisk` to a qcow2 disk.
+
+```bash
+cargo run -- disk create --path .tmp/disks/install-os.qcow2 --format qcow2 --size 40G
+```
+
+The generated YAML is an installer-oriented template:
 
 ```yaml
 name: install-os
-systemDisk: .tmp/disks/sys.qcow2
-cdrom: .tmp/iso/CentOS-7-x86_64-Everything-2207-02.iso
+systemDisk: .tmp/disks/install-os.qcow2
+cdrom: /path/to/installer.iso
 boot: [cdrom, hd]
 memoryGiB: 4
 vcpus: 2
 network: default
 graphics: vnc
-vncListen: 0.0.0.0
+vncListen: 127.0.0.1
 serialLog: .tmp/logs/install-os.serial.log
 ```
 
 Apply it:
 
 ```bash
-cargo run -- vm dump install-os > vm.yaml
-cargo run -- vm dump install-os -o vm.yaml
 cargo run -- vm apply -f vm.yaml
+cargo run -- vm start install-os
 cargo run -- vm apply -f vm.yaml --dry-run
 cargo run -- vm apply -f vm.yaml --dry-run --color always
+```
+
+Dump an existing VM definition:
+
+```bash
+cargo run -- vm dump install-os > vm.yaml
+cargo run -- vm dump install-os -o vm.yaml
 ```
 
 `vm dump` writes the supported VM fields from the inactive libvirt domain XML. `vm apply` updates existing VM definitions in place when possible, preserving libvirt-managed XML fields. If the VM is already running, changes take effect on the next start. Relative paths are resolved from the YAML file directory. Use `--dry-run` to print the libvirt domain XML diff without applying it. Diff color defaults to `auto`; use `--color always` or `--color never` to override it.

@@ -23,7 +23,7 @@ use virt::{
 use crate::{
     config::{
         ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCreateArgs,
-        VmDumpArgs, VmExecArgs, VmLaunchArgs, VmListArgs, VmNameArgs, VmShutdownArgs,
+        VmDumpArgs, VmExecArgs, VmInitArgs, VmLaunchArgs, VmListArgs, VmNameArgs, VmShutdownArgs,
     },
     disk,
     domain_xml::{
@@ -37,6 +37,7 @@ pub fn run(args: VmArgs) -> Result<()> {
     clear_error_callback();
 
     match args.command {
+        VmCommand::Init(args) => init(args),
         VmCommand::Apply(args) => apply(args),
         VmCommand::Dump(args) => dump(args),
         VmCommand::List(args) => list(args),
@@ -127,6 +128,47 @@ fn default_vm_graphics() -> GraphicsMode {
 
 fn default_vm_vnc_listen() -> String {
     "127.0.0.1".to_string()
+}
+
+fn init(args: VmInitArgs) -> Result<()> {
+    let system_disk = args
+        .system_disk
+        .unwrap_or_else(|| PathBuf::from(format!(".tmp/disks/{}.qcow2", args.name)));
+    let serial_log = PathBuf::from(format!(".tmp/logs/{}.serial.log", args.name));
+    let boot = if args.no_cdrom {
+        vec!["hd".to_string()]
+    } else {
+        vec!["cdrom".to_string(), "hd".to_string()]
+    };
+
+    let manifest = VmManifest {
+        name: args.name,
+        system_disk,
+        cdrom: (!args.no_cdrom).then_some(args.cdrom),
+        boot: Some(boot),
+        memory_gib: args.memory_gib,
+        vcpus: args.vcpus,
+        network: args.network,
+        graphics: GraphicsMode::Vnc,
+        vnc_listen: args.vnc_listen,
+        vnc_port: None,
+        serial_log: Some(serial_log),
+    };
+
+    let yaml = serde_yaml::to_string(&manifest).context("failed to serialize VM template")?;
+    match args.output {
+        Some(path) => {
+            if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
+            }
+            fs::write(&path, yaml)
+                .with_context(|| format!("failed to write VM YAML template {}", path.display()))?;
+        }
+        None => print!("{yaml}"),
+    }
+
+    Ok(())
 }
 
 fn apply(args: VmApplyArgs) -> Result<()> {

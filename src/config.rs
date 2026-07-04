@@ -297,6 +297,9 @@ pub struct VmArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum VmCommand {
+    #[command(about = "Write a starter VM YAML definition")]
+    Init(VmInitArgs),
+
     #[command(about = "Apply a VM definition from a YAML file")]
     Apply(VmApplyArgs),
 
@@ -332,6 +335,45 @@ pub enum VmCommand {
 
     #[command(about = "Remove an inactive VM definition")]
     Undefine(VmNameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VmInitArgs {
+    /// Libvirt domain name used in the template.
+    #[arg(long, default_value = "install-os")]
+    pub name: String,
+
+    /// Output YAML file. Omit to write to stdout.
+    #[arg(short, long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// qcow2 system disk path used in the template.
+    #[arg(long)]
+    pub system_disk: Option<PathBuf>,
+
+    /// Installation ISO path used in the template.
+    #[arg(long, default_value = "/path/to/installer.iso")]
+    pub cdrom: PathBuf,
+
+    /// Generate a hard-disk-only template without an installer ISO.
+    #[arg(long)]
+    pub no_cdrom: bool,
+
+    /// Guest memory size in GiB.
+    #[arg(long, default_value_t = 4)]
+    pub memory_gib: u64,
+
+    /// Number of guest vCPUs.
+    #[arg(long, default_value_t = 2)]
+    pub vcpus: u32,
+
+    /// Libvirt network attached to the VM.
+    #[arg(long, default_value = "default")]
+    pub network: String,
+
+    /// Address VNC listens on.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub vnc_listen: String,
 }
 
 #[derive(Debug, Args)]
