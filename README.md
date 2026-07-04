@@ -97,6 +97,7 @@ Generate a starter VM definition, edit `cdrom`, create the disk, then boot the V
 ```bash
 cargo run -- vm init --name install-os -o vm.yaml
 cargo run -- disk create --path .tmp/disks/install-os.qcow2 --format qcow2 --size 40G
+cargo run -- disk info --path .tmp/disks/install-os.qcow2
 cargo run -- vm apply -f vm.yaml --start
 ```
 

@@ -54,11 +54,21 @@ pub struct DiskArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum DiskCommand {
+    #[command(about = "Print disk image information")]
+    Info(DiskInfoArgs),
+
     #[command(about = "Create a new raw or qcow2 disk")]
     Create(DiskCreateArgs),
 
     #[command(about = "Create a qcow2 overlay from a backing file")]
     Overlay(DiskOverlayArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DiskInfoArgs {
+    /// Disk image path.
+    #[arg(long)]
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Args)]
