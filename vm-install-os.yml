@@ -1,0 +1,12 @@
+name: install-os
+systemDisk: /home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2
+cdrom: /home/fanmi/workspace/qtr/.tmp/iso/CentOS-7-x86_64-DVD-2207-02.iso
+boot:
+- cdrom
+- hd
+memoryGiB: 4
+vcpus: 2
+network: default
+graphics: vnc
+vncListen: 0.0.0.0
+serialLog: /home/fanmi/workspace/qtr/.tmp/logs/install-os.serial.log
