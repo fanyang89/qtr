@@ -44,21 +44,33 @@
         dest: "{{ qtr_remote_rpm_path }}"
         mode: "0644"
 
-    - name: Check dnf5 Python bindings
-      ansible.builtin.command: rpm -q python3-libdnf5
+    - name: Check qtr package
+      ansible.builtin.command: rpm -q qtr
       changed_when: false
       failed_when: false
-      register: qtr_python3_libdnf5
-
-    - name: Install dnf5 Python bindings
-      ansible.builtin.command: dnf5 install -y python3-libdnf5
-      when: qtr_python3_libdnf5.rc != 0
+      register: qtr_installed
 
     - name: Install qtr RPM
-      ansible.builtin.dnf5:
-        name: "{{ qtr_remote_rpm_path }}"
-        state: present
-        disable_gpg_check: true
+      ansible.builtin.command:
+        argv:
+          - dnf5
+          - --setopt=localpkg_gpgcheck=False
+          - install
+          - -y
+          - "{{ qtr_remote_rpm_path }}"
+      changed_when: true
+      when: qtr_installed.rc != 0
+
+    - name: Reinstall qtr RPM
+      ansible.builtin.command:
+        argv:
+          - dnf5
+          - --setopt=localpkg_gpgcheck=False
+          - reinstall
+          - -y
+          - "{{ qtr_remote_rpm_path }}"
+      changed_when: true
+      when: qtr_installed.rc == 0
 
     - name: Enable and start libvirtd
       ansible.builtin.systemd_service:
