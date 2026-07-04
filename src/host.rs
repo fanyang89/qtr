@@ -83,19 +83,18 @@ fn vm_perms_plan(file: &Path) -> Result<VmPermsPlan> {
         plan.read_only_files.insert(path);
     }
 
-    let serial_log = manifest
-        .serial_log
-        .unwrap_or_else(|| PathBuf::from(format!(".tmp/logs/{}.serial.log", manifest.name)));
-    let serial_log = manifest_path_ref(&manifest_dir, &serial_log);
-    if let Some(parent) = serial_log
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        plan.writable_dirs.insert(parent.to_path_buf());
-    }
-    if serial_log.exists() {
-        ensure_regular_file(&serial_log, "serial log")?;
-        plan.read_write_files.insert(serial_log);
+    if let Some(serial_log) = &manifest.serial_log {
+        let serial_log = manifest_path_ref(&manifest_dir, serial_log);
+        if let Some(parent) = serial_log
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            plan.writable_dirs.insert(parent.to_path_buf());
+        }
+        if serial_log.exists() {
+            ensure_regular_file(&serial_log, "serial log")?;
+            plan.read_write_files.insert(serial_log);
+        }
     }
 
     for path in &plan.read_write_files {

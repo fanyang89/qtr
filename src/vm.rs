@@ -401,7 +401,9 @@ fn apply(args: VmApplyArgs) -> Result<()> {
         if manifest.graphics == GraphicsMode::Vnc {
             print_vnc_endpoint(&domain, &manifest.vnc_listen)?;
         }
-        print_serial_log(&domain)?;
+        if manifest.serial_log.is_some() {
+            print_serial_log(&domain)?;
+        }
 
         if args.wait_shutdown {
             eprintln!("[qtr] waiting for guest shutdown...");
@@ -1332,11 +1334,9 @@ fn normalize_manifest_paths(manifest: &mut VmManifest, base_dir: &Path) -> Resul
         manifest.cdrom = Some(manifest_relative_path(base_dir, cdrom));
     }
 
-    let serial_log = manifest
-        .serial_log
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(format!(".tmp/logs/{}.serial.log", manifest.name)));
-    manifest.serial_log = Some(manifest_relative_path(base_dir, &serial_log));
+    if let Some(serial_log) = &manifest.serial_log {
+        manifest.serial_log = Some(manifest_relative_path(base_dir, serial_log));
+    }
 
     Ok(())
 }
@@ -2643,6 +2643,41 @@ mod tests {
         assert!(patched.contains("<video>"));
         assert!(!patched.contains("<boot dev='cdrom'/>"));
         assert!(patched.contains("    <boot dev='hd'/>\n"));
+    }
+
+    #[test]
+    fn leaves_serial_log_unconfigured_when_manifest_omits_it() {
+        let mut manifest = VmManifest {
+            name: "install-os".to_string(),
+            disks: vec![VmDisk {
+                disk_type: VmDiskType::File,
+                path: PathBuf::from("sys.qcow2"),
+                format: DiskFormat::Qcow2,
+                target: None,
+                bus: VmDiskBus::VirtioBlk,
+                cache: None,
+                io: None,
+                queues: None,
+            }],
+            cdrom: None,
+            boot: Some(vec!["hd".to_string()]),
+            memory_gib: 4,
+            vcpus: 2,
+            network: "default".to_string(),
+            graphics: GraphicsMode::Vnc,
+            vnc_listen: "127.0.0.1".to_string(),
+            vnc_port: None,
+            serial_log: None,
+        };
+
+        normalize_manifest_paths(&mut manifest, Path::new("/tmp/qtr"))
+            .expect("manifest paths should normalize");
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd], 4096);
+
+        assert_eq!(manifest.serial_log, None);
+        assert!(xml.contains("<console type='pty'>"));
+        assert!(!xml.contains(".serial.log"));
+        assert_eq!(parse_serial_log(&xml), None);
     }
 
     #[test]
