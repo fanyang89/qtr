@@ -70,7 +70,7 @@ const vmFormSchema = z.object({
         path: z.string().min(1, 'Disk path is required'),
         format: z.enum(['raw', 'qcow2']),
         target: z.string().optional(),
-        bus: z.string().optional(),
+        bus: z.enum(['virtio-blk', 'virtio-scsi', 'virtio']).optional(),
         cache: z
           .enum([
             'default',
@@ -136,7 +136,7 @@ const OPTIONAL_HARDWARE: { type: OptionalHardwareType; label: string }[] = [
 
 const defaultValues: VmFormInput = {
   name: '',
-  disks: [{ path: '', format: 'qcow2' }],
+  disks: [{ type: 'file', path: '', format: 'qcow2', bus: 'virtio-blk' }],
   cdrom: '',
   boot: 'hd',
   memoryGiB: 4,
@@ -151,7 +151,9 @@ const defaultValues: VmFormInput = {
 function summaryToDefaultValues(vm: VmSummary): VmFormInput {
   return {
     name: vm.name,
-    disks: vm.disks?.length ? vm.disks : [{ path: '', format: 'qcow2' }],
+    disks: vm.disks?.length
+      ? vm.disks
+      : [{ type: 'file', path: '', format: 'qcow2', bus: 'virtio-blk' }],
     cdrom: vm.cdrom ?? '',
     boot: vm.boot?.join(',') ?? 'hd',
     memoryGiB: vm.memoryMiB ? Math.round(vm.memoryMiB / 1024) : 4,
@@ -658,7 +660,9 @@ function DisksEditPanel({
         type='button'
         variant='outline'
         size='sm'
-        onClick={() => append({ path: '', format: 'qcow2' })}
+        onClick={() =>
+          append({ type: 'file', path: '', format: 'qcow2', bus: 'virtio-blk' })
+        }
       >
         <Plus className='size-4' />
         Add Disk

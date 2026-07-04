@@ -4,12 +4,12 @@ disks:
   type: file
   format: qcow2
   target: vda
-  bus: virtio
+  bus: virtio-blk
 - path: /dev/disk/by-id/example-block-device
   type: block
   format: raw
-  target: vdb
-  bus: virtio
+  target: sda
+  bus: virtio-scsi
   cache: none
   io: native
 cdrom: /path/to/installer.iso

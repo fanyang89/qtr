@@ -171,12 +171,14 @@ disks:
 - path: .tmp/disks/install-os.qcow2
   type: file
   format: qcow2
+  bus: virtio-blk
 - path: /dev/disk/by-id/example-block-device
   type: block
   format: raw
-  target: vdb
+  target: sda
+  bus: virtio-scsi
   cache: none
   io: native
 ```
 
-Prefer stable `/dev/disk/by-id/...` paths, ensure the host is not using the device, and expose it as a non-boot disk such as `target: vdb` for performance tests.
+Prefer stable `/dev/disk/by-id/...` paths, ensure the host is not using the device, and expose it as a non-boot disk such as `target: sda` for performance tests.

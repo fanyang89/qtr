@@ -80,6 +80,12 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         .map(|device| format!("    <boot dev='{}'/>\n", device.as_xml()))
         .collect::<String>();
     let disks_xml = spec.disks.iter().map(build_disk_xml).collect::<String>();
+    let scsi_controller_xml = spec
+        .disks
+        .iter()
+        .any(|disk| disk.bus == "scsi")
+        .then_some("    <controller type='scsi' index='0' model='virtio-scsi'/>\n")
+        .unwrap_or_default();
     let cdrom_xml = spec.cdrom.map(build_cdrom_xml).unwrap_or_default();
     let console_xml = build_console_xml(spec.serial_log);
     let graphics_xml = build_graphics_xml(spec.graphics);
@@ -99,7 +105,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
   </features>
   <cpu mode='host-passthrough' check='none' migratable='off'/>
   <devices>
-{disks_xml}{cdrom_xml}    <interface type='network'>
+{disks_xml}{scsi_controller_xml}{cdrom_xml}    <interface type='network'>
       <source network='{network}'/>
       <model type='virtio'/>
     </interface>
@@ -114,6 +120,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         vcpus = spec.vcpus,
         boot_xml = boot_xml,
         disks_xml = disks_xml,
+        scsi_controller_xml = scsi_controller_xml,
         network = escape_xml(spec.network),
         cdrom_xml = cdrom_xml,
         console_xml = console_xml,
@@ -150,7 +157,15 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
     )
 }
 
-pub fn virtio_disk_target(mut index: usize) -> String {
+pub fn virtio_blk_disk_target(index: usize) -> String {
+    format!("vd{}", disk_suffix(index))
+}
+
+pub fn virtio_scsi_disk_target(index: usize) -> String {
+    format!("sd{}", disk_suffix(index))
+}
+
+fn disk_suffix(mut index: usize) -> String {
     let mut suffix = Vec::new();
     loop {
         suffix.push(char::from(
@@ -163,7 +178,7 @@ pub fn virtio_disk_target(mut index: usize) -> String {
     }
 
     suffix.reverse();
-    format!("vd{}", suffix.into_iter().collect::<String>())
+    suffix.into_iter().collect::<String>()
 }
 
 fn build_cdrom_xml(path: &Path) -> String {

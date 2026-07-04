@@ -25,7 +25,7 @@ const vmDiskSchema = z.object({
   path: z.string(),
   format: z.enum(['raw', 'qcow2']),
   target: z.string().optional(),
-  bus: z.string().optional(),
+  bus: z.enum(['virtio-blk', 'virtio-scsi', 'virtio']).optional(),
   cache: z
     .enum([
       'default',

@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use roxmltree::{Document, Node};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use similar::TextDiff;
 use uuid::Uuid;
 use virt::{
@@ -85,11 +85,8 @@ pub struct VmDisk {
     pub format: DiskFormat,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    #[serde(
-        default = "default_vm_disk_bus",
-        skip_serializing_if = "is_default_vm_disk_bus"
-    )]
-    pub bus: String,
+    #[serde(default)]
+    pub bus: VmDiskBus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<VmDiskCache>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,6 +142,45 @@ impl VmDiskIo {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VmDiskBus {
+    VirtioBlk,
+    VirtioScsi,
+}
+
+impl Default for VmDiskBus {
+    fn default() -> Self {
+        Self::VirtioBlk
+    }
+}
+
+impl<'de> Deserialize<'de> for VmDiskBus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "virtio" | "virtio-blk" => Ok(Self::VirtioBlk),
+            "virtio-scsi" => Ok(Self::VirtioScsi),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["virtio-blk", "virtio-scsi"],
+            )),
+        }
+    }
+}
+
+impl VmDiskBus {
+    fn target_bus(self) -> &'static str {
+        match self {
+            Self::VirtioBlk => "virtio",
+            Self::VirtioScsi => "scsi",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VmSummary {
@@ -174,7 +210,7 @@ pub struct VmSummaryDisk {
     pub path: String,
     pub format: DiskFormat,
     pub target: String,
-    pub bus: String,
+    pub bus: VmDiskBus,
     pub cache: Option<VmDiskCache>,
     pub io: Option<VmDiskIo>,
 }
@@ -241,14 +277,6 @@ fn default_vm_disk_type() -> VmDiskType {
     VmDiskType::File
 }
 
-fn default_vm_disk_bus() -> String {
-    "virtio".to_string()
-}
-
-fn is_default_vm_disk_bus(bus: &str) -> bool {
-    bus == "virtio"
-}
-
 fn init(args: VmInitArgs) -> Result<()> {
     let disk_paths = if args.disk.is_empty() {
         vec![PathBuf::from(format!(".tmp/disks/{}.qcow2", args.name))]
@@ -262,7 +290,7 @@ fn init(args: VmInitArgs) -> Result<()> {
             path,
             format: DiskFormat::Qcow2,
             target: None,
-            bus: default_vm_disk_bus(),
+            bus: VmDiskBus::VirtioBlk,
             cache: None,
             io: None,
         })
@@ -428,16 +456,17 @@ fn launch_disk_spec(disk: &VmDisk, index: usize) -> VmLaunchDiskSpec<'_> {
         format: disk.format,
         source: disk_launch_source(disk.disk_type),
         target: disk_target(disk, index),
-        bus: disk.bus.clone(),
+        bus: disk.bus.target_bus().to_string(),
         cache: disk.cache.map(VmDiskCache::as_xml),
         io: disk.io.map(VmDiskIo::as_xml),
     }
 }
 
 fn disk_target(disk: &VmDisk, index: usize) -> String {
-    disk.target
-        .clone()
-        .unwrap_or_else(|| domain_xml::virtio_disk_target(index))
+    disk.target.clone().unwrap_or_else(|| match disk.bus {
+        VmDiskBus::VirtioBlk => domain_xml::virtio_blk_disk_target(index),
+        VmDiskBus::VirtioScsi => domain_xml::virtio_scsi_disk_target(index),
+    })
 }
 
 fn dump(args: VmDumpArgs) -> Result<()> {
@@ -955,6 +984,11 @@ fn boot_order(domain: Node<'_, '_>) -> Result<Vec<String>> {
 }
 
 fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
+    let has_virtio_scsi_controller = devices.children().any(|child| {
+        child.has_tag_name("controller")
+            && child.attribute("type") == Some("scsi")
+            && child.attribute("model") == Some("virtio-scsi")
+    });
     let disks = devices
         .children()
         .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("disk"))
@@ -984,7 +1018,10 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 .attribute("dev")
                 .context("domain XML disk target is missing dev")?
                 .to_string();
-            let bus = target.attribute("bus").unwrap_or("virtio").to_string();
+            let bus = parse_disk_target_bus(
+                target.attribute("bus").unwrap_or("virtio"),
+                has_virtio_scsi_controller,
+            )?;
             let cache = driver
                 .and_then(|driver| driver.attribute("cache"))
                 .map(parse_disk_cache)
@@ -1018,6 +1055,15 @@ fn parse_disk_type(value: &str) -> Result<VmDiskType> {
         "file" => Ok(VmDiskType::File),
         "block" => Ok(VmDiskType::Block),
         _ => bail!("unsupported disk type {value:?}"),
+    }
+}
+
+fn parse_disk_target_bus(value: &str, has_virtio_scsi_controller: bool) -> Result<VmDiskBus> {
+    match value {
+        "virtio" => Ok(VmDiskBus::VirtioBlk),
+        "scsi" if has_virtio_scsi_controller => Ok(VmDiskBus::VirtioScsi),
+        "scsi" => bail!("unsupported scsi disk without virtio-scsi controller"),
+        _ => bail!("unsupported disk bus {value:?}"),
     }
 }
 
@@ -1259,8 +1305,14 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
         if !targets.insert(target.clone()) {
             bail!("duplicate disk target {target}");
         }
-        if disk.bus.is_empty() {
-            bail!("disk bus must not be empty");
+        match disk.bus {
+            VmDiskBus::VirtioBlk if !target.starts_with("vd") => {
+                bail!("virtio-blk disk target {target} must start with vd")
+            }
+            VmDiskBus::VirtioScsi if !target.starts_with("sd") => {
+                bail!("virtio-scsi disk target {target} must start with sd")
+            }
+            _ => {}
         }
 
         if !disk.path.exists() {
@@ -2215,8 +2267,8 @@ mod tests {
                 path: PathBuf::from("/dev/disk/by-id/qtr-test-disk"),
                 format: DiskFormat::Raw,
                 source: VmLaunchDiskSource::Block,
-                target: "vdb".to_string(),
-                bus: "virtio".to_string(),
+                target: "sda".to_string(),
+                bus: "scsi".to_string(),
                 cache: Some("none"),
                 io: Some("native"),
             },
@@ -2247,16 +2299,18 @@ mod tests {
         assert_eq!(manifest.disks[0].disk_type, VmDiskType::File);
         assert_eq!(manifest.disks[0].format, DiskFormat::Qcow2);
         assert_eq!(manifest.disks[0].target.as_deref(), Some("vda"));
-        assert_eq!(manifest.disks[0].bus, "virtio");
+        assert_eq!(manifest.disks[0].bus, VmDiskBus::VirtioBlk);
         assert_eq!(manifest.disks[1].disk_type, VmDiskType::Block);
         assert_eq!(
             manifest.disks[1].path,
             PathBuf::from("/dev/disk/by-id/qtr-test-disk")
         );
         assert_eq!(manifest.disks[1].format, DiskFormat::Raw);
-        assert_eq!(manifest.disks[1].target.as_deref(), Some("vdb"));
+        assert_eq!(manifest.disks[1].target.as_deref(), Some("sda"));
+        assert_eq!(manifest.disks[1].bus, VmDiskBus::VirtioScsi);
         assert_eq!(manifest.disks[1].cache, Some(VmDiskCache::None));
         assert_eq!(manifest.disks[1].io, Some(VmDiskIo::Native));
+        assert!(xml.contains("<controller type='scsi' index='0' model='virtio-scsi'/>"));
         assert_eq!(manifest.cdrom, Some(PathBuf::from("/isos/os.iso")));
         assert_eq!(
             manifest.boot,
@@ -2350,7 +2404,7 @@ mod tests {
                 path: PathBuf::from("/home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2"),
                 format: DiskFormat::Qcow2,
                 target: Some("vda".to_string()),
-                bus: "virtio".to_string(),
+                bus: VmDiskBus::VirtioBlk,
                 cache: None,
                 io: None,
             }],
@@ -2379,6 +2433,26 @@ mod tests {
         assert!(patched.contains("<video>"));
         assert!(!patched.contains("<boot dev='cdrom'/>"));
         assert!(patched.contains("    <boot dev='hd'/>\n"));
+    }
+
+    #[test]
+    fn parses_legacy_virtio_bus_as_virtio_blk() {
+        let yaml = r#"name: install-os
+disks:
+- path: /tmp/sys.qcow2
+  type: file
+  format: qcow2
+  bus: virtio
+memoryGiB: 4
+vcpus: 2
+network: default
+graphics: vnc
+vncListen: 127.0.0.1
+"#;
+
+        let manifest: VmManifest = serde_yaml::from_str(yaml).expect("legacy YAML should parse");
+
+        assert_eq!(manifest.disks[0].bus, VmDiskBus::VirtioBlk);
     }
 
     #[test]
