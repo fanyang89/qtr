@@ -305,7 +305,6 @@ fn init(args: VmInitArgs) -> Result<()> {
             queues: None,
         })
         .collect();
-    let serial_log = PathBuf::from(format!(".tmp/logs/{}.serial.log", args.name));
     let boot = if args.no_cdrom {
         vec!["hd".to_string()]
     } else {
@@ -323,7 +322,7 @@ fn init(args: VmInitArgs) -> Result<()> {
         graphics: GraphicsMode::Vnc,
         vnc_listen: args.vnc_listen,
         vnc_port: None,
-        serial_log: Some(serial_log),
+        serial_log: None,
     };
 
     let yaml = serde_yaml::to_string(&manifest).context("failed to serialize VM template")?;

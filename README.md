@@ -38,15 +38,14 @@ Grant the current user access to `qemu:///system` without an interactive polkit 
 
 ```bash
 cargo build
-mkdir -p .tmp/disks .tmp/iso .tmp/logs
+mkdir -p .tmp/disks .tmp/iso
 sudo ./target/debug/qtr host setup-libvirt-access \
   --qemu-rw-dir .tmp/disks \
-  --qemu-rw-dir .tmp/logs \
   --qemu-ro-dir .tmp/iso
 newgrp libvirt
 ```
 
-The QEMU system process needs filesystem access to VM media. Use `--qemu-rw-dir` for writable qcow2 disks and serial logs, and `--qemu-ro-dir` for readonly ISO directories.
+The QEMU system process needs filesystem access to VM media. Use `--qemu-rw-dir` for writable qcow2 disks and optional serial logs, and `--qemu-ro-dir` for readonly ISO directories.
 
 Verify libvirt can load the QEMU driver:
 
@@ -79,7 +78,6 @@ After installing the RPM, start libvirt and grant user access for the VM media d
 sudo systemctl enable --now libvirtd
 sudo qtr host setup-libvirt-access \
   --qemu-rw-dir /path/to/disks \
-  --qemu-rw-dir /path/to/logs \
   --qemu-ro-dir /path/to/iso
 newgrp libvirt
 ```
@@ -132,7 +130,7 @@ cargo run -- disk info --path .tmp/disks/install-os.qcow2
 cargo run -- vm apply -f vm.yaml --start
 ```
 
-VMs write serial console output to `.tmp/logs/<name>.serial.log` by default. Override it with `serialLog` in the YAML definition.
+Serial console file output is disabled by default. Configure `serialLog` in the YAML definition to enable it.
 
 ## Declarative VM Config
 
@@ -159,7 +157,6 @@ vcpus: 2
 network: default
 graphics: vnc
 vncListen: 127.0.0.1
-serialLog: .tmp/logs/install-os.serial.log
 ```
 
 Apply it:
