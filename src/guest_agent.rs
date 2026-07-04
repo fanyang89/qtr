@@ -61,6 +61,20 @@ struct GuestFileWriteReturn {
     count: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct GuestFileReadResponse {
+    #[serde(rename = "return")]
+    result: GuestFileReadReturn,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestFileReadReturn {
+    count: i64,
+    #[serde(default, rename = "buf-b64")]
+    buf_b64: String,
+    eof: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct GuestExecArgs<'a> {
     path: &'a str,
@@ -116,6 +130,31 @@ pub fn write_file(domain: &Domain, path: &str, contents: &[u8]) -> Result<()> {
     write_result.and(close_result)
 }
 
+pub fn read_file(domain: &Domain, path: &str) -> Result<Vec<u8>> {
+    let handle = open_file(domain, path, "r")?;
+    let read_result: Result<Vec<u8>> = (|| {
+        let mut contents = Vec::new();
+        loop {
+            let chunk = read_file_chunk(domain, handle, 48 * 1024)?;
+            contents.extend_from_slice(&chunk.data);
+            if chunk.eof {
+                break;
+            }
+        }
+        Ok(contents)
+    })();
+    let close_result = close_file(domain, handle);
+    let contents = read_result?;
+    close_result?;
+
+    Ok(contents)
+}
+
+struct GuestFileChunk {
+    data: Vec<u8>,
+    eof: bool,
+}
+
 fn open_file(domain: &Domain, path: &str, mode: &str) -> Result<i64> {
     let request = json!({
         "execute": "guest-file-open",
@@ -154,6 +193,35 @@ fn write_file_chunk(domain: &Domain, handle: i64, chunk: &[u8]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn read_file_chunk(domain: &Domain, handle: i64, count: i64) -> Result<GuestFileChunk> {
+    let request = json!({
+        "execute": "guest-file-read",
+        "arguments": {
+            "handle": handle,
+            "count": count,
+        },
+    });
+    let response = send_command(domain, &request.to_string())
+        .with_context(|| format!("failed to read guest file handle {handle}"))?;
+    let read: GuestFileReadResponse = serde_json::from_str(&response)
+        .with_context(|| format!("failed to parse guest-file-read response: {response}"))?;
+    let data = STANDARD
+        .decode(read.result.buf_b64)
+        .context("failed to decode guest file read buffer")?;
+    if read.result.count != data.len() as i64 {
+        bail!(
+            "guest file read count mismatch: response count {} decoded {} bytes",
+            read.result.count,
+            data.len()
+        );
+    }
+
+    Ok(GuestFileChunk {
+        data,
+        eof: read.result.eof,
+    })
 }
 
 fn flush_file(domain: &Domain, handle: i64) -> Result<()> {

@@ -23,7 +23,7 @@ use virt::{
 
 use crate::{
     config::{
-        ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmDumpArgs,
+        ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCpArgs, VmDumpArgs,
         VmExecArgs, VmInitArgs, VmListArgs, VmNameArgs, VmRemoveArgs, VmStartArgs, VmStopArgs,
     },
     disk,
@@ -47,6 +47,7 @@ pub fn run(args: VmArgs) -> Result<()> {
         VmCommand::Rm(args) => remove(args),
         VmCommand::Vnc(args) => vnc(args),
         VmCommand::Exec(args) => exec(args),
+        VmCommand::Cp(args) => cp(args),
     }
 }
 
@@ -115,6 +116,12 @@ struct VmExecOutput {
 enum VmExecMode {
     Command,
     Script,
+}
+
+#[derive(Debug)]
+enum VmCopyEndpoint {
+    Host(PathBuf),
+    Guest(String),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1360,6 +1367,95 @@ fn vnc(args: VmNameArgs) -> Result<()> {
         )
     })?;
     println!("{endpoint}");
+
+    Ok(())
+}
+
+fn cp(args: VmCpArgs) -> Result<()> {
+    let source = parse_copy_endpoint(&args.source)?;
+    let dest = parse_copy_endpoint(&args.dest)?;
+
+    let conn = connect(&args.connect_uri)?;
+    let domain = lookup_domain(&conn, &args.name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {} state", args.name))?
+    {
+        bail!("domain {} is not active", args.name);
+    }
+
+    let timeout = Duration::from_secs(args.timeout_secs);
+    guest_agent::wait_ready(&domain, timeout)
+        .with_context(|| format!("guest agent is not ready for domain {}", args.name))?;
+
+    match (source, dest) {
+        (VmCopyEndpoint::Host(source), VmCopyEndpoint::Guest(dest)) => {
+            if args.parents {
+                create_guest_parent_dir(&domain, &dest)?;
+            }
+            let contents = fs::read(&source)
+                .with_context(|| format!("failed to read {}", source.display()))?;
+            guest_agent::write_file(&domain, &dest, &contents)
+                .with_context(|| format!("failed to write guest file {dest}"))?;
+            eprintln!("[qtr] copied {} to guest:{dest}", source.display());
+        }
+        (VmCopyEndpoint::Guest(source), VmCopyEndpoint::Host(dest)) => {
+            if args.parents {
+                create_host_parent_dir(&dest)?;
+            }
+            let contents = guest_agent::read_file(&domain, &source)
+                .with_context(|| format!("failed to read guest file {source}"))?;
+            fs::write(&dest, contents)
+                .with_context(|| format!("failed to write {}", dest.display()))?;
+            eprintln!("[qtr] copied guest:{source} to {}", dest.display());
+        }
+        (VmCopyEndpoint::Guest(_), VmCopyEndpoint::Guest(_)) => {
+            bail!("guest-to-guest copy is not supported")
+        }
+        (VmCopyEndpoint::Host(_), VmCopyEndpoint::Host(_)) => {
+            bail!("one of SRC or DEST must be prefixed with guest:")
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_copy_endpoint(value: &str) -> Result<VmCopyEndpoint> {
+    match value.strip_prefix("guest:") {
+        Some(path) if !path.is_empty() => Ok(VmCopyEndpoint::Guest(path.to_string())),
+        Some(_) => bail!("guest path must not be empty"),
+        None => Ok(VmCopyEndpoint::Host(PathBuf::from(value))),
+    }
+}
+
+fn create_host_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+
+    Ok(())
+}
+
+fn create_guest_parent_dir(domain: &Domain, path: &str) -> Result<()> {
+    let Some(parent) = Path::new(path)
+        .parent()
+        .map(|path| path.to_string_lossy().into_owned())
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let command = format!("mkdir -p {}", shell_quote(&parent));
+    let result = guest_agent::run_command(domain, &command, Duration::from_secs(30))
+        .with_context(|| format!("failed to create guest directory {parent}"))?;
+    if result.exitcode != 0 {
+        bail!(
+            "failed to create guest directory {}: {}",
+            parent,
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 
     Ok(())
 }

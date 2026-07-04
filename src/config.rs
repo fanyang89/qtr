@@ -323,6 +323,9 @@ pub enum VmCommand {
 
     #[command(about = "Run a shell command through QEMU Guest Agent")]
     Exec(VmExecArgs),
+
+    #[command(about = "Copy one file between host and guest")]
+    Cp(VmCpArgs),
 }
 
 #[derive(Debug, Args)]
@@ -511,6 +514,30 @@ pub struct VmExecArgs {
     /// Shell command executed inside the guest via /bin/sh -lc.
     #[arg(last = true)]
     pub command: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct VmCpArgs {
+    /// Libvirt domain name.
+    pub name: String,
+
+    /// Source path. Prefix guest paths with guest:.
+    pub source: String,
+
+    /// Destination path. Prefix guest paths with guest:.
+    pub dest: String,
+
+    /// Seconds to wait for QEMU Guest Agent.
+    #[arg(long, default_value_t = 120)]
+    pub timeout_secs: u64,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+
+    /// Create the destination parent directory before copying.
+    #[arg(long)]
+    pub parents: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
