@@ -1,7 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MonitorPlay, MoreHorizontal, Play, Power, Server, Square } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -23,8 +23,7 @@ import { vmMetricsByName, vmRuntimeMetrics, type VmMetricSnapshot } from './metr
 
 export function VmList() {
   const queryClient = useQueryClient()
-  const previousMetricsRef = useRef<Map<string, VmMetricSnapshot>>(new Map())
-  const previousMetrics = previousMetricsRef.current
+  const [previousMetrics, setPreviousMetrics] = useState<Map<string, VmMetricSnapshot>>(new Map())
   const { data: vms = [] } = useQuery({ queryKey: ['vms'], queryFn: getVms, refetchInterval: 2000 })
   const action = useMutation({
     mutationFn: ({ name, action }: { name: string; action: string }) => postVmAction(name, action),
@@ -36,7 +35,10 @@ export function VmList() {
   })
 
   useEffect(() => {
-    previousMetricsRef.current = vmMetricsByName(vms)
+    // Persist the previous metric snapshot so the next render can compute
+    // delta-based runtime metrics for each VM row.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPreviousMetrics(vmMetricsByName(vms))
   }, [vms])
 
   return (

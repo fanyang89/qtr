@@ -1,7 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, Cpu, HardDrive, MemoryStick, MonitorPlay, Network } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -14,16 +14,18 @@ import { getVm } from '@/lib/api'
 import { vmRuntimeMetrics, type VmMetricSnapshot } from './metrics'
 
 export function VmDetail({ name }: { name: string }) {
-  const previousMetricsRef = useRef<VmMetricSnapshot | undefined>(undefined)
-  const previousMetrics = previousMetricsRef.current
+  const [previousMetrics, setPreviousMetrics] = useState<VmMetricSnapshot | undefined>(undefined)
   const { data: vm } = useQuery({ queryKey: ['vms', name], queryFn: () => getVm(name), refetchInterval: 2000 })
   const metrics = vmRuntimeMetrics(vm, previousMetrics)
 
   useEffect(() => {
     if (vm?.metrics) {
-      previousMetricsRef.current = vm.metrics
+      // We intentionally persist the previous metric snapshot in state so the
+      // next render can compute delta-based runtime metrics.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPreviousMetrics(vm.metrics)
     }
-  }, [vm])
+  }, [vm?.metrics])
 
   return (
     <>

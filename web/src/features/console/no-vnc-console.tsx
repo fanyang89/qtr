@@ -90,6 +90,9 @@ export function NoVncConsole({ name }: { name: string }) {
   }
 
   useEffect(() => {
+    // noVNC connection inherently needs to start inside the effect and reports
+    // state through listeners; the synchronous setState here is intentional.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     connect()
     return () => {
       rfbRef.current?.disconnect()
