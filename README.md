@@ -151,4 +151,16 @@ Run commands through QEMU Guest Agent after the guest boots:
 ```bash
 cargo run -- vm exec install-os -- 'uname -a'
 cargo run -- vm exec install-os -- 'journalctl -xb --no-pager'
+cargo run -- vm exec install-os --script examples/kworker-fio.sh --output results/native-none.json
+```
+
+`vm exec --script` uploads a local script to a temporary guest path, runs it with `/bin/sh`, captures stdout/stderr, then removes the guest copy. `--output` writes a JSON result with exit code, elapsed time, stdout and stderr. The guest needs QEMU Guest Agent running; `examples/kworker-fio.sh` also requires `fio` and tests `/dev/vdb`.
+
+Single-case disk parameter workflow:
+
+```bash
+cargo run -- vm apply -f vm-native-none.yaml
+cargo run -- vm start install-os
+cargo run -- vm exec install-os --script examples/kworker-fio.sh --output results/native-none.json
+cargo run -- vm stop install-os --wait
 ```

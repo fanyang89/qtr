@@ -44,6 +44,23 @@ struct GuestExecStatusReturn {
     err_data: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GuestFileOpenResponse {
+    #[serde(rename = "return")]
+    handle: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestFileWriteResponse {
+    #[serde(rename = "return")]
+    result: GuestFileWriteReturn,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestFileWriteReturn {
+    count: i64,
+}
+
 #[derive(Debug, Serialize)]
 struct GuestExecArgs<'a> {
     path: &'a str,
@@ -84,6 +101,81 @@ pub fn run_command(domain: &Domain, command: &str, timeout: Duration) -> Result<
         .with_context(|| format!("failed to parse guest-exec response: {response}"))?;
 
     wait_exec_status(domain, start.result.pid, timeout)
+}
+
+pub fn write_file(domain: &Domain, path: &str, contents: &[u8]) -> Result<()> {
+    let handle = open_file(domain, path, "w")?;
+    let write_result = (|| {
+        for chunk in contents.chunks(48 * 1024) {
+            write_file_chunk(domain, handle, chunk)?;
+        }
+        flush_file(domain, handle)
+    })();
+    let close_result = close_file(domain, handle);
+
+    write_result.and(close_result)
+}
+
+fn open_file(domain: &Domain, path: &str, mode: &str) -> Result<i64> {
+    let request = json!({
+        "execute": "guest-file-open",
+        "arguments": {
+            "path": path,
+            "mode": mode,
+        },
+    });
+    let response = send_command(domain, &request.to_string())
+        .with_context(|| format!("failed to open guest file {path}"))?;
+    let opened: GuestFileOpenResponse = serde_json::from_str(&response)
+        .with_context(|| format!("failed to parse guest-file-open response: {response}"))?;
+
+    Ok(opened.handle)
+}
+
+fn write_file_chunk(domain: &Domain, handle: i64, chunk: &[u8]) -> Result<()> {
+    let encoded = STANDARD.encode(chunk);
+    let request = json!({
+        "execute": "guest-file-write",
+        "arguments": {
+            "handle": handle,
+            "buf-b64": encoded,
+        },
+    });
+    let response = send_command(domain, &request.to_string())
+        .with_context(|| format!("failed to write guest file handle {handle}"))?;
+    let written: GuestFileWriteResponse = serde_json::from_str(&response)
+        .with_context(|| format!("failed to parse guest-file-write response: {response}"))?;
+    if written.result.count != chunk.len() as i64 {
+        bail!(
+            "short guest file write: wrote {} of {} bytes",
+            written.result.count,
+            chunk.len()
+        );
+    }
+
+    Ok(())
+}
+
+fn flush_file(domain: &Domain, handle: i64) -> Result<()> {
+    let request = json!({
+        "execute": "guest-file-flush",
+        "arguments": { "handle": handle },
+    });
+    send_command(domain, &request.to_string())
+        .with_context(|| format!("failed to flush guest file handle {handle}"))?;
+
+    Ok(())
+}
+
+fn close_file(domain: &Domain, handle: i64) -> Result<()> {
+    let request = json!({
+        "execute": "guest-file-close",
+        "arguments": { "handle": handle },
+    });
+    send_command(domain, &request.to_string())
+        .with_context(|| format!("failed to close guest file handle {handle}"))?;
+
+    Ok(())
 }
 
 fn wait_exec_status(domain: &Domain, pid: i64, timeout: Duration) -> Result<GuestExecResult> {

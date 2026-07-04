@@ -500,8 +500,16 @@ pub struct VmExecArgs {
     #[arg(long, default_value = "qemu:///system")]
     pub connect_uri: String,
 
+    /// Local script file uploaded and executed inside the guest.
+    #[arg(long, value_name = "FILE")]
+    pub script: Option<PathBuf>,
+
+    /// Write execution result as JSON instead of streaming stdout/stderr.
+    #[arg(long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
     /// Shell command executed inside the guest via /bin/sh -lc.
-    #[arg(last = true, required = true)]
+    #[arg(last = true)]
     pub command: Vec<String>,
 }
 

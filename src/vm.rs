@@ -6,13 +6,14 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use similar::TextDiff;
+use uuid::Uuid;
 use virt::{
     connect::Connect,
     domain::{Domain, DomainInfo, MemoryStat},
@@ -93,6 +94,27 @@ pub struct VmSummary {
     pub vnc_listen: Option<String>,
     pub vnc_port: Option<u16>,
     pub metrics: Option<VmMetrics>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VmExecOutput {
+    domain: String,
+    mode: VmExecMode,
+    command: String,
+    script: Option<String>,
+    guest_path: Option<String>,
+    exit_code: i32,
+    elapsed_ms: u128,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum VmExecMode {
+    Command,
+    Script,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1343,6 +1365,13 @@ fn vnc(args: VmNameArgs) -> Result<()> {
 }
 
 fn exec(args: VmExecArgs) -> Result<()> {
+    if args.script.is_some() && !args.command.is_empty() {
+        bail!("--script and command arguments are mutually exclusive");
+    }
+    if args.script.is_none() && args.command.is_empty() {
+        bail!("provide either --script FILE or a command after --");
+    }
+
     let conn = connect(&args.connect_uri)?;
     let domain = lookup_domain(&conn, &args.name)?;
     if !domain
@@ -1356,22 +1385,76 @@ fn exec(args: VmExecArgs) -> Result<()> {
     guest_agent::wait_ready(&domain, timeout)
         .with_context(|| format!("guest agent is not ready for domain {}", args.name))?;
 
-    let command = args.command.join(" ");
-    let result = guest_agent::run_command(&domain, &command, timeout)
+    let (mode, command, script, guest_path) = match &args.script {
+        Some(script) => {
+            let contents = fs::read(script)
+                .with_context(|| format!("failed to read script {}", script.display()))?;
+            let guest_path = format!("/tmp/qtr-exec-{}.sh", Uuid::new_v4());
+            guest_agent::write_file(&domain, &guest_path, &contents)
+                .with_context(|| format!("failed to upload script to guest {guest_path}"))?;
+            (
+                VmExecMode::Script,
+                format!("/bin/sh {}", shell_quote(&guest_path)),
+                Some(script.display().to_string()),
+                Some(guest_path),
+            )
+        }
+        None => (VmExecMode::Command, args.command.join(" "), None, None),
+    };
+
+    let started = Instant::now();
+    let exec_result = guest_agent::run_command(&domain, &command, timeout);
+    let elapsed_ms = started.elapsed().as_millis();
+    if let Some(guest_path) = &guest_path {
+        let cleanup = format!("rm -f {}", shell_quote(guest_path));
+        if let Err(err) = guest_agent::run_command(&domain, &cleanup, Duration::from_secs(30)) {
+            eprintln!("[qtr] warning: failed to remove guest script {guest_path}: {err}");
+        }
+    }
+
+    let result = exec_result
         .with_context(|| format!("failed to run guest command in domain {}", args.name))?;
 
-    io::stdout()
-        .write_all(&result.stdout)
-        .context("failed to write guest stdout")?;
-    io::stderr()
-        .write_all(&result.stderr)
-        .context("failed to write guest stderr")?;
+    if let Some(output_path) = &args.output {
+        let output = VmExecOutput {
+            domain: args.name.clone(),
+            mode,
+            command,
+            script,
+            guest_path,
+            exit_code: result.exitcode,
+            elapsed_ms,
+            stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
+        };
+        write_exec_output(output_path, &output)?;
+    } else {
+        io::stdout()
+            .write_all(&result.stdout)
+            .context("failed to write guest stdout")?;
+        io::stderr()
+            .write_all(&result.stderr)
+            .context("failed to write guest stderr")?;
+    }
 
     if result.exitcode != 0 {
         bail!("guest command exited with {}", result.exitcode);
     }
 
     Ok(())
+}
+
+fn write_exec_output(path: &Path, output: &VmExecOutput) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+    let json = serde_json::to_vec_pretty(output).context("failed to serialize exec output")?;
+    fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub fn start_by_name(connect_uri: &str, name: &str) -> Result<()> {
