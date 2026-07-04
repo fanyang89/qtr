@@ -12,6 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -24,6 +25,7 @@ use tower_http::{
 use virt::error::clear_error_callback;
 
 use crate::{config::WebArgs, vm};
+use crate::config::GraphicsMode;
 
 #[derive(Clone)]
 struct AppState {
@@ -82,6 +84,42 @@ impl IntoResponse for AppError {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateVmRequest {
+    name: String,
+    system_disk: PathBuf,
+    cdrom: Option<PathBuf>,
+    boot: Option<Vec<String>>,
+    #[serde(rename = "memoryGiB")]
+    memory_gib: u64,
+    vcpus: u32,
+    network: String,
+    graphics: GraphicsMode,
+    vnc_listen: String,
+    vnc_port: Option<u16>,
+    serial_log: Option<PathBuf>,
+    create_system_disk: Option<String>,
+}
+
+impl CreateVmRequest {
+    fn into_manifest(self) -> vm::VmManifest {
+        vm::VmManifest {
+            name: self.name,
+            system_disk: self.system_disk,
+            cdrom: self.cdrom,
+            boot: self.boot,
+            memory_gib: self.memory_gib,
+            vcpus: self.vcpus,
+            network: self.network,
+            graphics: self.graphics,
+            vnc_listen: self.vnc_listen,
+            vnc_port: self.vnc_port,
+            serial_log: self.serial_log,
+        }
+    }
+}
+
 pub fn run(args: WebArgs) -> Result<()> {
     clear_error_callback();
     init_tracing();
@@ -113,8 +151,8 @@ fn app(connect_uri: String, web_dir: PathBuf) -> Router {
     let index_html = web_dir.join("index.html");
     let api = Router::new()
         .route("/health", get(health))
-        .route("/vms", get(list_vms))
-        .route("/vms/{name}", get(get_vm).delete(undefine_vm))
+        .route("/vms", get(list_vms).post(create_vm))
+        .route("/vms/{name}", get(get_vm).put(update_vm).delete(undefine_vm))
         .route("/vms/{name}/start", post(start_vm))
         .route("/vms/{name}/shutdown", post(shutdown_vm))
         .route("/vms/{name}/destroy", post(destroy_vm))
@@ -156,6 +194,30 @@ async fn get_vm(
 ) -> AppResult<Json<vm::VmSummary>> {
     let connect_uri = state.connect_uri;
     let vm = run_libvirt(move || vm::get_summary(&connect_uri, &name)).await?;
+    Ok(Json(vm))
+}
+
+async fn create_vm(
+    State(state): State<AppState>,
+    Json(request): Json<CreateVmRequest>,
+) -> AppResult<(StatusCode, Json<vm::VmSummary>)> {
+    let create_system_disk = request.create_system_disk.clone();
+    let manifest = request.into_manifest();
+    let connect_uri = state.connect_uri;
+    let vm =
+        run_libvirt(move || vm::create_by_manifest(&connect_uri, manifest, create_system_disk))
+            .await?;
+    Ok((StatusCode::CREATED, Json(vm)))
+}
+
+async fn update_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(mut manifest): Json<vm::VmManifest>,
+) -> AppResult<Json<vm::VmSummary>> {
+    manifest.name = name;
+    let connect_uri = state.connect_uri;
+    let vm = run_libvirt(move || vm::apply_by_manifest(&connect_uri, manifest)).await?;
     Ok(Json(vm))
 }
 

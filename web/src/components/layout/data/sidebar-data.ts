@@ -3,8 +3,6 @@ import {
   Boxes,
   CirclePlay,
   HardDrive,
-  LayoutDashboard,
-  MonitorPlay,
   Settings,
   Server,
   TerminalSquare,
@@ -29,13 +27,8 @@ export const sidebarData: SidebarData = {
       title: 'Control Plane',
       items: [
         {
-          title: 'Dashboard',
-          url: '/',
-          icon: LayoutDashboard,
-        },
-        {
           title: 'Virtual Machines',
-          url: '/vms',
+          url: '/',
           icon: Server,
         },
       ],
@@ -60,12 +53,6 @@ export const sidebarData: SidebarData = {
     {
       title: 'System',
       items: [
-        {
-          title: 'Console',
-          url: '/vms/install-os/console',
-          icon: MonitorPlay,
-          badge: 'demo',
-        },
         {
           title: 'Settings',
           url: '/settings',

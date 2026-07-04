@@ -17,7 +17,30 @@ export type VmSummary = {
   memoryMiB?: number
   vcpus?: number
   network?: string
+  systemDisk?: string
+  cdrom?: string
+  boot?: string[]
+  graphics?: 'vnc' | 'none'
+  vncListen?: string
+  vncPort?: number
 }
+
+export type VmCreateInput = {
+  name: string
+  systemDisk: string
+  createSystemDisk?: string
+  cdrom?: string
+  boot?: string[]
+  memoryGiB: number
+  vcpus: number
+  network: string
+  graphics: 'vnc' | 'none'
+  vncListen: string
+  vncPort?: number
+  serialLog?: string
+}
+
+export type VmUpdateInput = Omit<VmCreateInput, 'createSystemDisk'>
 
 export type HealthStatus = {
   ok: boolean
@@ -49,10 +72,11 @@ const sampleVms: VmSummary[] = [
   },
 ]
 
-async function requestJson<T>(path: string): Promise<T> {
-  const response = await fetch(path)
+async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(path, options)
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`)
+    const text = await response.text().catch(() => 'Request failed')
+    throw new Error(text)
   }
   return response.json() as Promise<T>
 }
@@ -93,6 +117,33 @@ export async function postVmAction(name: string, action: string): Promise<void> 
     method: 'POST',
   })
   if (!response.ok) {
-    throw new Error(`VM action failed: ${response.status}`)
+    const text = await response.text().catch(() => 'VM action failed')
+    throw new Error(text)
+  }
+}
+
+export async function createVm(input: VmCreateInput): Promise<VmSummary> {
+  return requestJson<VmSummary>('/api/vms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function updateVm(name: string, input: VmUpdateInput): Promise<VmSummary> {
+  return requestJson<VmSummary>(`/api/vms/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function deleteVm(name: string): Promise<void> {
+  const response = await fetch(`/api/vms/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    const text = await response.text().catch(() => 'Failed to delete VM')
+    throw new Error(text)
   }
 }

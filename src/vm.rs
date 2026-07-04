@@ -22,7 +22,10 @@ use crate::{
         VmDumpArgs, VmExecArgs, VmLaunchArgs, VmListArgs, VmNameArgs, VmShutdownArgs,
     },
     disk,
-    domain_xml::{self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml},
+    domain_xml::{
+        self, BootDevice, GraphicsSpec, VmLaunchDomainSpec, build_vm_launch_domain_xml,
+        parse_boot_devices,
+    },
     guest_agent,
 };
 
@@ -45,29 +48,29 @@ pub fn run(args: VmArgs) -> Result<()> {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct VmManifest {
-    name: String,
-    system_disk: PathBuf,
+pub struct VmManifest {
+    pub name: String,
+    pub system_disk: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
-    cdrom: Option<PathBuf>,
+    pub cdrom: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    boot: Option<Vec<String>>,
+    pub boot: Option<Vec<String>>,
     #[serde(default = "default_vm_memory_gib", rename = "memoryGiB")]
-    memory_gib: u64,
+    pub memory_gib: u64,
     #[serde(default = "default_vm_vcpus")]
-    vcpus: u32,
+    pub vcpus: u32,
     #[serde(default = "default_vm_network")]
-    network: String,
+    pub network: String,
     #[serde(default = "default_vm_graphics")]
-    graphics: GraphicsMode,
+    pub graphics: GraphicsMode,
     #[serde(default = "default_vm_vnc_listen")]
-    vnc_listen: String,
+    pub vnc_listen: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    vnc_port: Option<u16>,
+    pub vnc_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    serial_log: Option<PathBuf>,
+    pub serial_log: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -82,6 +85,12 @@ pub struct VmSummary {
     pub memory_mib: Option<u64>,
     pub vcpus: Option<u32>,
     pub network: Option<String>,
+    pub system_disk: Option<String>,
+    pub cdrom: Option<String>,
+    pub boot: Option<Vec<String>>,
+    pub graphics: String,
+    pub vnc_listen: Option<String>,
+    pub vnc_port: Option<u16>,
 }
 
 fn default_vm_memory_gib() -> u64 {
@@ -952,6 +961,8 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
     let vnc_endpoint = parse_vnc_endpoint(&xml, "127.0.0.1").map(|endpoint| endpoint.display());
     let serial_log = parse_serial_log(&xml);
     let (memory_mib, vcpus, network) = parse_summary_resources(&xml);
+    let (system_disk, cdrom, boot, graphics, vnc_listen, vnc_port) =
+        parse_summary_definition(&xml).unwrap_or_default();
 
     Ok(VmSummary {
         name,
@@ -963,6 +974,12 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
         memory_mib,
         vcpus,
         network,
+        system_disk,
+        cdrom,
+        boot,
+        graphics,
+        vnc_listen,
+        vnc_port,
     })
 }
 
@@ -980,6 +997,37 @@ fn parse_summary_resources(xml: &str) -> (Option<u64>, Option<u32>, Option<Strin
         .and_then(|devices| network_name(devices).ok());
 
     (memory, vcpus, network)
+}
+
+fn parse_summary_definition(
+    xml: &str,
+) -> Result<(Option<String>, Option<String>, Option<Vec<String>>, String, Option<String>, Option<u16>)> {
+    let doc = Document::parse(xml).context("failed to parse domain XML")?;
+    let domain = doc.root_element();
+    let devices = required_child(domain, "devices")?;
+
+    let system_disk = disk_source_path(devices, "disk", Some("vda"))
+        .ok()
+        .map(|path| path.display().to_string());
+    let cdrom = optional_disk_source_path(devices, "cdrom", None)
+        .ok()
+        .flatten()
+        .map(|path| path.display().to_string());
+    let boot = boot_order(domain).ok();
+    let (graphics, vnc_listen, vnc_port) = graphics_config(devices)?;
+    let graphics = match graphics {
+        GraphicsMode::None => "none",
+        GraphicsMode::Vnc => "vnc",
+    };
+
+    Ok((
+        system_disk,
+        cdrom,
+        boot,
+        graphics.to_string(),
+        Some(vnc_listen),
+        vnc_port,
+    ))
 }
 
 struct DomainListRow {
@@ -1281,6 +1329,70 @@ pub fn undefine_by_name(connect_uri: &str, name: &str) -> Result<()> {
     domain
         .undefine()
         .with_context(|| format!("failed to undefine domain {name}"))
+}
+
+pub fn create_by_manifest(
+    connect_uri: &str,
+    mut manifest: VmManifest,
+    create_system_disk: Option<String>,
+) -> Result<VmSummary> {
+    let base_dir = env::current_dir().context("failed to determine current directory")?;
+    normalize_manifest_paths(&mut manifest, &base_dir)?;
+    validate_manifest(&manifest)?;
+
+    let args = VmCreateArgs {
+        name: manifest.name,
+        system_disk: manifest.system_disk,
+        create_system_disk,
+        cdrom: manifest.cdrom,
+        boot: manifest.boot.map(|boot| boot.join(",")),
+        memory_mib: manifest
+            .memory_gib
+            .checked_mul(1024)
+            .context("memoryGiB is too large")?,
+        vcpus: manifest.vcpus,
+        graphics: manifest.graphics,
+        vnc_listen: manifest.vnc_listen,
+        vnc_port: manifest.vnc_port,
+        serial_log: manifest.serial_log,
+        network: manifest.network,
+        connect_uri: connect_uri.to_string(),
+    };
+
+    let domain = create_normalized(args)?;
+    domain_summary(&domain)
+}
+
+pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> Result<VmSummary> {
+    let base_dir = env::current_dir().context("failed to determine current directory")?;
+    normalize_manifest_paths(&mut manifest, &base_dir)?;
+    validate_manifest(&manifest)?;
+
+    let boot = manifest_boot_order(&manifest);
+    let boot_devices = parse_boot_devices(&boot)?;
+    if boot_devices.contains(&BootDevice::Cdrom) && manifest.cdrom.is_none() {
+        bail!("boot order contains cdrom but cdrom was not provided");
+    }
+
+    let memory_mib = manifest
+        .memory_gib
+        .checked_mul(1024)
+        .context("memoryGiB is too large")?;
+
+    let current_xml = current_domain_xml(connect_uri, &manifest.name)?;
+    let xml = if current_xml.is_empty() {
+        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)
+    } else {
+        patch_domain_xml(&current_xml, &manifest, &boot_devices, memory_mib)?
+    };
+
+    prepare_serial_log_path(manifest.serial_log.as_deref())?;
+
+    let conn = connect(connect_uri)?;
+    let domain = Domain::define_xml_flags(&conn, &xml, sys::VIR_DOMAIN_DEFINE_VALIDATE)
+        .with_context(|| format!("failed to apply VM definition {}", manifest.name))?;
+
+    domain_summary(&domain)
 }
 
 pub fn vnc_endpoint_by_name(connect_uri: &str, name: &str) -> Result<VncEndpoint> {
