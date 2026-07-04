@@ -5,7 +5,8 @@
   become: true
 
   vars:
-    qtr_remote_rpm_path: "/tmp/{{ qtr_rpm_path | basename }}"
+    qtr_local_rpm_path: "{{ [playbook_dir, '..', '..', qtr_rpm_path] | ansible.builtin.path_join }}"
+    qtr_remote_rpm_path: "/tmp/{{ qtr_local_rpm_path | basename }}"
 
   pre_tasks:
     - name: Require qtr_rpm_path
@@ -17,7 +18,7 @@
 
     - name: Check local RPM exists
       ansible.builtin.stat:
-        path: "{{ qtr_rpm_path }}"
+        path: "{{ qtr_local_rpm_path }}"
       delegate_to: localhost
       become: false
       register: qtr_local_rpm
@@ -27,19 +28,19 @@
         that:
           - qtr_local_rpm.stat.exists
           - qtr_local_rpm.stat.isreg
-        fail_msg: "Local RPM not found: {{ qtr_rpm_path }}"
+        fail_msg: "Local RPM not found: {{ qtr_local_rpm_path }}"
 
     - name: Require Fedora 44 target
       ansible.builtin.assert:
         that:
-          - ansible_distribution == "Fedora"
-          - ansible_distribution_major_version == "44"
+          - ansible_facts.distribution == "Fedora"
+          - ansible_facts.distribution_major_version == "44"
         fail_msg: "This deploy playbook supports Fedora 44 targets only."
 
   tasks:
     - name: Copy qtr RPM to target
       ansible.builtin.copy:
-        src: "{{ qtr_rpm_path }}"
+        src: "{{ qtr_local_rpm_path }}"
         dest: "{{ qtr_remote_rpm_path }}"
         mode: "0644"
 

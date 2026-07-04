@@ -6,7 +6,6 @@ vars:
   NFPM: nfpm
   INVENTORY: deploy/inventory.ini
   LIMIT: qtr
-  RPM: dist/qtr-{{.QTR_VERSION}}-1.x86_64.rpm
   ANSIBLE_PLAYBOOK: deploy/playbooks/install-rpm.yml
   QTR_VERSION:
     sh: cargo pkgid | cut -d# -f2
@@ -45,7 +44,7 @@ tasks:
     cmds:
       - task: package:rpm
       - task: ansible:sync
-      - uv run ansible-playbook -i "{{.INVENTORY}}" --limit "{{.LIMIT}}" "{{.ANSIBLE_PLAYBOOK}}" -e "qtr_rpm_path={{.RPM}}"
+      - uv run ansible-playbook -i "{{.INVENTORY}}" --limit "{{.LIMIT}}" "{{.ANSIBLE_PLAYBOOK}}" -e "qtr_rpm_path=dist/qtr-{{.QTR_VERSION}}-1.x86_64.rpm"
 
   clean:dist:
     desc: Remove release package artifacts
