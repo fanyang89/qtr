@@ -1,6 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MonitorPlay, MoreHorizontal, Play, Power, Server, Square } from 'lucide-react'
+import { useEffect, useRef } from 'react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -18,10 +19,13 @@ import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { ConfigDrawer } from '@/components/config-drawer'
 import { getVms, postVmAction, type VmSummary } from '@/lib/api'
+import { vmMetricsByName, vmRuntimeMetrics, type VmMetricSnapshot } from './metrics'
 
 export function VmList() {
   const queryClient = useQueryClient()
-  const { data: vms = [] } = useQuery({ queryKey: ['vms'], queryFn: getVms })
+  const previousMetricsRef = useRef<Map<string, VmMetricSnapshot>>(new Map())
+  const previousMetrics = previousMetricsRef.current
+  const { data: vms = [] } = useQuery({ queryKey: ['vms'], queryFn: getVms, refetchInterval: 2000 })
   const action = useMutation({
     mutationFn: ({ name, action }: { name: string; action: string }) => postVmAction(name, action),
     onSuccess: async () => {
@@ -30,6 +34,10 @@ export function VmList() {
     },
     onError: () => toast.error('Backend API is not available'),
   })
+
+  useEffect(() => {
+    previousMetricsRef.current = vmMetricsByName(vms)
+  }, [vms])
 
   return (
     <>
@@ -59,6 +67,10 @@ export function VmList() {
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>State</TableHead>
+                  <TableHead>CPU</TableHead>
+                  <TableHead>Mem</TableHead>
+                  <TableHead>TX</TableHead>
+                  <TableHead>RX</TableHead>
                   <TableHead>ID</TableHead>
                   <TableHead>VNC</TableHead>
                   <TableHead>Serial Log</TableHead>
@@ -67,7 +79,12 @@ export function VmList() {
               </TableHeader>
               <TableBody>
                 {vms.map((vm) => (
-                  <VmRow key={vm.name} vm={vm} onAction={(name, vmAction) => action.mutate({ name, action: vmAction })} />
+                  <VmRow
+                    key={vm.name}
+                    vm={vm}
+                    previousMetrics={previousMetrics.get(vm.name)}
+                    onAction={(name, vmAction) => action.mutate({ name, action: vmAction })}
+                  />
                 ))}
               </TableBody>
             </Table>
@@ -78,7 +95,17 @@ export function VmList() {
   )
 }
 
-function VmRow({ vm, onAction }: { vm: VmSummary; onAction: (name: string, action: string) => void }) {
+function VmRow({
+  vm,
+  previousMetrics,
+  onAction,
+}: {
+  vm: VmSummary
+  previousMetrics?: VmMetricSnapshot
+  onAction: (name: string, action: string) => void
+}) {
+  const metrics = vmRuntimeMetrics(vm, previousMetrics)
+
   return (
     <TableRow>
       <TableCell>
@@ -88,6 +115,10 @@ function VmRow({ vm, onAction }: { vm: VmSummary; onAction: (name: string, actio
         </Link>
       </TableCell>
       <TableCell><Badge variant={vm.state === 'running' ? 'default' : 'secondary'}>{vm.state}</Badge></TableCell>
+      <TableCell>{metrics.cpu}</TableCell>
+      <TableCell>{metrics.memory}</TableCell>
+      <TableCell>{metrics.tx}</TableCell>
+      <TableCell>{metrics.rx}</TableCell>
       <TableCell>{vm.id ?? '-'}</TableCell>
       <TableCell>
         {vm.vnc ? (

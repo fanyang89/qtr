@@ -7,14 +7,19 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use similar::TextDiff;
-use virt::{connect::Connect, domain::Domain, error::clear_error_callback, sys};
+use virt::{
+    connect::Connect,
+    domain::{Domain, DomainInfo, MemoryStat},
+    error::clear_error_callback,
+    sys,
+};
 
 use crate::{
     config::{
@@ -91,6 +96,18 @@ pub struct VmSummary {
     pub graphics: String,
     pub vnc_listen: Option<String>,
     pub vnc_port: Option<u16>,
+    pub metrics: Option<VmMetrics>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmMetrics {
+    pub cpu_time_ns: u64,
+    pub memory_used_mib: u64,
+    pub memory_total_mib: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub sampled_at_ms: u64,
 }
 
 fn default_vm_memory_gib() -> u64 {
@@ -963,6 +980,7 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
     let (memory_mib, vcpus, network) = parse_summary_resources(&xml);
     let (system_disk, cdrom, boot, graphics, vnc_listen, vnc_port) =
         parse_summary_definition(&xml).unwrap_or_default();
+    let metrics = domain_metrics(domain, &xml);
 
     Ok(VmSummary {
         name,
@@ -980,7 +998,92 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
         graphics,
         vnc_listen,
         vnc_port,
+        metrics,
     })
+}
+
+fn domain_metrics(domain: &Domain, xml: &str) -> Option<VmMetrics> {
+    if !domain.is_active().ok()? {
+        return None;
+    }
+
+    let info = domain.get_info().ok()?;
+    let (rx_bytes, tx_bytes) = interface_byte_totals(domain, xml);
+    Some(VmMetrics {
+        cpu_time_ns: info.cpu_time,
+        memory_used_mib: kib_to_mib(domain_memory_used_kib(domain, &info)),
+        memory_total_mib: kib_to_mib(info.max_mem.max(info.memory)),
+        tx_bytes,
+        rx_bytes,
+        sampled_at_ms: sampled_at_ms(),
+    })
+}
+
+fn domain_memory_used_kib(domain: &Domain, info: &DomainInfo) -> u64 {
+    if let Ok(stats) = domain.memory_stats(0) {
+        let actual = memory_stat_value(&stats, sys::VIR_DOMAIN_MEMORY_STAT_ACTUAL_BALLOON as u32);
+        let unused = memory_stat_value(&stats, sys::VIR_DOMAIN_MEMORY_STAT_UNUSED as u32);
+        if let Some(actual) = actual {
+            return actual.saturating_sub(unused.unwrap_or(0));
+        }
+
+        if let Some(rss) = memory_stat_value(&stats, sys::VIR_DOMAIN_MEMORY_STAT_RSS as u32) {
+            return rss;
+        }
+    }
+
+    info.memory
+}
+
+fn memory_stat_value(stats: &[MemoryStat], tag: u32) -> Option<u64> {
+    stats
+        .iter()
+        .find(|stat| stat.tag == tag)
+        .map(|stat| stat.val)
+}
+
+fn interface_byte_totals(domain: &Domain, xml: &str) -> (u64, u64) {
+    interface_targets(xml)
+        .into_iter()
+        .filter_map(|target| domain.interface_stats(&target).ok())
+        .fold((0, 0), |(rx_total, tx_total), stats| {
+            (
+                rx_total + non_negative_stat(stats.rx_bytes),
+                tx_total + non_negative_stat(stats.tx_bytes),
+            )
+        })
+}
+
+fn interface_targets(xml: &str) -> Vec<String> {
+    let Ok(doc) = Document::parse(xml) else {
+        return Vec::new();
+    };
+    let Ok(devices) = required_child(doc.root_element(), "devices") else {
+        return Vec::new();
+    };
+
+    devices
+        .children()
+        .filter(|child| child.has_tag_name("interface"))
+        .filter_map(|interface| optional_child(interface, "target"))
+        .filter_map(|target| target.attribute("dev"))
+        .map(str::to_string)
+        .collect()
+}
+
+fn non_negative_stat(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+fn kib_to_mib(value: u64) -> u64 {
+    value / 1024
+}
+
+fn sampled_at_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn parse_summary_resources(xml: &str) -> (Option<u64>, Option<u32>, Option<String>) {
@@ -1001,7 +1104,14 @@ fn parse_summary_resources(xml: &str) -> (Option<u64>, Option<u32>, Option<Strin
 
 fn parse_summary_definition(
     xml: &str,
-) -> Result<(Option<String>, Option<String>, Option<Vec<String>>, String, Option<String>, Option<u16>)> {
+) -> Result<(
+    Option<String>,
+    Option<String>,
+    Option<Vec<String>>,
+    String,
+    Option<String>,
+    Option<u16>,
+)> {
     let doc = Document::parse(xml).context("failed to parse domain XML")?;
     let domain = doc.root_element();
     let devices = required_child(domain, "devices")?;

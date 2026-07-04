@@ -1,6 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, Cpu, HardDrive, MemoryStick, MonitorPlay, Network } from 'lucide-react'
+import { useEffect, useRef } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -10,9 +11,19 @@ import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { ConfigDrawer } from '@/components/config-drawer'
 import { getVm } from '@/lib/api'
+import { vmRuntimeMetrics, type VmMetricSnapshot } from './metrics'
 
 export function VmDetail({ name }: { name: string }) {
-  const { data: vm } = useQuery({ queryKey: ['vms', name], queryFn: () => getVm(name) })
+  const previousMetricsRef = useRef<VmMetricSnapshot | undefined>(undefined)
+  const previousMetrics = previousMetricsRef.current
+  const { data: vm } = useQuery({ queryKey: ['vms', name], queryFn: () => getVm(name), refetchInterval: 2000 })
+  const metrics = vmRuntimeMetrics(vm, previousMetrics)
+
+  useEffect(() => {
+    if (vm?.metrics) {
+      previousMetricsRef.current = vm.metrics
+    }
+  }, [vm])
 
   return (
     <>
@@ -44,6 +55,12 @@ export function VmDetail({ name }: { name: string }) {
           <InfoCard title='Memory' value={vm?.memoryMiB ? `${vm.memoryMiB} MiB` : '-'} icon={MemoryStick} />
           <InfoCard title='Network' value={vm?.network ?? '-'} icon={Network} />
           <InfoCard title='VNC' value={vm?.vncEndpoint ?? (vm?.vnc ? 'enabled' : 'disabled')} icon={MonitorPlay} />
+        </div>
+        <div className='mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4'>
+          <InfoCard title='CPU' value={metrics.cpu} icon={Cpu} />
+          <InfoCard title='Mem Used' value={metrics.memory} icon={MemoryStick} />
+          <InfoCard title='TX' value={metrics.tx} icon={Network} />
+          <InfoCard title='RX' value={metrics.rx} icon={Network} />
         </div>
         <Card className='mt-6'>
           <CardHeader>

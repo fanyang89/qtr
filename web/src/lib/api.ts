@@ -23,6 +23,16 @@ export type VmSummary = {
   graphics?: 'vnc' | 'none'
   vncListen?: string
   vncPort?: number
+  metrics?: VmMetrics | null
+}
+
+export type VmMetrics = {
+  cpuTimeNs: number
+  memoryUsedMiB: number
+  memoryTotalMiB: number
+  txBytes: number
+  rxBytes: number
+  sampledAtMs: number
 }
 
 export type VmCreateInput = {
@@ -48,29 +58,45 @@ export type HealthStatus = {
   version?: string
 }
 
-const sampleVms: VmSummary[] = [
-  {
-    name: 'install-os',
-    state: 'running',
-    id: '3',
-    vnc: true,
-    vncEndpoint: '127.0.0.1:5900',
-    serialLog: '.tmp/logs/install-os.serial.log',
-    memoryMiB: 4096,
-    vcpus: 2,
-    network: 'default',
-  },
-  {
-    name: 'smoke-fedora',
-    state: 'shutoff',
-    id: null,
-    vnc: false,
-    serialLog: '.tmp/logs/smoke-fedora.serial.log',
-    memoryMiB: 2048,
-    vcpus: 2,
-    network: 'default',
-  },
-]
+const sampleStartedAtMs = Date.now()
+
+function sampleVms(): VmSummary[] {
+  const now = Date.now()
+  const elapsedSeconds = Math.max((now - sampleStartedAtMs) / 1000, 0)
+
+  return [
+    {
+      name: 'install-os',
+      state: 'running',
+      id: '3',
+      vnc: true,
+      vncEndpoint: '127.0.0.1:5900',
+      serialLog: '.tmp/logs/install-os.serial.log',
+      memoryMiB: 4096,
+      vcpus: 2,
+      network: 'default',
+      metrics: {
+        cpuTimeNs: Math.round(elapsedSeconds * 0.42 * 2 * 1_000_000_000),
+        memoryUsedMiB: 1610,
+        memoryTotalMiB: 4096,
+        txBytes: Math.round(90 * 1024 * 1024 + elapsedSeconds * 1.2 * 1024 * 1024),
+        rxBytes: Math.round(240 * 1024 * 1024 + elapsedSeconds * 2.7 * 1024 * 1024),
+        sampledAtMs: now,
+      },
+    },
+    {
+      name: 'smoke-fedora',
+      state: 'shutoff',
+      id: null,
+      vnc: false,
+      serialLog: '.tmp/logs/smoke-fedora.serial.log',
+      memoryMiB: 2048,
+      vcpus: 2,
+      network: 'default',
+      metrics: null,
+    },
+  ]
+}
 
 async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options)
@@ -93,7 +119,7 @@ export async function getVms(): Promise<VmSummary[]> {
   try {
     return await requestJson<VmSummary[]>('/api/vms')
   } catch {
-    return sampleVms
+    return sampleVms()
   }
 }
 
@@ -102,7 +128,7 @@ export async function getVm(name: string): Promise<VmSummary> {
     return await requestJson<VmSummary>(`/api/vms/${encodeURIComponent(name)}`)
   } catch {
     return (
-      sampleVms.find((vm) => vm.name === name) ?? {
+      sampleVms().find((vm) => vm.name === name) ?? {
         name,
         state: 'unknown',
         id: null,
