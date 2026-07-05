@@ -587,32 +587,216 @@ fn patch_disks(
     manifest_disks: &[VmDisk],
     replacements: &mut Vec<XmlReplacement>,
 ) -> Result<()> {
-    let domain_disks = devices
+    let domain_disk_nodes = devices
         .children()
         .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("disk"))
         .collect::<Vec<_>>();
-    if domain_disks.len() != manifest_disks.len() {
+    let domain_disks = disks_from_domain_xml(devices)?;
+    if manifest_disks.len() < domain_disks.len() {
         bail!(
-            "cannot update existing domain XML disk count from {} to {}; recreate the VM definition",
+            "cannot remove existing domain XML disks from {} to {}; recreate the VM definition",
             domain_disks.len(),
             manifest_disks.len()
         );
     }
 
-    for (index, (domain_disk, manifest_disk)) in
-        domain_disks.into_iter().zip(manifest_disks).enumerate()
-    {
-        let range = domain_disk.range();
-        let start = line_start(xml, range.start);
+    validate_implicit_disk_identities(manifest_disks)?;
+
+    let mut domain_disks = domain_disk_nodes
+        .into_iter()
+        .zip(domain_disks)
+        .map(|(node, disk)| DomainDiskPatchEntry {
+            node,
+            disk,
+            used: false,
+        })
+        .collect::<Vec<_>>();
+    let mut occupied_targets = domain_disks
+        .iter()
+        .filter_map(|entry| entry.disk.target.clone())
+        .collect::<BTreeSet<_>>();
+    let mut output_targets = BTreeSet::new();
+    let mut new_disks_xml = String::new();
+
+    for (index, manifest_disk) in manifest_disks.iter().enumerate() {
+        let matched_index = find_domain_disk_match(&domain_disks, manifest_disk)?;
+        let target = disk_patch_target(
+            manifest_disk,
+            matched_index.and_then(|index| domain_disks[index].disk.target.as_deref()),
+            &mut occupied_targets,
+            &output_targets,
+        )?;
+        reserve_output_disk_target(&target, &mut output_targets)?;
+
+        let mut desired_disk = manifest_disk.clone();
+        desired_disk.target = Some(target);
+        if let Some(matched_index) = matched_index {
+            domain_disks[matched_index].used = true;
+            let domain_disk = domain_disks[matched_index].node;
+            let range = domain_disk.range();
+            let start = line_start(xml, range.start);
+            let end = line_end(xml, range.end);
+            let desired = build_patched_disk_xml(xml, domain_disk, &desired_disk, index);
+            replacements.push(XmlReplacement {
+                range: start..end,
+                value: desired,
+            });
+        } else {
+            new_disks_xml.push_str(&domain_xml::build_disk_xml(&launch_disk_spec(
+                &desired_disk,
+                index,
+            )));
+        }
+    }
+
+    let needs_scsi_controller = manifest_disks
+        .iter()
+        .any(|disk| disk.bus == VmDiskBus::VirtioScsi)
+        && !has_virtio_scsi_controller(devices);
+    if needs_scsi_controller {
+        new_disks_xml.push_str("    <controller type='scsi' index='0' model='virtio-scsi'/>\n");
+    }
+
+    if !new_disks_xml.is_empty() {
+        let last_disk = domain_disks
+            .iter()
+            .map(|entry| entry.node)
+            .last()
+            .context("cannot append disks because existing domain XML has no disk devices")?;
+        let range = last_disk.range();
         let end = line_end(xml, range.end);
-        let desired = build_patched_disk_xml(xml, domain_disk, manifest_disk, index);
         replacements.push(XmlReplacement {
-            range: start..end,
-            value: desired,
+            range: end..end,
+            value: new_disks_xml,
         });
     }
 
     Ok(())
+}
+
+struct DomainDiskPatchEntry<'a, 'input> {
+    node: Node<'a, 'input>,
+    disk: VmDisk,
+    used: bool,
+}
+
+fn validate_implicit_disk_identities(disks: &[VmDisk]) -> Result<()> {
+    for (index, disk) in disks.iter().enumerate() {
+        if disk.target.is_some() {
+            continue;
+        }
+        if disks[index + 1..]
+            .iter()
+            .any(|other| other.target.is_none() && same_disk_identity(disk, other))
+        {
+            bail!(
+                "disk {} appears more than once without explicit target",
+                disk.path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn find_domain_disk_match(
+    domain_disks: &[DomainDiskPatchEntry<'_, '_>],
+    manifest_disk: &VmDisk,
+) -> Result<Option<usize>> {
+    if let Some(target) = manifest_disk.target.as_deref() {
+        let matches = domain_disks
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.used && entry.disk.target.as_deref() == Some(target))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("existing domain XML has duplicate disk target {target}");
+        }
+        if let Some(index) = matches.into_iter().next() {
+            return Ok(Some(index));
+        }
+    }
+
+    let matches = domain_disks
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.used && same_disk_identity(&entry.disk, manifest_disk))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        bail!(
+            "existing domain XML has multiple disks for {}; set target explicitly",
+            manifest_disk.path.display()
+        );
+    }
+
+    Ok(matches.into_iter().next())
+}
+
+fn same_disk_identity(left: &VmDisk, right: &VmDisk) -> bool {
+    left.disk_type == right.disk_type && left.path == right.path
+}
+
+fn disk_patch_target(
+    disk: &VmDisk,
+    existing_target: Option<&str>,
+    occupied_targets: &mut BTreeSet<String>,
+    output_targets: &BTreeSet<String>,
+) -> Result<String> {
+    let target = if let Some(target) = disk.target.as_deref() {
+        if existing_target != Some(target) && occupied_targets.contains(target) {
+            bail!("disk target {target} is already used by an existing disk");
+        }
+        occupied_targets.insert(target.to_string());
+        target.to_string()
+    } else if let Some(target) = existing_target {
+        target.to_string()
+    } else {
+        next_available_disk_target(disk.bus, occupied_targets, output_targets)
+    };
+
+    validate_disk_target_for_bus(&target, disk.bus)?;
+    Ok(target)
+}
+
+fn next_available_disk_target(
+    bus: VmDiskBus,
+    occupied_targets: &mut BTreeSet<String>,
+    output_targets: &BTreeSet<String>,
+) -> String {
+    for index in 0.. {
+        let target = match bus {
+            VmDiskBus::VirtioBlk => domain_xml::virtio_blk_disk_target(index),
+            VmDiskBus::VirtioScsi => domain_xml::virtio_scsi_disk_target(index),
+        };
+        if !occupied_targets.contains(&target) && !output_targets.contains(&target) {
+            occupied_targets.insert(target.clone());
+            return target;
+        }
+    }
+
+    unreachable!("unbounded disk target search should always find a target")
+}
+
+fn reserve_output_disk_target(target: &str, output_targets: &mut BTreeSet<String>) -> Result<()> {
+    if !output_targets.insert(target.to_string()) {
+        bail!("duplicate disk target {target}");
+    }
+
+    Ok(())
+}
+
+fn validate_disk_target_for_bus(target: &str, bus: VmDiskBus) -> Result<()> {
+    match bus {
+        VmDiskBus::VirtioBlk if !target.starts_with("vd") => {
+            bail!("virtio-blk disk target {target} must start with vd")
+        }
+        VmDiskBus::VirtioScsi if !target.starts_with("sd") => {
+            bail!("virtio-scsi disk target {target} must start with sd")
+        }
+        _ => Ok(()),
+    }
 }
 
 fn build_patched_disk_xml(
@@ -1027,11 +1211,7 @@ fn boot_order(domain: Node<'_, '_>) -> Result<Vec<String>> {
 }
 
 fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
-    let has_virtio_scsi_controller = devices.children().any(|child| {
-        child.has_tag_name("controller")
-            && child.attribute("type") == Some("scsi")
-            && child.attribute("model") == Some("virtio-scsi")
-    });
+    let has_virtio_scsi_controller = has_virtio_scsi_controller(devices);
     let disks = devices
         .children()
         .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("disk"))
@@ -1096,6 +1276,14 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
     }
 
     Ok(disks)
+}
+
+fn has_virtio_scsi_controller(devices: Node<'_, '_>) -> bool {
+    devices.children().any(|child| {
+        child.has_tag_name("controller")
+            && child.attribute("type") == Some("scsi")
+            && child.attribute("model") == Some("virtio-scsi")
+    })
 }
 
 fn parse_disk_type(value: &str) -> Result<VmDiskType> {
@@ -2645,6 +2833,63 @@ mod tests {
     }
 
     #[test]
+    fn preserves_existing_disk_target_when_manifest_order_changes() {
+        let manifest = test_manifest(vec![
+            test_file_disk("/vm/data.qcow2", None, VmDiskBus::VirtioBlk),
+            test_file_disk("/vm/sys.qcow2", None, VmDiskBus::VirtioBlk),
+        ]);
+
+        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+            .expect("XML should patch");
+
+        assert_eq!(patched.matches("device='disk'").count(), 2);
+        assert!(
+            patched
+                .contains("<source file='/vm/sys.qcow2'/>\n      <target dev='vda' bus='virtio'/>")
+        );
+        assert!(
+            patched.contains(
+                "<source file='/vm/data.qcow2'/>\n      <target dev='vdb' bus='virtio'/>"
+            )
+        );
+    }
+
+    #[test]
+    fn appends_virtio_scsi_disk_with_controller() {
+        let manifest = test_manifest(vec![
+            test_file_disk("/vm/sys.qcow2", None, VmDiskBus::VirtioBlk),
+            test_file_disk("/vm/scsi.qcow2", None, VmDiskBus::VirtioScsi),
+        ]);
+
+        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+            .expect("XML should patch");
+
+        assert!(
+            patched
+                .contains("<source file='/vm/sys.qcow2'/>\n      <target dev='vda' bus='virtio'/>")
+        );
+        assert!(
+            patched
+                .contains("<source file='/vm/scsi.qcow2'/>\n      <target dev='sda' bus='scsi'/>")
+        );
+        assert!(patched.contains("<controller type='scsi' index='0' model='virtio-scsi'/>"));
+    }
+
+    #[test]
+    fn rejects_removing_existing_disks_from_domain_xml() {
+        let manifest = test_manifest(Vec::new());
+
+        let error = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+            .expect_err("removing disks should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot remove existing domain XML disks")
+        );
+    }
+
+    #[test]
     fn leaves_serial_log_unconfigured_when_manifest_omits_it() {
         let mut manifest = VmManifest {
             name: "install-os".to_string(),
@@ -2711,5 +2956,60 @@ vncListen: 127.0.0.1
         assert!(colored.contains("\x1b[31m-old\x1b[0m\n"));
         assert!(colored.contains("\x1b[32m+new\x1b[0m\n"));
         assert!(colored.contains(" same\n"));
+    }
+
+    fn test_domain_xml() -> &'static str {
+        r#"<domain type='kvm'>
+  <name>install-os</name>
+  <memory unit='MiB'>4096</memory>
+  <currentMemory unit='MiB'>4096</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <os>
+    <type arch='x86_64'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/vm/sys.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
+    </disk>
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+  </devices>
+</domain>
+"#
+    }
+
+    fn test_manifest(disks: Vec<VmDisk>) -> VmManifest {
+        VmManifest {
+            name: "install-os".to_string(),
+            disks,
+            cdrom: None,
+            boot: Some(vec!["hd".to_string()]),
+            memory_gib: 4,
+            vcpus: 2,
+            network: "default".to_string(),
+            graphics: GraphicsMode::None,
+            vnc_listen: "127.0.0.1".to_string(),
+            vnc_port: None,
+            serial_log: None,
+        }
+    }
+
+    fn test_file_disk(path: &str, target: Option<&str>, bus: VmDiskBus) -> VmDisk {
+        VmDisk {
+            disk_type: VmDiskType::File,
+            path: PathBuf::from(path),
+            format: DiskFormat::Qcow2,
+            target: target.map(str::to_string),
+            bus,
+            cache: None,
+            io: None,
+            queues: None,
+        }
     }
 }
