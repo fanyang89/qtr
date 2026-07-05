@@ -199,6 +199,9 @@ If `vm exec` reports that `guest-exec` is disabled, enable the `guest-exec` RPC 
 Use `type: block` in `disks` to pass a host block device directly to the guest:
 
 ```yaml
+ioThreads:
+  count: 4
+  queues: 4
 disks:
 - path: .tmp/disks/install-os.qcow2
   type: file
@@ -210,8 +213,8 @@ disks:
   target: sda
   bus: virtio-scsi
   cache: none
-  io: native
-  queues: 4
+  io:
+    mode: threads
 ```
 
-Prefer stable `/dev/disk/by-id/...` paths, ensure the host is not using the device, and expose it as a non-boot disk such as `target: sda` for performance tests. Omit `queues` to use the QEMU default; set `queues: 1` for explicit single-queue mode.
+Prefer stable `/dev/disk/by-id/...` paths, ensure the host is not using the device, and expose it as a non-boot disk such as `target: sda` for performance tests. `ioThreads.count` configures VM-level QEMU IOThreads; `ioThreads.queues` defaults to the same value. Use `io.mode: threads` on `virtio-blk` or `virtio-scsi` disks to attach them to the IOThread mapping.

@@ -1,4 +1,7 @@
 name: install-os
+ioThreads:
+  count: 4
+  queues: 4
 disks:
 - path: .tmp/disks/install-os.qcow2
   type: file
@@ -11,8 +14,8 @@ disks:
   target: sda
   bus: virtio-scsi
   cache: none
-  io: native
-  queues: 4
+  io:
+    mode: threads
 cdrom: /path/to/installer.iso
 boot:
 - cdrom

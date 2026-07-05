@@ -55,6 +55,15 @@ const optionalPort = z.preprocess<
   string | undefined
 >(emptyStringToUndefined, optionalPortSchema)
 
+const vmIoThreadsSchema = z.object({
+  count: z.coerce.number<string | number>().int().positive(),
+  queues: z.coerce.number<string | number>().int().positive().optional(),
+})
+
+const vmDiskIoSchema = z.object({
+  mode: z.enum(['threads', 'native', 'io_uring']),
+})
+
 const vmFormSchema = z.object({
   name: z
     .string()
@@ -81,11 +90,11 @@ const vmFormSchema = z.object({
             'unsafe',
           ])
           .optional(),
-        io: z.enum(['threads', 'native', 'io_uring']).optional(),
-        queues: z.number().int().positive().optional(),
+        io: vmDiskIoSchema.optional(),
       })
     )
     .min(1, 'At least one disk is required'),
+  ioThreads: vmIoThreadsSchema.optional(),
   cdrom: optionalString,
   boot: z
     .string()
@@ -152,6 +161,7 @@ const defaultValues: VmFormInput = {
 function summaryToDefaultValues(vm: VmSummary): VmFormInput {
   return {
     name: vm.name,
+    ioThreads: vm.ioThreads ?? undefined,
     disks: vm.disks?.length
       ? vm.disks
       : [{ type: 'file', path: '', format: 'qcow2', bus: 'virtio-blk' }],

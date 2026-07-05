@@ -88,6 +88,7 @@ impl IntoResponse for AppError {
 #[serde(rename_all = "camelCase")]
 struct CreateVmRequest {
     name: String,
+    io_threads: Option<vm::VmIoThreads>,
     disks: Vec<vm::VmDisk>,
     cdrom: Option<PathBuf>,
     boot: Option<Vec<String>>,
@@ -105,6 +106,7 @@ impl CreateVmRequest {
     fn into_manifest(self) -> vm::VmManifest {
         vm::VmManifest {
             name: self.name,
+            io_threads: self.io_threads,
             disks: self.disks,
             cdrom: self.cdrom,
             boot: self.boot,

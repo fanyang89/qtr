@@ -20,6 +20,15 @@ const vmMetricsSchema = z.object({
   sampledAtMs: z.number(),
 })
 
+const vmIoThreadsSchema = z.object({
+  count: z.number().int().positive(),
+  queues: z.number().int().positive().optional(),
+})
+
+const vmDiskIoSchema = z.object({
+  mode: z.enum(['threads', 'native', 'io_uring']),
+})
+
 const vmDiskSchema = z.object({
   type: z.enum(['file', 'block']).optional(),
   path: z.string(),
@@ -36,8 +45,7 @@ const vmDiskSchema = z.object({
       'unsafe',
     ])
     .optional(),
-  io: z.enum(['threads', 'native', 'io_uring']).optional(),
-  queues: z.number().int().positive().optional(),
+  io: vmDiskIoSchema.optional(),
 })
 
 const vmSummarySchema = z.object({
@@ -49,6 +57,7 @@ const vmSummarySchema = z.object({
   serialLog: z.string().nullish(),
   memoryMiB: z.number().nullish(),
   vcpus: z.number().nullish(),
+  ioThreads: vmIoThreadsSchema.nullish(),
   network: z.string().nullish(),
   disks: z.array(vmDiskSchema).nullish(),
   cdrom: z.string().nullish(),
@@ -76,6 +85,7 @@ export type HealthStatus = z.infer<typeof healthStatusSchema>
 export type VmCreateInput = {
   name: string
   disks: VmDisk[]
+  ioThreads?: z.infer<typeof vmIoThreadsSchema>
   cdrom?: string
   boot?: string[]
   memoryGiB: number

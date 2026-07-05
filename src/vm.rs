@@ -29,7 +29,7 @@ use crate::{
     },
     domain_xml::{
         self, BootDevice, GraphicsSpec, VmLaunchDiskSource, VmLaunchDiskSpec, VmLaunchDomainSpec,
-        build_vm_launch_domain_xml, parse_boot_devices,
+        VmLaunchIoThreadsSpec, build_vm_launch_domain_xml, parse_boot_devices,
     },
     guest_agent,
 };
@@ -55,6 +55,8 @@ pub fn run(args: VmArgs) -> Result<()> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VmManifest {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_threads: Option<VmIoThreads>,
     pub disks: Vec<VmDisk>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdrom: Option<PathBuf>,
@@ -90,9 +92,24 @@ pub struct VmDisk {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<VmDiskCache>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub io: Option<VmDiskIo>,
+    pub io: Option<VmDiskIoConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmIoThreads {
+    pub count: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queues: Option<u16>,
+}
+
+impl VmIoThreads {
+    fn effective(self) -> VmLaunchIoThreadsSpec {
+        VmLaunchIoThreadsSpec {
+            count: self.count,
+            queues: self.queues.unwrap_or(self.count),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -127,14 +144,20 @@ impl VmDiskCache {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmDiskIoConfig {
+    pub mode: VmDiskIoMode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum VmDiskIo {
+pub enum VmDiskIoMode {
     Threads,
     Native,
     IoUring,
 }
 
-impl VmDiskIo {
+impl VmDiskIoMode {
     fn as_xml(self) -> &'static str {
         match self {
             Self::Threads => "threads",
@@ -194,6 +217,7 @@ pub struct VmSummary {
     pub serial_log: Option<String>,
     pub memory_mib: Option<u64>,
     pub vcpus: Option<u32>,
+    pub io_threads: Option<VmIoThreads>,
     pub network: Option<String>,
     pub disks: Option<Vec<VmSummaryDisk>>,
     pub cdrom: Option<String>,
@@ -214,8 +238,7 @@ pub struct VmSummaryDisk {
     pub target: String,
     pub bus: VmDiskBus,
     pub cache: Option<VmDiskCache>,
-    pub io: Option<VmDiskIo>,
-    pub queues: Option<u16>,
+    pub io: Option<VmDiskIoConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,7 +325,6 @@ fn init(args: VmInitArgs) -> Result<()> {
             bus: VmDiskBus::VirtioBlk,
             cache: None,
             io: None,
-            queues: None,
         })
         .collect();
     let boot = if args.no_cdrom {
@@ -313,6 +335,7 @@ fn init(args: VmInitArgs) -> Result<()> {
 
     let manifest = VmManifest {
         name: args.name,
+        io_threads: None,
         disks,
         cdrom: (!args.no_cdrom).then_some(args.cdrom),
         boot: Some(boot),
@@ -434,13 +457,14 @@ fn build_manifest_domain_xml(
         .disks
         .iter()
         .enumerate()
-        .map(|(index, disk)| launch_disk_spec(disk, index))
+        .map(|(index, disk)| launch_disk_spec(disk, index, manifest.io_threads))
         .collect::<Vec<_>>();
 
     build_vm_launch_domain_xml(VmLaunchDomainSpec {
         name: &manifest.name,
         memory_mib,
         vcpus: manifest.vcpus,
+        io_threads: manifest.io_threads.map(VmIoThreads::effective),
         disks: &disks,
         cdrom: manifest.cdrom.as_deref(),
         serial_log: manifest.serial_log.as_deref(),
@@ -461,7 +485,16 @@ fn disk_launch_source(disk_type: VmDiskType) -> VmLaunchDiskSource {
     }
 }
 
-fn launch_disk_spec(disk: &VmDisk, index: usize) -> VmLaunchDiskSpec<'_> {
+fn launch_disk_spec(
+    disk: &VmDisk,
+    index: usize,
+    io_threads: Option<VmIoThreads>,
+) -> VmLaunchDiskSpec<'_> {
+    let io_threads = (disk.bus == VmDiskBus::VirtioBlk
+        && disk.io.map(|io| io.mode) == Some(VmDiskIoMode::Threads))
+    .then(|| io_threads.map(VmIoThreads::effective))
+    .flatten();
+
     VmLaunchDiskSpec {
         path: disk.path.clone(),
         format: disk.format,
@@ -469,8 +502,8 @@ fn launch_disk_spec(disk: &VmDisk, index: usize) -> VmLaunchDiskSpec<'_> {
         target: disk_target(disk, index),
         bus: disk.bus.target_bus().to_string(),
         cache: disk.cache.map(VmDiskCache::as_xml),
-        io: disk.io.map(VmDiskIo::as_xml),
-        queues: disk.queues,
+        io: disk.io.map(|io| io.mode.as_xml()),
+        io_threads,
     }
 }
 
@@ -519,6 +552,7 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
     let boot = boot_order(domain)?;
     let devices = required_child(domain, "devices")?;
     let disks = disks_from_domain_xml(devices)?;
+    let io_threads = io_threads_from_domain_xml(domain, devices)?;
     let cdrom = optional_disk_source_path(devices, "cdrom", None)?;
     let network = network_name(devices)?;
     let (graphics, vnc_listen, vnc_port) = graphics_config(devices)?;
@@ -526,6 +560,7 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
 
     Ok(VmManifest {
         name,
+        io_threads,
         disks,
         cdrom,
         boot: Some(boot),
@@ -558,6 +593,7 @@ fn patch_domain_xml(
     let mut replacements = Vec::new();
 
     patch_memory(xml, domain, memory_mib, &mut replacements)?;
+    patch_io_threads(xml, domain, manifest.io_threads, &mut replacements)?;
     push_text_replacement(
         xml,
         required_child(domain, "vcpu")?,
@@ -565,7 +601,20 @@ fn patch_domain_xml(
         &mut replacements,
     )?;
     patch_boot_order(xml, domain, boot_devices, &mut replacements)?;
-    patch_disks(xml, devices, &manifest.disks, &mut replacements)?;
+    patch_disks(
+        xml,
+        devices,
+        &manifest.disks,
+        manifest.io_threads,
+        &mut replacements,
+    )?;
+    patch_virtio_scsi_controller(
+        xml,
+        devices,
+        &manifest.disks,
+        manifest.io_threads,
+        &mut replacements,
+    );
 
     if let Some(cdrom) = &manifest.cdrom {
         patch_disk_source(xml, devices, "cdrom", None, cdrom, &mut replacements)?;
@@ -585,6 +634,7 @@ fn patch_disks(
     xml: &str,
     devices: Node<'_, '_>,
     manifest_disks: &[VmDisk],
+    io_threads: Option<VmIoThreads>,
     replacements: &mut Vec<XmlReplacement>,
 ) -> Result<()> {
     let domain_disk_nodes = devices
@@ -636,7 +686,8 @@ fn patch_disks(
             let range = domain_disk.range();
             let start = line_start(xml, range.start);
             let end = line_end(xml, range.end);
-            let desired = build_patched_disk_xml(xml, domain_disk, &desired_disk, index);
+            let desired =
+                build_patched_disk_xml(xml, domain_disk, &desired_disk, index, io_threads);
             replacements.push(XmlReplacement {
                 range: start..end,
                 value: desired,
@@ -645,6 +696,7 @@ fn patch_disks(
             new_disks_xml.push_str(&domain_xml::build_disk_xml(&launch_disk_spec(
                 &desired_disk,
                 index,
+                io_threads,
             )));
         }
     }
@@ -654,7 +706,9 @@ fn patch_disks(
         .any(|disk| disk.bus == VmDiskBus::VirtioScsi)
         && !has_virtio_scsi_controller(devices);
     if needs_scsi_controller {
-        new_disks_xml.push_str("    <controller type='scsi' index='0' model='virtio-scsi'/>\n");
+        new_disks_xml.push_str(&domain_xml::build_virtio_scsi_controller_xml(
+            virtio_scsi_controller_io_threads(manifest_disks, io_threads),
+        ));
     }
 
     if !new_disks_xml.is_empty() {
@@ -672,6 +726,45 @@ fn patch_disks(
     }
 
     Ok(())
+}
+
+fn patch_virtio_scsi_controller(
+    xml: &str,
+    devices: Node<'_, '_>,
+    manifest_disks: &[VmDisk],
+    io_threads: Option<VmIoThreads>,
+    replacements: &mut Vec<XmlReplacement>,
+) {
+    let Some(controller) = virtio_scsi_controller(devices) else {
+        return;
+    };
+    let controller_io_threads = manifest_disks
+        .iter()
+        .any(|disk| disk.bus == VmDiskBus::VirtioScsi)
+        .then(|| virtio_scsi_controller_io_threads(manifest_disks, io_threads))
+        .flatten();
+
+    let range = controller.range();
+    let start = line_start(xml, range.start);
+    let end = line_end(xml, range.end);
+    replacements.push(XmlReplacement {
+        range: start..end,
+        value: domain_xml::build_virtio_scsi_controller_xml(controller_io_threads),
+    });
+}
+
+fn virtio_scsi_controller_io_threads(
+    disks: &[VmDisk],
+    io_threads: Option<VmIoThreads>,
+) -> Option<VmLaunchIoThreadsSpec> {
+    disks
+        .iter()
+        .any(|disk| {
+            disk.bus == VmDiskBus::VirtioScsi
+                && disk.io.map(|io| io.mode) == Some(VmDiskIoMode::Threads)
+        })
+        .then(|| io_threads.map(VmIoThreads::effective))
+        .flatten()
 }
 
 struct DomainDiskPatchEntry<'a, 'input> {
@@ -799,13 +892,47 @@ fn validate_disk_target_for_bus(target: &str, bus: VmDiskBus) -> Result<()> {
     }
 }
 
+fn patch_io_threads(
+    xml: &str,
+    domain: Node<'_, '_>,
+    io_threads: Option<VmIoThreads>,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    match (optional_child(domain, "iothreads"), io_threads) {
+        (Some(node), Some(io_threads)) => {
+            push_text_replacement(xml, node, &io_threads.count.to_string(), replacements)?;
+        }
+        (None, Some(io_threads)) => {
+            let vcpu = required_child(domain, "vcpu")?;
+            let range = vcpu.range();
+            let end = line_end(xml, range.end);
+            replacements.push(XmlReplacement {
+                range: end..end,
+                value: format!("  <iothreads>{}</iothreads>\n", io_threads.count),
+            });
+        }
+        (Some(node), None) => {
+            let range = node.range();
+            replacements.push(XmlReplacement {
+                range: line_start(xml, range.start)..line_end(xml, range.end),
+                value: String::new(),
+            });
+        }
+        (None, None) => {}
+    }
+
+    Ok(())
+}
+
 fn build_patched_disk_xml(
     xml: &str,
     domain_disk: Node<'_, '_>,
     manifest_disk: &VmDisk,
     index: usize,
+    io_threads: Option<VmIoThreads>,
 ) -> String {
-    let mut desired = domain_xml::build_disk_xml(&launch_disk_spec(manifest_disk, index));
+    let mut desired =
+        domain_xml::build_disk_xml(&launch_disk_spec(manifest_disk, index, io_threads));
     let addresses = domain_disk
         .children()
         .filter(|child| child.has_tag_name("address"))
@@ -1253,10 +1380,6 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 .and_then(|driver| driver.attribute("io"))
                 .map(parse_disk_io)
                 .transpose()?;
-            let queues = driver
-                .and_then(|driver| driver.attribute("queues"))
-                .map(parse_disk_queues)
-                .transpose()?;
 
             Ok(VmDisk {
                 disk_type,
@@ -1266,7 +1389,6 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 bus,
                 cache,
                 io,
-                queues,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1279,11 +1401,58 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
 }
 
 fn has_virtio_scsi_controller(devices: Node<'_, '_>) -> bool {
-    devices.children().any(|child| {
+    virtio_scsi_controller(devices).is_some()
+}
+
+fn virtio_scsi_controller<'a, 'input>(devices: Node<'a, 'input>) -> Option<Node<'a, 'input>> {
+    devices.children().find(|child| {
         child.has_tag_name("controller")
             && child.attribute("type") == Some("scsi")
             && child.attribute("model") == Some("virtio-scsi")
     })
+}
+
+fn io_threads_from_domain_xml(
+    domain: Node<'_, '_>,
+    devices: Node<'_, '_>,
+) -> Result<Option<VmIoThreads>> {
+    let Some(node) = optional_child(domain, "iothreads") else {
+        return Ok(None);
+    };
+    let count = node
+        .text()
+        .map(str::trim)
+        .context("domain XML <iothreads> is empty")?
+        .parse::<u16>()
+        .context("failed to parse domain iothreads")?;
+    if count == 0 {
+        bail!("domain iothreads must be greater than 0");
+    }
+
+    let scsi_queues = virtio_scsi_controller(devices)
+        .and_then(|controller| optional_child(controller, "driver"))
+        .and_then(|driver| driver.attribute("queues"))
+        .map(parse_disk_queues)
+        .transpose()?;
+    let queues = match scsi_queues {
+        Some(queues) => Some(queues),
+        None => disk_driver_threads_queues(devices).transpose()?,
+    };
+
+    Ok(Some(VmIoThreads {
+        count,
+        queues: queues.filter(|queues| *queues != count),
+    }))
+}
+
+fn disk_driver_threads_queues(devices: Node<'_, '_>) -> Option<Result<u16>> {
+    devices
+        .children()
+        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("disk"))
+        .filter_map(|disk| optional_child(disk, "driver"))
+        .find(|driver| driver.attribute("io") == Some("threads"))
+        .and_then(|driver| driver.attribute("queues"))
+        .map(parse_disk_queues)
 }
 
 fn parse_disk_type(value: &str) -> Result<VmDiskType> {
@@ -1323,11 +1492,17 @@ fn parse_disk_cache(value: &str) -> Result<VmDiskCache> {
     }
 }
 
-fn parse_disk_io(value: &str) -> Result<VmDiskIo> {
+fn parse_disk_io(value: &str) -> Result<VmDiskIoConfig> {
     match value {
-        "threads" => Ok(VmDiskIo::Threads),
-        "native" => Ok(VmDiskIo::Native),
-        "io_uring" => Ok(VmDiskIo::IoUring),
+        "threads" => Ok(VmDiskIoConfig {
+            mode: VmDiskIoMode::Threads,
+        }),
+        "native" => Ok(VmDiskIoConfig {
+            mode: VmDiskIoMode::Native,
+        }),
+        "io_uring" => Ok(VmDiskIoConfig {
+            mode: VmDiskIoMode::IoUring,
+        }),
         _ => bail!("unsupported disk io mode {value:?}"),
     }
 }
@@ -1541,6 +1716,26 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
         bail!("VM definition must contain at least one disk");
     }
 
+    if let Some(io_threads) = manifest.io_threads {
+        if io_threads.count == 0 {
+            bail!("ioThreads.count must be greater than 0");
+        }
+        if io_threads.queues == Some(0) {
+            bail!("ioThreads.queues must be greater than 0");
+        }
+    }
+
+    let uses_io_threads = manifest
+        .disks
+        .iter()
+        .any(|disk| disk.io.map(|io| io.mode) == Some(VmDiskIoMode::Threads));
+    if uses_io_threads && manifest.io_threads.is_none() {
+        bail!("io.mode threads requires ioThreads");
+    }
+    if !uses_io_threads && manifest.io_threads.is_some() {
+        bail!("ioThreads requires at least one disk with io.mode threads");
+    }
+
     let mut targets = BTreeSet::new();
     for (index, disk) in manifest.disks.iter().enumerate() {
         let target = disk_target(disk, index);
@@ -1559,10 +1754,6 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
             }
             _ => {}
         }
-        if disk.queues == Some(0) {
-            bail!("disk queues must be greater than 0");
-        }
-
         if !disk.path.exists() {
             bail!("disk {} does not exist", disk.path.display());
         }
@@ -1663,7 +1854,7 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
     let vnc_endpoint = parse_vnc_endpoint(&xml, "127.0.0.1").map(|endpoint| endpoint.display());
     let serial_log = parse_serial_log(&xml);
     let (memory_mib, vcpus, network) = parse_summary_resources(&xml);
-    let (disks, cdrom, boot, graphics, vnc_listen, vnc_port) =
+    let (disks, io_threads, cdrom, boot, graphics, vnc_listen, vnc_port) =
         parse_summary_definition(&xml).unwrap_or_default();
     let metrics = domain_metrics(domain, &xml);
 
@@ -1676,6 +1867,7 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
         serial_log,
         memory_mib,
         vcpus,
+        io_threads,
         network,
         disks,
         cdrom,
@@ -1791,6 +1983,7 @@ fn parse_summary_definition(
     xml: &str,
 ) -> Result<(
     Option<Vec<VmSummaryDisk>>,
+    Option<VmIoThreads>,
     Option<String>,
     Option<Vec<String>>,
     String,
@@ -1813,10 +2006,10 @@ fn parse_summary_definition(
                 bus: disk.bus,
                 cache: disk.cache,
                 io: disk.io,
-                queues: disk.queues,
             })
             .collect()
     });
+    let io_threads = io_threads_from_domain_xml(domain, devices).ok().flatten();
     let cdrom = optional_disk_source_path(devices, "cdrom", None)
         .ok()
         .flatten()
@@ -1830,6 +2023,7 @@ fn parse_summary_definition(
 
     Ok((
         disks,
+        io_threads,
         cdrom,
         boot,
         graphics.to_string(),
@@ -2648,7 +2842,7 @@ mod tests {
                 bus: "virtio".to_string(),
                 cache: None,
                 io: None,
-                queues: None,
+                io_threads: None,
             },
             VmLaunchDiskSpec {
                 path: PathBuf::from("/dev/disk/by-id/qtr-test-disk"),
@@ -2657,14 +2851,21 @@ mod tests {
                 target: "sda".to_string(),
                 bus: "scsi".to_string(),
                 cache: Some("none"),
-                io: Some("native"),
-                queues: Some(4),
+                io: Some("threads"),
+                io_threads: Some(VmLaunchIoThreadsSpec {
+                    count: 4,
+                    queues: 4,
+                }),
             },
         ];
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "install-os",
             memory_mib: 4096,
             vcpus: 2,
+            io_threads: Some(VmLaunchIoThreadsSpec {
+                count: 4,
+                queues: 4,
+            }),
             disks: &disks,
             cdrom: Some(Path::new("/isos/os.iso")),
             serial_log: Some(Path::new("/logs/install-os.serial.log")),
@@ -2697,9 +2898,21 @@ mod tests {
         assert_eq!(manifest.disks[1].target.as_deref(), Some("sda"));
         assert_eq!(manifest.disks[1].bus, VmDiskBus::VirtioScsi);
         assert_eq!(manifest.disks[1].cache, Some(VmDiskCache::None));
-        assert_eq!(manifest.disks[1].io, Some(VmDiskIo::Native));
-        assert_eq!(manifest.disks[1].queues, Some(4));
-        assert!(xml.contains("<controller type='scsi' index='0' model='virtio-scsi'/>"));
+        assert_eq!(
+            manifest.disks[1].io,
+            Some(VmDiskIoConfig {
+                mode: VmDiskIoMode::Threads,
+            })
+        );
+        assert_eq!(
+            manifest.io_threads,
+            Some(VmIoThreads {
+                count: 4,
+                queues: None,
+            })
+        );
+        assert!(xml.contains("<iothreads>4</iothreads>"));
+        assert!(xml.contains("<controller type='scsi' index='0' model='virtio-scsi'>"));
         assert_eq!(manifest.cdrom, Some(PathBuf::from("/isos/os.iso")));
         assert_eq!(
             manifest.boot,
@@ -2788,6 +3001,7 @@ mod tests {
 "#;
         let manifest = VmManifest {
             name: "install-os".to_string(),
+            io_threads: None,
             disks: vec![VmDisk {
                 disk_type: VmDiskType::File,
                 path: PathBuf::from("/home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2"),
@@ -2795,8 +3009,9 @@ mod tests {
                 target: Some("vda".to_string()),
                 bus: VmDiskBus::VirtioBlk,
                 cache: Some(VmDiskCache::None),
-                io: Some(VmDiskIo::Native),
-                queues: Some(1),
+                io: Some(VmDiskIoConfig {
+                    mode: VmDiskIoMode::Native,
+                }),
             }],
             cdrom: Some(PathBuf::from(
                 "/home/fanmi/workspace/qtr/.tmp/iso/CentOS-7-x86_64-DVD-2207-02.iso",
@@ -2820,10 +3035,7 @@ mod tests {
         assert!(patched.contains("<uuid>c194be5c-a0ba-4e90-8b23-18c8df0825f1</uuid>"));
         assert!(patched.contains("machine='pc-i440fx-10.2'"));
         assert!(patched.contains("<memory unit='KiB'>4194304</memory>"));
-        assert!(
-            patched
-                .contains("<driver name='qemu' type='qcow2' cache='none' io='native' queues='1'/>")
-        );
+        assert!(patched.contains("<driver name='qemu' type='qcow2' cache='none' io='native'/>"));
         assert!(patched.contains(
             "<address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>"
         ));
@@ -2876,6 +3088,80 @@ mod tests {
     }
 
     #[test]
+    fn builds_virtio_blk_iothread_mapping() {
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/sys.qcow2",
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.io_threads = Some(VmIoThreads {
+            count: 2,
+            queues: Some(4),
+        });
+        manifest.disks[0].io = Some(VmDiskIoConfig {
+            mode: VmDiskIoMode::Threads,
+        });
+
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd], 4096);
+
+        assert!(xml.contains("<iothreads>2</iothreads>"));
+        assert!(xml.contains("<driver name='qemu' type='qcow2' io='threads' queues='4'>"));
+        assert!(xml.contains("<iothread id='1'>"));
+        assert!(xml.contains("<queue id='0'/>"));
+        assert!(xml.contains("<queue id='2'/>"));
+        assert!(xml.contains("<iothread id='2'>"));
+        assert!(xml.contains("<queue id='1'/>"));
+        assert!(xml.contains("<queue id='3'/>"));
+    }
+
+    #[test]
+    fn patches_virtio_scsi_controller_iothread_mapping() {
+        let mut manifest = test_manifest(vec![
+            test_file_disk("/vm/sys.qcow2", None, VmDiskBus::VirtioBlk),
+            test_file_disk("/vm/scsi.qcow2", None, VmDiskBus::VirtioScsi),
+        ]);
+        manifest.io_threads = Some(VmIoThreads {
+            count: 2,
+            queues: None,
+        });
+        manifest.disks[1].io = Some(VmDiskIoConfig {
+            mode: VmDiskIoMode::Threads,
+        });
+
+        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+            .expect("XML should patch");
+
+        assert!(patched.contains("<iothreads>2</iothreads>"));
+        assert!(patched.contains("<controller type='scsi' index='0' model='virtio-scsi'>"));
+        assert!(patched.contains("<driver queues='2'>"));
+        assert!(patched.contains("<iothread id='1'>"));
+        assert!(patched.contains("<queue id='0'/>"));
+        assert!(patched.contains("<iothread id='2'>"));
+        assert!(patched.contains("<queue id='1'/>"));
+    }
+
+    #[test]
+    fn rejects_legacy_disk_io_scalar_and_queues() {
+        let legacy_io = r#"name: install-os
+disks:
+- path: /tmp/sys.qcow2
+  type: file
+  format: qcow2
+  io: threads
+"#;
+        let legacy_queues = r#"name: install-os
+disks:
+- path: /tmp/sys.qcow2
+  type: file
+  format: qcow2
+  queues: 1
+"#;
+
+        assert!(serde_yaml::from_str::<VmManifest>(legacy_io).is_err());
+        assert!(serde_yaml::from_str::<VmManifest>(legacy_queues).is_err());
+    }
+
+    #[test]
     fn rejects_removing_existing_disks_from_domain_xml() {
         let manifest = test_manifest(Vec::new());
 
@@ -2893,6 +3179,7 @@ mod tests {
     fn leaves_serial_log_unconfigured_when_manifest_omits_it() {
         let mut manifest = VmManifest {
             name: "install-os".to_string(),
+            io_threads: None,
             disks: vec![VmDisk {
                 disk_type: VmDiskType::File,
                 path: PathBuf::from("sys.qcow2"),
@@ -2901,7 +3188,6 @@ mod tests {
                 bus: VmDiskBus::VirtioBlk,
                 cache: None,
                 io: None,
-                queues: None,
             }],
             cdrom: None,
             boot: Some(vec!["hd".to_string()]),
@@ -2987,6 +3273,7 @@ vncListen: 127.0.0.1
     fn test_manifest(disks: Vec<VmDisk>) -> VmManifest {
         VmManifest {
             name: "install-os".to_string(),
+            io_threads: None,
             disks,
             cdrom: None,
             boot: Some(vec!["hd".to_string()]),
@@ -3009,7 +3296,6 @@ vncListen: 127.0.0.1
             bus,
             cache: None,
             io: None,
-            queues: None,
         }
     }
 }

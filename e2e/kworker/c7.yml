@@ -11,9 +11,9 @@ disks:
   - bus: virtio-blk
     cache: none
     format: raw
-    io: native
+    io:
+      mode: native
     path: /dev/nullb0
-    queues: 1
     target: vdb
     type: block
 boot:
