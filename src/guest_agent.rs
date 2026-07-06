@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use virt::{domain::Domain, sys};
+use virt::domain::Domain;
 
 #[derive(Debug)]
 pub struct GuestExecResult {
@@ -25,6 +25,31 @@ pub struct GuestExecChild {
 pub struct GuestExecStatus {
     pub exited: bool,
     pub exitcode: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GuestAgentDeadline {
+    started: Instant,
+    timeout: Duration,
+}
+
+impl GuestAgentDeadline {
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout,
+        }
+    }
+
+    pub fn remaining(&self) -> Option<Duration> {
+        self.timeout
+            .checked_sub(self.started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    pub fn expired(&self) -> bool {
+        self.remaining().is_none()
+    }
 }
 
 pub struct GuestFileChunk {
@@ -128,33 +153,38 @@ struct GuestExecArgs<'a> {
 }
 
 pub fn wait_ready(domain: &Domain, timeout: Duration) -> Result<()> {
-    let started = Instant::now();
+    let deadline = GuestAgentDeadline::new(timeout);
 
     loop {
-        if send_command(domain, r#"{"execute":"guest-ping"}"#).is_ok() {
+        let Some(remaining) = deadline.remaining() else {
+            bail!("timed out waiting for qemu guest agent");
+        };
+
+        if send_command(domain, r#"{"execute":"guest-ping"}"#, remaining).is_ok() {
             return Ok(());
         }
 
-        if started.elapsed() >= timeout {
-            bail!("timed out waiting for qemu guest agent");
-        }
-
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(remaining.min(Duration::from_secs(1)));
     }
 }
 
 pub fn run_command(domain: &Domain, command: &str, timeout: Duration) -> Result<GuestExecResult> {
-    let child = start_command(domain, command, true)?;
+    let deadline = GuestAgentDeadline::new(timeout);
+    let child = start_command(domain, command, true, &deadline)?;
 
-    wait_exec_status(domain, child.pid, timeout)
+    wait_exec_status(domain, child.pid, &deadline)
 }
 
 pub fn start_command(
     domain: &Domain,
     command: &str,
     capture_output: bool,
+    deadline: &GuestAgentDeadline,
 ) -> Result<GuestExecChild> {
-    if matches!(guest_command_enabled(domain, "guest-exec"), Ok(Some(false))) {
+    if matches!(
+        guest_command_enabled(domain, "guest-exec", deadline),
+        Ok(Some(false))
+    ) {
         bail!(guest_exec_disabled_message());
     }
 
@@ -167,7 +197,7 @@ pub fn start_command(
         "execute": "guest-exec",
         "arguments": args,
     });
-    let response = match send_command(domain, &request.to_string()) {
+    let response = match send_deadline_command(domain, &request.to_string(), deadline) {
         Ok(response) => response,
         Err(err) if is_guest_exec_disabled_error(&err) => {
             return Err(err).context(guest_exec_disabled_message());
@@ -182,8 +212,12 @@ pub fn start_command(
     })
 }
 
-fn guest_command_enabled(domain: &Domain, command: &str) -> Result<Option<bool>> {
-    let response = send_command(domain, r#"{"execute":"guest-info"}"#)
+fn guest_command_enabled(
+    domain: &Domain,
+    command: &str,
+    deadline: &GuestAgentDeadline,
+) -> Result<Option<bool>> {
+    let response = send_deadline_command(domain, r#"{"execute":"guest-info"}"#, deadline)
         .context("failed to query guest agent command list")?;
     let info: GuestInfoResponse = serde_json::from_str(&response)
         .with_context(|| format!("failed to parse guest-info response: {response}"))?;
@@ -206,25 +240,46 @@ fn guest_exec_disabled_message() -> &'static str {
     "guest-exec is disabled by qemu-guest-agent inside the guest; enable the guest-exec RPC in qemu-ga block-rpcs/allow-rpcs configuration and restart qemu-guest-agent"
 }
 
-pub fn write_file(domain: &Domain, path: &str, contents: &[u8]) -> Result<()> {
-    let handle = open_file(domain, path, "w")?;
+pub fn write_file(domain: &Domain, path: &str, contents: &[u8], timeout: Duration) -> Result<()> {
+    let deadline = GuestAgentDeadline::new(timeout);
+
+    write_file_with_deadline(domain, path, contents, &deadline)
+}
+
+pub fn write_file_with_deadline(
+    domain: &Domain,
+    path: &str,
+    contents: &[u8],
+    deadline: &GuestAgentDeadline,
+) -> Result<()> {
+    let handle = open_file(domain, path, "w", deadline)?;
     let write_result = (|| {
         for chunk in contents.chunks(48 * 1024) {
-            write_file_chunk(domain, handle, chunk)?;
+            write_file_chunk(domain, handle, chunk, deadline)?;
         }
-        flush_file(domain, handle)
+        flush_file(domain, handle, deadline)
     })();
-    let close_result = close_file(domain, handle);
+    let close_result = close_file(domain, handle, deadline);
 
     write_result.and(close_result)
 }
 
-pub fn read_file(domain: &Domain, path: &str) -> Result<Vec<u8>> {
-    let handle = open_file(domain, path, "r")?;
+pub fn read_file(domain: &Domain, path: &str, timeout: Duration) -> Result<Vec<u8>> {
+    let deadline = GuestAgentDeadline::new(timeout);
+
+    read_file_with_deadline(domain, path, &deadline)
+}
+
+pub fn read_file_with_deadline(
+    domain: &Domain,
+    path: &str,
+    deadline: &GuestAgentDeadline,
+) -> Result<Vec<u8>> {
+    let handle = open_file(domain, path, "r", deadline)?;
     let read_result: Result<Vec<u8>> = (|| {
         let mut contents = Vec::new();
         loop {
-            let chunk = read_file_chunk(domain, handle, 48 * 1024)?;
+            let chunk = read_file_chunk(domain, handle, 48 * 1024, deadline)?;
             contents.extend_from_slice(&chunk.data);
             if chunk.eof {
                 break;
@@ -232,7 +287,7 @@ pub fn read_file(domain: &Domain, path: &str) -> Result<Vec<u8>> {
         }
         Ok(contents)
     })();
-    let close_result = close_file(domain, handle);
+    let close_result = close_file(domain, handle, deadline);
     let contents = read_result?;
     close_result?;
 
@@ -244,20 +299,26 @@ pub fn read_file_from(
     path: &str,
     offset: i64,
     count: i64,
+    deadline: &GuestAgentDeadline,
 ) -> Result<GuestFileChunk> {
-    let handle = open_file(domain, path, "r")?;
+    let handle = open_file(domain, path, "r", deadline)?;
     let read_result: Result<GuestFileChunk> = (|| {
-        seek_file(domain, handle, offset)?;
-        read_file_chunk(domain, handle, count)
+        seek_file(domain, handle, offset, deadline)?;
+        read_file_chunk(domain, handle, count, deadline)
     })();
-    let close_result = close_file(domain, handle);
+    let close_result = close_file(domain, handle, deadline);
     let chunk = read_result?;
     close_result?;
 
     Ok(chunk)
 }
 
-fn open_file(domain: &Domain, path: &str, mode: &str) -> Result<i64> {
+fn open_file(
+    domain: &Domain,
+    path: &str,
+    mode: &str,
+    deadline: &GuestAgentDeadline,
+) -> Result<i64> {
     let request = json!({
         "execute": "guest-file-open",
         "arguments": {
@@ -265,7 +326,7 @@ fn open_file(domain: &Domain, path: &str, mode: &str) -> Result<i64> {
             "mode": mode,
         },
     });
-    let response = send_command(domain, &request.to_string())
+    let response = send_deadline_command(domain, &request.to_string(), deadline)
         .with_context(|| format!("failed to open guest file {path}"))?;
     let opened: GuestFileOpenResponse = serde_json::from_str(&response)
         .with_context(|| format!("failed to parse guest-file-open response: {response}"))?;
@@ -273,7 +334,12 @@ fn open_file(domain: &Domain, path: &str, mode: &str) -> Result<i64> {
     Ok(opened.handle)
 }
 
-fn write_file_chunk(domain: &Domain, handle: i64, chunk: &[u8]) -> Result<()> {
+fn write_file_chunk(
+    domain: &Domain,
+    handle: i64,
+    chunk: &[u8],
+    deadline: &GuestAgentDeadline,
+) -> Result<()> {
     let encoded = STANDARD.encode(chunk);
     let request = json!({
         "execute": "guest-file-write",
@@ -282,7 +348,7 @@ fn write_file_chunk(domain: &Domain, handle: i64, chunk: &[u8]) -> Result<()> {
             "buf-b64": encoded,
         },
     });
-    let response = send_command(domain, &request.to_string())
+    let response = send_deadline_command(domain, &request.to_string(), deadline)
         .with_context(|| format!("failed to write guest file handle {handle}"))?;
     let written: GuestFileWriteResponse = serde_json::from_str(&response)
         .with_context(|| format!("failed to parse guest-file-write response: {response}"))?;
@@ -297,7 +363,12 @@ fn write_file_chunk(domain: &Domain, handle: i64, chunk: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn read_file_chunk(domain: &Domain, handle: i64, count: i64) -> Result<GuestFileChunk> {
+fn read_file_chunk(
+    domain: &Domain,
+    handle: i64,
+    count: i64,
+    deadline: &GuestAgentDeadline,
+) -> Result<GuestFileChunk> {
     let request = json!({
         "execute": "guest-file-read",
         "arguments": {
@@ -305,7 +376,7 @@ fn read_file_chunk(domain: &Domain, handle: i64, count: i64) -> Result<GuestFile
             "count": count,
         },
     });
-    let response = send_command(domain, &request.to_string())
+    let response = send_deadline_command(domain, &request.to_string(), deadline)
         .with_context(|| format!("failed to read guest file handle {handle}"))?;
     let read: GuestFileReadResponse = serde_json::from_str(&response)
         .with_context(|| format!("failed to parse guest-file-read response: {response}"))?;
@@ -326,7 +397,12 @@ fn read_file_chunk(domain: &Domain, handle: i64, count: i64) -> Result<GuestFile
     })
 }
 
-fn seek_file(domain: &Domain, handle: i64, offset: i64) -> Result<()> {
+fn seek_file(
+    domain: &Domain,
+    handle: i64,
+    offset: i64,
+    deadline: &GuestAgentDeadline,
+) -> Result<()> {
     let request = json!({
         "execute": "guest-file-seek",
         "arguments": {
@@ -335,7 +411,7 @@ fn seek_file(domain: &Domain, handle: i64, offset: i64) -> Result<()> {
             "whence": "set",
         },
     });
-    let response = send_command(domain, &request.to_string())
+    let response = send_deadline_command(domain, &request.to_string(), deadline)
         .with_context(|| format!("failed to seek guest file handle {handle}"))?;
     let seek: GuestFileSeekResponse = serde_json::from_str(&response)
         .with_context(|| format!("failed to parse guest-file-seek response: {response}"))?;
@@ -350,33 +426,39 @@ fn seek_file(domain: &Domain, handle: i64, offset: i64) -> Result<()> {
     Ok(())
 }
 
-fn flush_file(domain: &Domain, handle: i64) -> Result<()> {
+fn flush_file(domain: &Domain, handle: i64, deadline: &GuestAgentDeadline) -> Result<()> {
     let request = json!({
         "execute": "guest-file-flush",
         "arguments": { "handle": handle },
     });
-    send_command(domain, &request.to_string())
+    send_deadline_command(domain, &request.to_string(), deadline)
         .with_context(|| format!("failed to flush guest file handle {handle}"))?;
 
     Ok(())
 }
 
-fn close_file(domain: &Domain, handle: i64) -> Result<()> {
+fn close_file(domain: &Domain, handle: i64, deadline: &GuestAgentDeadline) -> Result<()> {
     let request = json!({
         "execute": "guest-file-close",
         "arguments": { "handle": handle },
     });
-    send_command(domain, &request.to_string())
+    send_deadline_command(domain, &request.to_string(), deadline)
         .with_context(|| format!("failed to close guest file handle {handle}"))?;
 
     Ok(())
 }
 
-fn wait_exec_status(domain: &Domain, pid: i64, timeout: Duration) -> Result<GuestExecResult> {
-    let started = Instant::now();
-
+fn wait_exec_status(
+    domain: &Domain,
+    pid: i64,
+    deadline: &GuestAgentDeadline,
+) -> Result<GuestExecResult> {
     loop {
-        let status = query_raw_exec_status(domain, pid)?;
+        if deadline.expired() {
+            bail!("timed out waiting for guest command pid {pid}");
+        }
+
+        let status = query_raw_exec_status(domain, pid, deadline)?;
 
         if status.result.exited {
             let exitcode = exec_status_exitcode(&status.result)?;
@@ -390,16 +472,19 @@ fn wait_exec_status(domain: &Domain, pid: i64, timeout: Duration) -> Result<Gues
             });
         }
 
-        if started.elapsed() >= timeout {
+        let Some(remaining) = deadline.remaining() else {
             bail!("timed out waiting for guest command pid {pid}");
-        }
-
-        thread::sleep(Duration::from_secs(1));
+        };
+        thread::sleep(remaining.min(Duration::from_secs(1)));
     }
 }
 
-pub fn query_exec_status(domain: &Domain, pid: i64) -> Result<GuestExecStatus> {
-    let status = query_raw_exec_status(domain, pid)?;
+pub fn query_exec_status(
+    domain: &Domain,
+    pid: i64,
+    deadline: &GuestAgentDeadline,
+) -> Result<GuestExecStatus> {
+    let status = query_raw_exec_status(domain, pid, deadline)?;
     let exitcode = if status.result.exited {
         Some(exec_status_exitcode(&status.result)?)
     } else {
@@ -412,12 +497,16 @@ pub fn query_exec_status(domain: &Domain, pid: i64) -> Result<GuestExecStatus> {
     })
 }
 
-fn query_raw_exec_status(domain: &Domain, pid: i64) -> Result<GuestExecStatusResponse> {
+fn query_raw_exec_status(
+    domain: &Domain,
+    pid: i64,
+    deadline: &GuestAgentDeadline,
+) -> Result<GuestExecStatusResponse> {
     let request = json!({
         "execute": "guest-exec-status",
         "arguments": { "pid": pid },
     });
-    let response = send_command(domain, &request.to_string())
+    let response = send_deadline_command(domain, &request.to_string(), deadline)
         .with_context(|| format!("failed to query guest command pid {pid}"))?;
     serde_json::from_str(&response)
         .with_context(|| format!("failed to parse guest-exec-status response: {response}"))
@@ -440,12 +529,27 @@ fn decode_output(data: Option<&str>, stream_name: &str) -> Result<Vec<u8>> {
     }
 }
 
-fn send_command(domain: &Domain, command: &str) -> Result<String> {
+fn send_deadline_command(
+    domain: &Domain,
+    command: &str,
+    deadline: &GuestAgentDeadline,
+) -> Result<String> {
+    let timeout = deadline
+        .remaining()
+        .context("timed out waiting for qemu guest agent")?;
+
+    send_command(domain, command, timeout)
+}
+
+fn send_command(domain: &Domain, command: &str, timeout: Duration) -> Result<String> {
     domain
-        .qemu_agent_command(
-            command,
-            sys::VIR_DOMAIN_QEMU_AGENT_COMMAND_DEFAULT as i32,
-            0,
-        )
+        .qemu_agent_command(command, agent_command_timeout_secs(timeout), 0)
         .map_err(|err| anyhow!(err))
+}
+
+fn agent_command_timeout_secs(timeout: Duration) -> i32 {
+    let rounded_secs = timeout
+        .as_secs()
+        .saturating_add(u64::from(timeout.subsec_nanos() > 0));
+    rounded_secs.clamp(1, i32::MAX as u64) as i32
 }
