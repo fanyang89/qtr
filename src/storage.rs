@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use duct::cmd;
 use serde::{Deserialize, Serialize};
 
@@ -272,7 +272,7 @@ impl IscsiAdm {
     }
 
     fn login(&self, volume: &IscsiVolume) -> Result<()> {
-        duct::cmd(
+        let output = duct::cmd(
             ISCSIADM,
             [
                 "-m",
@@ -284,14 +284,30 @@ impl IscsiAdm {
                 "--login",
             ],
         )
+        .stdout_capture()
+        .stderr_capture()
+        .unchecked()
         .run()
         .context("failed to run iscsiadm")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if is_session_exists_error(&stderr) {
+                return Ok(());
+            }
+            bail!(
+                "iscsiadm failed to log in to {} via {}: {}",
+                volume.target,
+                volume.portal,
+                stderr.trim()
+            );
+        }
 
         Ok(())
     }
 
     fn logout(&self, volume: &IscsiVolume) -> Result<()> {
-        duct::cmd(
+        let output = duct::cmd(
             ISCSIADM,
             [
                 "-m",
@@ -303,11 +319,35 @@ impl IscsiAdm {
                 "--logout",
             ],
         )
+        .stdout_capture()
+        .stderr_capture()
+        .unchecked()
         .run()
         .context("failed to run iscsiadm")?;
 
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if is_no_matching_session_error(&stderr) {
+                return Ok(());
+            }
+            bail!(
+                "iscsiadm failed to log out of {} via {}: {}",
+                volume.target,
+                volume.portal,
+                stderr.trim()
+            );
+        }
+
         Ok(())
     }
+}
+
+fn is_session_exists_error(stderr: &str) -> bool {
+    stderr.contains("session exists")
+}
+
+fn is_no_matching_session_error(stderr: &str) -> bool {
+    stderr.contains("no matching session") || stderr.contains("No matching sessions")
 }
 
 fn load_state(path: &Path) -> Result<StorageState> {
@@ -651,6 +691,26 @@ mod tests {
         assert_eq!(state.backends.len(), 1);
         assert_eq!(state.backends[0].name, "lab-san");
         assert_eq!(state.backends[0].driver.name(), "iscsi");
+    }
+
+    #[test]
+    fn recognizes_idempotent_iscsiadm_errors() {
+        let login_exists = "iscsiadm: Could not login to [iface: default, target: iqn.2026-01.local:qtr.db, portal: 10.0.0.10,3260].\n\
+                            iscsiadm: initiator reported error (15 - session exists)\n";
+        assert!(is_session_exists_error(login_exists));
+        assert!(!is_session_exists_error(
+            "iscsiadm: initiator reported error (4 - encountered iSCSI login failure)"
+        ));
+
+        let logout_missing = "iscsiadm: Could not logout of [sid: 1, target: iqn.2026-01.local:qtr.db, portal: 10.0.0.10,3260].\n\
+                              iscsiadm: initiator reported error (19 - encountered iSCSI logout failure)\n\
+                              iscsiadm: Could not logout of all requested sessions\n\
+                              Logging out of session [sid: 1, target: iqn, portal: 10.0.0.10,3260]\n\
+                              iscsiadm: no matching session found\n";
+        assert!(is_no_matching_session_error(logout_missing));
+        assert!(!is_no_matching_session_error(
+            "iscsiadm: initiator reported error (2 - encountered iSCSI failure)"
+        ));
     }
 
     #[test]
