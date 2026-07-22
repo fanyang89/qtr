@@ -415,6 +415,10 @@ pub struct VmApplyArgs {
     #[arg(long)]
     pub rm_after_shutdown: bool,
 
+    /// Maximum seconds to wait for guest shutdown (default: wait forever).
+    #[arg(long, value_name = "SECS")]
+    pub shutdown_timeout_secs: Option<u64>,
+
     /// Print the libvirt domain XML diff without applying it.
     #[arg(long)]
     pub dry_run: bool,
@@ -482,6 +486,10 @@ pub struct VmStartArgs {
     /// Undefine the VM after --wait-shutdown completes.
     #[arg(long)]
     pub rm_after_shutdown: bool,
+
+    /// Maximum seconds to wait for guest shutdown (default: wait forever).
+    #[arg(long, value_name = "SECS")]
+    pub shutdown_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -500,6 +508,10 @@ pub struct VmStopArgs {
     /// Wait until the guest becomes inactive.
     #[arg(long)]
     pub wait: bool,
+
+    /// Maximum seconds to wait for guest shutdown (default: wait forever).
+    #[arg(long, value_name = "SECS")]
+    pub shutdown_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Args)]

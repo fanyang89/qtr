@@ -424,7 +424,11 @@ fn apply(args: VmApplyArgs) -> Result<()> {
 
         if args.wait_shutdown {
             eprintln!("[qtr] waiting for guest shutdown...");
-            wait_shutdown_domain(&domain, &manifest.name)?;
+            wait_shutdown_domain(
+                &domain,
+                &manifest.name,
+                args.shutdown_timeout_secs.map(Duration::from_secs),
+            )?;
             if args.rm_after_shutdown {
                 undefine_domain(&domain, &manifest.name)?;
             }
@@ -2112,7 +2116,11 @@ fn start(args: VmStartArgs) -> Result<()> {
 
     if args.wait_shutdown {
         eprintln!("[qtr] waiting for guest shutdown...");
-        wait_shutdown_domain(&domain, &args.name)?;
+        wait_shutdown_domain(
+            &domain,
+            &args.name,
+            args.shutdown_timeout_secs.map(Duration::from_secs),
+        )?;
         if args.rm_after_shutdown {
             undefine_domain(&domain, &args.name)?;
         }
@@ -2145,7 +2153,11 @@ fn stop(args: VmStopArgs) -> Result<()> {
     }
 
     if args.wait {
-        wait_shutdown_domain(&domain, &args.name)?;
+        wait_shutdown_domain(
+            &domain,
+            &args.name,
+            args.shutdown_timeout_secs.map(Duration::from_secs),
+        )?;
     }
 
     Ok(())
@@ -2547,7 +2559,7 @@ pub fn shutdown_by_name(connect_uri: &str, name: &str, wait: bool) -> Result<()>
         .shutdown()
         .with_context(|| format!("failed to request shutdown for domain {name}"))?;
     if wait {
-        wait_shutdown_domain(&domain, name)?;
+        wait_shutdown_domain(&domain, name, None)?;
     }
 
     Ok(())
@@ -2855,13 +2867,32 @@ fn format_endpoint(host: &str, port: &str) -> String {
     }
 }
 
-fn wait_shutdown_domain(domain: &Domain, name: &str) -> Result<()> {
+fn wait_shutdown_domain(domain: &Domain, name: &str, timeout: Option<Duration>) -> Result<()> {
+    wait_for_shutdown(
+        || {
+            domain
+                .is_active()
+                .with_context(|| format!("failed to query domain {name} state"))
+        },
+        name,
+        timeout,
+    )
+}
+
+fn wait_for_shutdown(
+    mut is_active: impl FnMut() -> Result<bool>,
+    name: &str,
+    timeout: Option<Duration>,
+) -> Result<()> {
+    let started = Instant::now();
     loop {
-        if !domain
-            .is_active()
-            .with_context(|| format!("failed to query domain {name} state"))?
-        {
+        if !is_active()? {
             return Ok(());
+        }
+        if let Some(timeout) = timeout
+            && started.elapsed() >= timeout
+        {
+            bail!("timed out waiting for VM {name} to shut down");
         }
 
         thread::sleep(Duration::from_secs(2));
@@ -3558,6 +3589,23 @@ vncListen: 127.0.0.1
         let err = validate_manifest(&manifest).unwrap_err();
         let _ = fs::remove_file(&name);
         assert!(err.to_string().contains("absolute path"));
+    }
+
+    #[test]
+    fn wait_for_shutdown_returns_when_inactive() {
+        assert!(wait_for_shutdown(|| Ok(false), "test", None).is_ok());
+    }
+
+    #[test]
+    fn wait_for_shutdown_times_out_while_active() {
+        let err = wait_for_shutdown(|| Ok(true), "test", Some(Duration::ZERO)).unwrap_err();
+        assert!(err.to_string().contains("timed out waiting for VM test"));
+    }
+
+    #[test]
+    fn wait_for_shutdown_propagates_query_errors() {
+        let err = wait_for_shutdown(|| bail!("query failed"), "test", None).unwrap_err();
+        assert!(err.to_string().contains("query failed"));
     }
 
     #[test]
