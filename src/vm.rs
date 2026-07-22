@@ -3635,6 +3635,27 @@ vncListen: 127.0.0.1
     }
 
     #[test]
+    fn domain_states_match_the_web_contract() {
+        let expected: Vec<String> =
+            serde_json::from_str(include_str!("../fixtures/vm-states.json"))
+                .expect("VM state fixture should parse");
+        let states = [
+            sys::VIR_DOMAIN_NOSTATE,
+            sys::VIR_DOMAIN_RUNNING,
+            sys::VIR_DOMAIN_BLOCKED,
+            sys::VIR_DOMAIN_PAUSED,
+            sys::VIR_DOMAIN_SHUTDOWN,
+            sys::VIR_DOMAIN_SHUTOFF,
+            sys::VIR_DOMAIN_CRASHED,
+            sys::VIR_DOMAIN_PMSUSPENDED,
+            u32::MAX,
+        ]
+        .map(domain_state_name);
+
+        assert_eq!(states.as_slice(), expected);
+    }
+
+    #[test]
     fn wait_for_shutdown_returns_when_inactive() {
         assert!(wait_for_shutdown(|| Ok(false), "test", None).is_ok());
     }

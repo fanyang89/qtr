@@ -1,13 +1,15 @@
 import { z } from 'zod'
 import axios, { type AxiosResponse } from 'axios'
 
-const vmStateSchema = z.enum([
+export const vmStateSchema = z.enum([
+  'nostate',
   'running',
-  'shutoff',
-  'paused',
   'blocked',
-  'crashed',
+  'paused',
   'shutdown',
+  'shutoff',
+  'crashed',
+  'pmsuspended',
   'unknown',
 ])
 
