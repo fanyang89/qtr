@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import {
@@ -45,6 +45,11 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { ThemeSwitch } from '@/components/theme-switch'
+import {
+  vmMetricsByName,
+  vmRuntimeMetrics,
+  type VmMetricSnapshot,
+} from './metrics'
 import { VmFormDialog } from './vm-form-dialog'
 
 export function VmDashboard() {
@@ -52,7 +57,16 @@ export function VmDashboard() {
   const { data: vms = [], isLoading } = useQuery({
     queryKey: ['vms'],
     queryFn: getVms,
+    refetchInterval: 2000,
   })
+  const latestMetricsRef = useRef<Map<string, VmMetricSnapshot>>(new Map())
+  const [previousMetrics, setPreviousMetrics] = useState<
+    Map<string, VmMetricSnapshot>
+  >(new Map())
+  useEffect(() => {
+    setPreviousMetrics(latestMetricsRef.current)
+    latestMetricsRef.current = vmMetricsByName(vms)
+  }, [vms])
   const [search, setSearch] = useState('')
   const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null)
   const [selectedVm, setSelectedVm] = useState<VmSummary | null>(null)
@@ -76,8 +90,6 @@ export function VmDashboard() {
       await queryClient.invalidateQueries({ queryKey: ['vms'] })
       toast.success(`VM ${action} queued`)
     },
-    onError: (error) =>
-      toast.error(error instanceof Error ? error.message : 'Action failed'),
   })
 
   const createMutation = useMutation({
@@ -87,10 +99,6 @@ export function VmDashboard() {
       toast.success(`VM ${vm.name} created`)
       setFormMode(null)
     },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to create VM'
-      ),
   })
 
   const updateMutation = useMutation({
@@ -103,10 +111,6 @@ export function VmDashboard() {
       setFormMode(null)
       setSelectedVm(null)
     },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to update VM'
-      ),
   })
 
   const deleteMutation = useMutation({
@@ -116,10 +120,6 @@ export function VmDashboard() {
       toast.success(`VM ${name} deleted`)
       setDeleteTarget(null)
     },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to delete VM'
-      ),
   })
 
   async function handleFormSubmit(input: VmCreateInput | VmUpdateInput) {
@@ -185,6 +185,10 @@ export function VmDashboard() {
                 <TableHead>State</TableHead>
                 <TableHead>vCPUs</TableHead>
                 <TableHead>Memory</TableHead>
+                <TableHead>CPU</TableHead>
+                <TableHead>Mem %</TableHead>
+                <TableHead>TX</TableHead>
+                <TableHead>RX</TableHead>
                 <TableHead>Network</TableHead>
                 <TableHead>VNC</TableHead>
                 <TableHead className='w-12' />
@@ -194,7 +198,7 @@ export function VmDashboard() {
               {isLoading ? (
                 <TableRow>
                   <TableCell
-                    colSpan={7}
+                    colSpan={11}
                     className='h-24 text-center text-muted-foreground'
                   >
                     Loading VMs...
@@ -203,7 +207,7 @@ export function VmDashboard() {
               ) : filteredVms.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={7}
+                    colSpan={11}
                     className='h-24 text-center text-muted-foreground'
                   >
                     No virtual machines found.
@@ -214,6 +218,7 @@ export function VmDashboard() {
                   <VmRow
                     key={vm.name}
                     vm={vm}
+                    previousMetrics={previousMetrics.get(vm.name)}
                     onAction={(name, action) =>
                       actionMutation.mutate({ name, action })
                     }
@@ -258,15 +263,20 @@ export function VmDashboard() {
 
 function VmRow({
   vm,
+  previousMetrics,
   onAction,
   onEdit,
   onDelete,
 }: {
   vm: VmSummary
+  previousMetrics?: VmMetricSnapshot
   onAction: (name: string, action: string) => void
   onEdit: (vm: VmSummary) => void
   onDelete: (vm: VmSummary) => void
 }) {
+  const metrics = vmRuntimeMetrics(vm, previousMetrics)
+  const consoleReady = vm.vnc && vm.state === 'running'
+
   return (
     <TableRow>
       <TableCell>
@@ -288,9 +298,13 @@ function VmRow({
       <TableCell>
         {vm.memoryMiB ? `${Math.round(vm.memoryMiB / 1024)} GiB` : '-'}
       </TableCell>
+      <TableCell>{metrics.cpu}</TableCell>
+      <TableCell>{metrics.memory}</TableCell>
+      <TableCell>{metrics.tx}</TableCell>
+      <TableCell>{metrics.rx}</TableCell>
       <TableCell>{vm.network ?? '-'}</TableCell>
       <TableCell>
-        {vm.vnc ? (
+        {consoleReady ? (
           <Button variant='outline' size='sm' asChild>
             <Link to='/vms/$name/console' params={{ name: vm.name }}>
               <MonitorPlay className='size-4' />
@@ -298,7 +312,15 @@ function VmRow({
             </Link>
           </Button>
         ) : (
-          <span className='text-sm text-muted-foreground'>disabled</span>
+          <Button
+            variant='outline'
+            size='sm'
+            disabled
+            title={vm.vnc ? 'VM is not running' : 'VNC is disabled'}
+          >
+            <MonitorPlay className='size-4' />
+            Console
+          </Button>
         )}
       </TableCell>
       <TableCell>
@@ -309,7 +331,7 @@ function VmRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align='end'>
-            <DropdownMenuItem asChild disabled={!vm.vnc}>
+            <DropdownMenuItem asChild disabled={!consoleReady}>
               <Link to='/vms/$name/console' params={{ name: vm.name }}>
                 <MonitorPlay className='size-4' />
                 Console

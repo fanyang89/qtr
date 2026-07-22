@@ -110,11 +110,7 @@ async function parseResponse<T>(
 }
 
 export async function getHealth(): Promise<HealthStatus> {
-  try {
-    return await parseResponse(apiClient.get('/health'), healthStatusSchema)
-  } catch {
-    return { ok: false, libvirtUri: 'qemu:///system' }
-  }
+  return parseResponse(apiClient.get('/health'), healthStatusSchema)
 }
 
 export async function getVms(): Promise<VmSummary[]> {
