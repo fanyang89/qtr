@@ -152,9 +152,7 @@ struct GuestExecArgs<'a> {
     capture_output: bool,
 }
 
-pub fn wait_ready(domain: &Domain, timeout: Duration) -> Result<()> {
-    let deadline = GuestAgentDeadline::new(timeout);
-
+pub fn wait_ready_with_deadline(domain: &Domain, deadline: &GuestAgentDeadline) -> Result<()> {
     loop {
         let Some(remaining) = deadline.remaining() else {
             bail!("timed out waiting for qemu guest agent");
@@ -170,9 +168,17 @@ pub fn wait_ready(domain: &Domain, timeout: Duration) -> Result<()> {
 
 pub fn run_command(domain: &Domain, command: &str, timeout: Duration) -> Result<GuestExecResult> {
     let deadline = GuestAgentDeadline::new(timeout);
-    let child = start_command(domain, command, true, &deadline)?;
+    run_command_with_deadline(domain, command, &deadline)
+}
 
-    wait_exec_status(domain, child.pid, &deadline)
+pub fn run_command_with_deadline(
+    domain: &Domain,
+    command: &str,
+    deadline: &GuestAgentDeadline,
+) -> Result<GuestExecResult> {
+    let child = start_command(domain, command, true, deadline)?;
+
+    wait_exec_status(domain, child.pid, deadline)
 }
 
 pub fn start_command(
@@ -240,12 +246,6 @@ fn guest_exec_disabled_message() -> &'static str {
     "guest-exec is disabled by qemu-guest-agent inside the guest; enable the guest-exec RPC in qemu-ga block-rpcs/allow-rpcs configuration and restart qemu-guest-agent"
 }
 
-pub fn write_file(domain: &Domain, path: &str, contents: &[u8], timeout: Duration) -> Result<()> {
-    let deadline = GuestAgentDeadline::new(timeout);
-
-    write_file_with_deadline(domain, path, contents, &deadline)
-}
-
 pub fn write_file_with_deadline(
     domain: &Domain,
     path: &str,
@@ -262,12 +262,6 @@ pub fn write_file_with_deadline(
     let close_result = close_file(domain, handle, deadline);
 
     write_result.and(close_result)
-}
-
-pub fn read_file(domain: &Domain, path: &str, timeout: Duration) -> Result<Vec<u8>> {
-    let deadline = GuestAgentDeadline::new(timeout);
-
-    read_file_with_deadline(domain, path, &deadline)
 }
 
 pub fn read_file_with_deadline(

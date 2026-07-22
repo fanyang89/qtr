@@ -2221,7 +2221,8 @@ fn cp(args: VmCpArgs) -> Result<()> {
     }
 
     let timeout = Duration::from_secs(args.timeout_secs);
-    guest_agent::wait_ready(&domain, timeout)
+    let deadline = guest_agent::GuestAgentDeadline::new(timeout);
+    guest_agent::wait_ready_with_deadline(&domain, &deadline)
         .with_context(|| format!("guest agent is not ready for domain {}", args.name))?;
 
     match (source, dest) {
@@ -2231,7 +2232,7 @@ fn cp(args: VmCpArgs) -> Result<()> {
             }
             let contents = fs::read(&source)
                 .with_context(|| format!("failed to read {}", source.display()))?;
-            guest_agent::write_file(&domain, &dest, &contents, timeout)
+            guest_agent::write_file_with_deadline(&domain, &dest, &contents, &deadline)
                 .with_context(|| format!("failed to write guest file {dest}"))?;
             eprintln!("[qtr] copied {} to guest:{dest}", source.display());
         }
@@ -2239,7 +2240,7 @@ fn cp(args: VmCpArgs) -> Result<()> {
             if args.parents {
                 create_host_parent_dir(&dest)?;
             }
-            let contents = guest_agent::read_file(&domain, &source, timeout)
+            let contents = guest_agent::read_file_with_deadline(&domain, &source, &deadline)
                 .with_context(|| format!("failed to read guest file {source}"))?;
             fs::write(&dest, contents)
                 .with_context(|| format!("failed to write {}", dest.display()))?;
@@ -2314,7 +2315,8 @@ fn exec(args: VmExecArgs) -> Result<()> {
     }
 
     let timeout = Duration::from_secs(args.timeout_secs);
-    guest_agent::wait_ready(&domain, timeout)
+    let deadline = guest_agent::GuestAgentDeadline::new(timeout);
+    guest_agent::wait_ready_with_deadline(&domain, &deadline)
         .with_context(|| format!("guest agent is not ready for domain {}", args.name))?;
 
     let (mode, command, script, guest_path) = match &args.script {
@@ -2322,7 +2324,7 @@ fn exec(args: VmExecArgs) -> Result<()> {
             let contents = fs::read(script)
                 .with_context(|| format!("failed to read script {}", script.display()))?;
             let guest_path = format!("/tmp/qtr-exec-{}.sh", Uuid::new_v4());
-            guest_agent::write_file(&domain, &guest_path, &contents, timeout)
+            guest_agent::write_file_with_deadline(&domain, &guest_path, &contents, &deadline)
                 .with_context(|| format!("failed to upload script to guest {guest_path}"))?;
             (
                 VmExecMode::Script,
@@ -2336,9 +2338,9 @@ fn exec(args: VmExecArgs) -> Result<()> {
 
     let started = Instant::now();
     let exec_result = if args.output.is_some() {
-        guest_agent::run_command(&domain, &command, timeout)
+        guest_agent::run_command_with_deadline(&domain, &command, &deadline)
     } else {
-        stream_guest_command(&domain, &command, timeout)
+        stream_guest_command(&domain, &command, &deadline)
     };
     let elapsed_ms = started.elapsed().as_millis();
     if let Some(guest_path) = &guest_path {
@@ -2383,7 +2385,7 @@ fn exec(args: VmExecArgs) -> Result<()> {
 fn stream_guest_command(
     domain: &Domain,
     command: &str,
-    timeout: Duration,
+    deadline: &guest_agent::GuestAgentDeadline,
 ) -> Result<guest_agent::GuestExecResult> {
     const STREAM_CHUNK_SIZE: i64 = 48 * 1024;
 
@@ -2399,11 +2401,9 @@ fn stream_guest_command(
         offset: 0,
     };
 
-    let deadline = guest_agent::GuestAgentDeadline::new(timeout);
-
-    guest_agent::write_file_with_deadline(domain, &stdout_path, b"", &deadline)
+    guest_agent::write_file_with_deadline(domain, &stdout_path, b"", deadline)
         .with_context(|| format!("failed to create guest stdout file {stdout_path}"))?;
-    guest_agent::write_file_with_deadline(domain, &stderr_path, b"", &deadline)
+    guest_agent::write_file_with_deadline(domain, &stderr_path, b"", deadline)
         .with_context(|| format!("failed to create guest stderr file {stderr_path}"))?;
 
     let run_result = (|| {
@@ -2413,10 +2413,11 @@ fn stream_guest_command(
             shell_quote(&stdout_path),
             shell_quote(&stderr_path)
         );
-        let child = guest_agent::start_command(domain, &wrapped_command, false, &deadline)?;
+        let child = guest_agent::start_command(domain, &wrapped_command, false, deadline)?;
 
         loop {
             if deadline.expired() {
+                terminate_guest_command(domain, child.pid);
                 bail!("timed out waiting for guest command pid {}", child.pid);
             }
 
@@ -2426,7 +2427,7 @@ fn stream_guest_command(
                 &mut io::stdout(),
                 "stdout",
                 STREAM_CHUNK_SIZE,
-                &deadline,
+                deadline,
             )?;
             drain_guest_output_stream(
                 domain,
@@ -2434,10 +2435,10 @@ fn stream_guest_command(
                 &mut io::stderr(),
                 "stderr",
                 STREAM_CHUNK_SIZE,
-                &deadline,
+                deadline,
             )?;
 
-            let status = guest_agent::query_exec_status(domain, child.pid, &deadline)?;
+            let status = guest_agent::query_exec_status(domain, child.pid, deadline)?;
             if status.exited {
                 drain_guest_output_stream(
                     domain,
@@ -2445,7 +2446,7 @@ fn stream_guest_command(
                     &mut io::stdout(),
                     "stdout",
                     STREAM_CHUNK_SIZE,
-                    &deadline,
+                    deadline,
                 )?;
                 drain_guest_output_stream(
                     domain,
@@ -2453,7 +2454,7 @@ fn stream_guest_command(
                     &mut io::stderr(),
                     "stderr",
                     STREAM_CHUNK_SIZE,
-                    &deadline,
+                    deadline,
                 )?;
 
                 return Ok(guest_agent::GuestExecResult {
@@ -2466,6 +2467,7 @@ fn stream_guest_command(
             }
 
             let Some(remaining) = deadline.remaining() else {
+                terminate_guest_command(domain, child.pid);
                 bail!("timed out waiting for guest command pid {}", child.pid);
             };
 
@@ -2507,6 +2509,13 @@ fn drain_guest_output_stream<W: Write>(
         if chunk.eof {
             return Ok(());
         }
+    }
+}
+
+fn terminate_guest_command(domain: &Domain, pid: i64) {
+    let command = format!("kill -TERM -{pid} 2>/dev/null; kill -TERM {pid} 2>/dev/null");
+    if let Err(err) = guest_agent::run_command(domain, &command, Duration::from_secs(10)) {
+        eprintln!("[qtr] warning: failed to terminate guest process {pid}: {err}");
     }
 }
 
