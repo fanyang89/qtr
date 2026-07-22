@@ -253,12 +253,14 @@ fn disk_suffix(mut index: usize) -> String {
     suffix.into_iter().collect::<String>()
 }
 
+pub const CDROM_TARGET: &str = "sda";
+
 fn build_cdrom_xml(path: &Path) -> String {
     format!(
         r#"    <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
       <source file='{path}'/>
-      <target dev='sda' bus='sata'/>
+      <target dev='{CDROM_TARGET}' bus='sata'/>
       <readonly/>
     </disk>
 "#,

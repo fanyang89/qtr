@@ -390,7 +390,7 @@ fn apply(args: VmApplyArgs) -> Result<()> {
 
     let current_xml = current_domain_xml(&args.connect_uri, &manifest.name)?;
     let xml = if current_xml.is_empty() {
-        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)
+        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)?
     } else {
         patch_domain_xml(&current_xml, &manifest, &boot_devices, memory_mib)?
     };
@@ -447,15 +447,16 @@ fn build_manifest_domain_xml(
     manifest: &VmManifest,
     boot_devices: &[BootDevice],
     memory_mib: u64,
-) -> String {
+) -> Result<String> {
+    let targets = assign_manifest_disk_targets(manifest)?;
     let disks = manifest
         .disks
         .iter()
-        .enumerate()
-        .map(|(index, disk)| launch_disk_spec(disk, index, manifest.io_threads))
+        .zip(targets)
+        .map(|(disk, target)| launch_disk_spec(disk, target, manifest.io_threads))
         .collect::<Vec<_>>();
 
-    build_vm_launch_domain_xml(VmLaunchDomainSpec {
+    Ok(build_vm_launch_domain_xml(VmLaunchDomainSpec {
         name: &manifest.name,
         memory_mib,
         vcpus: manifest.vcpus,
@@ -470,7 +471,7 @@ fn build_manifest_domain_xml(
             vnc_listen: &manifest.vnc_listen,
             vnc_port: manifest.vnc_port,
         },
-    })
+    }))
 }
 
 fn disk_launch_source(disk_type: VmDiskType) -> VmLaunchDiskSource {
@@ -482,7 +483,7 @@ fn disk_launch_source(disk_type: VmDiskType) -> VmLaunchDiskSource {
 
 fn launch_disk_spec(
     disk: &VmDisk,
-    index: usize,
+    target: String,
     io_threads: Option<VmIoThreads>,
 ) -> VmLaunchDiskSpec<'_> {
     let io_threads = (disk.bus == VmDiskBus::VirtioBlk
@@ -494,7 +495,7 @@ fn launch_disk_spec(
         path: disk.path.clone(),
         format: disk.format,
         source: disk_launch_source(disk.disk_type),
-        target: disk_target(disk, index),
+        target,
         bus: disk.bus.target_bus().to_string(),
         cache: disk.cache.map(VmDiskCache::as_xml),
         io: disk.io.map(|io| io.mode.as_xml()),
@@ -502,11 +503,47 @@ fn launch_disk_spec(
     }
 }
 
-fn disk_target(disk: &VmDisk, index: usize) -> String {
+fn disk_target_or(disk: &VmDisk, index: usize) -> String {
     disk.target.clone().unwrap_or_else(|| match disk.bus {
         VmDiskBus::VirtioBlk => domain_xml::virtio_blk_disk_target(index),
         VmDiskBus::VirtioScsi => domain_xml::virtio_scsi_disk_target(index),
     })
+}
+
+fn assign_manifest_disk_targets(manifest: &VmManifest) -> Result<Vec<String>> {
+    let mut occupied = BTreeSet::new();
+    if manifest.cdrom.is_some() {
+        occupied.insert(domain_xml::CDROM_TARGET.to_string());
+    }
+
+    manifest
+        .disks
+        .iter()
+        .enumerate()
+        .map(|(index, disk)| {
+            if let Some(target) = &disk.target {
+                if target.is_empty() {
+                    bail!("disk target must not be empty");
+                }
+                if !occupied.insert(target.clone()) {
+                    bail!("duplicate disk target {target}");
+                }
+                return Ok(target.clone());
+            }
+
+            let mut candidate = index;
+            loop {
+                let target = match disk.bus {
+                    VmDiskBus::VirtioBlk => domain_xml::virtio_blk_disk_target(candidate),
+                    VmDiskBus::VirtioScsi => domain_xml::virtio_scsi_disk_target(candidate),
+                };
+                if occupied.insert(target.clone()) {
+                    return Ok(target);
+                }
+                candidate += 1;
+            }
+        })
+        .collect()
 }
 
 fn dump(args: VmDumpArgs) -> Result<()> {
@@ -660,6 +697,14 @@ fn patch_disks(
         .iter()
         .filter_map(|entry| entry.disk.target.clone())
         .collect::<BTreeSet<_>>();
+    occupied_targets.extend(
+        devices
+            .children()
+            .filter(|child| {
+                child.has_tag_name("disk") && child.attribute("device") == Some("cdrom")
+            })
+            .filter_map(|node| disk_target_dev(node)),
+    );
     let mut output_targets = BTreeSet::new();
     let mut new_disks_xml = String::new();
 
@@ -674,7 +719,7 @@ fn patch_disks(
         reserve_output_disk_target(&target, &mut output_targets)?;
 
         let mut desired_disk = manifest_disk.clone();
-        desired_disk.target = Some(target);
+        desired_disk.target = Some(target.clone());
         if let Some(matched_index) = matched_index {
             domain_disks[matched_index].used = true;
             let domain_disk = domain_disks[matched_index].node;
@@ -690,7 +735,7 @@ fn patch_disks(
         } else {
             new_disks_xml.push_str(&domain_xml::build_disk_xml(&launch_disk_spec(
                 &desired_disk,
-                index,
+                target,
                 io_threads,
             )));
         }
@@ -926,8 +971,11 @@ fn build_patched_disk_xml(
     index: usize,
     io_threads: Option<VmIoThreads>,
 ) -> String {
-    let mut desired =
-        domain_xml::build_disk_xml(&launch_disk_spec(manifest_disk, index, io_threads));
+    let mut desired = domain_xml::build_disk_xml(&launch_disk_spec(
+        manifest_disk,
+        disk_target_or(manifest_disk, index),
+        io_threads,
+    ));
     let addresses = domain_disk
         .children()
         .filter(|child| child.has_tag_name("address"))
@@ -1731,24 +1779,9 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
         bail!("ioThreads requires at least one disk with io.mode threads");
     }
 
-    let mut targets = BTreeSet::new();
-    for (index, disk) in manifest.disks.iter().enumerate() {
-        let target = disk_target(disk, index);
-        if target.is_empty() {
-            bail!("disk target must not be empty");
-        }
-        if !targets.insert(target.clone()) {
-            bail!("duplicate disk target {target}");
-        }
-        match disk.bus {
-            VmDiskBus::VirtioBlk if !target.starts_with("vd") => {
-                bail!("virtio-blk disk target {target} must start with vd")
-            }
-            VmDiskBus::VirtioScsi if !target.starts_with("sd") => {
-                bail!("virtio-scsi disk target {target} must start with sd")
-            }
-            _ => {}
-        }
+    let targets = assign_manifest_disk_targets(manifest)?;
+    for (disk, target) in manifest.disks.iter().zip(&targets) {
+        validate_disk_target_for_bus(target, disk.bus)?;
         if !disk.path.exists() {
             bail!("disk {} does not exist", disk.path.display());
         }
@@ -1998,7 +2031,7 @@ fn parse_summary_definition(
                 disk_type: disk.disk_type,
                 path: disk.path.display().to_string(),
                 format: disk.format,
-                target: disk_target(&disk, index),
+                target: disk_target_or(&disk, index),
                 bus: disk.bus,
                 cache: disk.cache,
                 io: disk.io,
@@ -2565,7 +2598,7 @@ pub fn create_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> Result
         .memory_gib
         .checked_mul(1024)
         .context("memoryGiB is too large")?;
-    let xml = build_manifest_domain_xml(&manifest, &boot_devices, memory_mib);
+    let xml = build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)?;
 
     prepare_serial_log_path(manifest.serial_log.as_deref())?;
 
@@ -2594,7 +2627,7 @@ pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> Result<
 
     let current_xml = current_domain_xml(connect_uri, &manifest.name)?;
     let xml = if current_xml.is_empty() {
-        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)
+        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)?
     } else {
         patch_domain_xml(&current_xml, &manifest, &boot_devices, memory_mib)?
     };
@@ -3097,6 +3130,69 @@ mod tests {
     }
 
     #[test]
+    fn assign_targets_skips_cdrom_target() {
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/scsi.qcow2",
+            None,
+            VmDiskBus::VirtioScsi,
+        )]);
+        manifest.cdrom = Some(PathBuf::from("/isos/os.iso"));
+
+        let targets = assign_manifest_disk_targets(&manifest).expect("targets should assign");
+        assert_eq!(targets, vec!["sdb".to_string()]);
+    }
+
+    #[test]
+    fn assign_targets_rejects_explicit_cdrom_target_conflict() {
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/scsi.qcow2",
+            Some("sda"),
+            VmDiskBus::VirtioScsi,
+        )]);
+        manifest.cdrom = Some(PathBuf::from("/isos/os.iso"));
+
+        let err = assign_manifest_disk_targets(&manifest).unwrap_err();
+        assert!(err.to_string().contains("duplicate disk target sda"));
+    }
+
+    #[test]
+    fn builds_domain_xml_without_target_conflict_with_cdrom_and_scsi() {
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/scsi.qcow2",
+            None,
+            VmDiskBus::VirtioScsi,
+        )]);
+        manifest.cdrom = Some(PathBuf::from("/isos/os.iso"));
+
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Cdrom, BootDevice::Hd], 4096)
+            .expect("domain XML should build");
+
+        assert!(xml.contains("<target dev='sda' bus='sata'/>"));
+        assert!(xml.contains("<target dev='sdb' bus='scsi'/>"));
+        assert!(!xml.contains("<target dev='sda' bus='scsi'/>"));
+    }
+
+    #[test]
+    fn appended_scsi_disk_skips_existing_cdrom_target() {
+        let xml_with_cdrom = test_domain_xml().replace(
+            "    <interface type='network'>",
+            "    <disk type='file' device='cdrom'>\n      <driver name='qemu' type='raw'/>\n      <source file='/isos/os.iso'/>\n      <target dev='sda' bus='sata'/>\n      <readonly/>\n    </disk>\n    <interface type='network'>",
+        );
+        let manifest = test_manifest(vec![
+            test_file_disk("/vm/sys.qcow2", None, VmDiskBus::VirtioBlk),
+            test_file_disk("/vm/scsi.qcow2", None, VmDiskBus::VirtioScsi),
+        ]);
+
+        let patched = patch_domain_xml(&xml_with_cdrom, &manifest, &[BootDevice::Hd], 4096)
+            .expect("XML should patch");
+
+        assert!(
+            patched
+                .contains("<source file='/vm/scsi.qcow2'/>\n      <target dev='sdb' bus='scsi'/>")
+        );
+    }
+
+    #[test]
     fn builds_virtio_blk_iothread_mapping() {
         let mut manifest = test_manifest(vec![test_file_disk(
             "/vm/sys.qcow2",
@@ -3111,7 +3207,8 @@ mod tests {
             mode: VmDiskIoMode::Threads,
         });
 
-        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd], 4096);
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd], 4096)
+            .expect("domain XML should build");
 
         assert!(xml.contains("<iothreads>2</iothreads>"));
         assert!(xml.contains("<driver name='qemu' type='qcow2' io='threads' queues='4'>"));
@@ -3211,7 +3308,8 @@ disks:
 
         normalize_manifest_paths(&mut manifest, Path::new("/tmp/qtr"))
             .expect("manifest paths should normalize");
-        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd], 4096);
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd], 4096)
+            .expect("domain XML should build");
 
         assert_eq!(manifest.serial_log, None);
         assert!(xml.contains("<console type='pty'>"));
