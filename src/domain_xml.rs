@@ -317,3 +317,190 @@ fn escape_xml(value: &str) -> String {
         .replace('\"', "&quot;")
         .replace('\'', "&apos;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn disk_spec(target: &str, bus: &str) -> VmLaunchDiskSpec<'static> {
+        VmLaunchDiskSpec {
+            path: PathBuf::from("/var/lib/libvirt/images/sys.qcow2"),
+            format: DiskFormat::Qcow2,
+            source: VmLaunchDiskSource::File,
+            target: target.to_string(),
+            bus: bus.to_string(),
+            cache: None,
+            io: None,
+            io_threads: None,
+        }
+    }
+
+    #[test]
+    fn disk_suffix_follows_libvirt_device_naming() {
+        let cases = [
+            (0, "vda"),
+            (1, "vdb"),
+            (25, "vdz"),
+            (26, "vdaa"),
+            (27, "vdab"),
+            (51, "vdaz"),
+            (52, "vdba"),
+            (702, "vdaaa"), // 26 + 26*26 wraps to a third letter
+        ];
+        for (index, expected) in cases {
+            assert_eq!(virtio_blk_disk_target(index), expected, "index {index}");
+        }
+        assert_eq!(virtio_scsi_disk_target(0), "sda");
+        assert_eq!(virtio_scsi_disk_target(26), "sdaa");
+    }
+
+    #[test]
+    fn parses_boot_devices() {
+        assert_eq!(parse_boot_devices("hd").unwrap(), vec![BootDevice::Hd]);
+        assert_eq!(
+            parse_boot_devices("cdrom,hd").unwrap(),
+            vec![BootDevice::Cdrom, BootDevice::Hd]
+        );
+        assert_eq!(
+            parse_boot_devices(" hd , cdrom ").unwrap(),
+            vec![BootDevice::Hd, BootDevice::Cdrom]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_boot_devices() {
+        for value in ["", "hd,", ",hd", "hd,,cdrom", "foo", "HD"] {
+            assert!(parse_boot_devices(value).is_err(), "value {value:?}");
+        }
+    }
+
+    #[test]
+    fn escapes_all_xml_special_characters() {
+        assert_eq!(
+            escape_xml("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
+        );
+        assert_eq!(escape_xml("plain"), "plain");
+    }
+
+    #[test]
+    fn maps_queues_to_iothreads_round_robin() {
+        let xml = build_iothreads_mapping_xml(
+            VmLaunchIoThreadsSpec {
+                count: 2,
+                queues: 4,
+            },
+            "",
+        );
+        assert_eq!(
+            xml,
+            "<iothreads>\n  <iothread id='1'>\n    <queue id='0'/>\n    <queue id='2'/>\n  </iothread>\n  <iothread id='2'>\n    <queue id='1'/>\n    <queue id='3'/>\n  </iothread>\n</iothreads>\n"
+        );
+    }
+
+    #[test]
+    fn maps_fewer_queues_than_iothreads() {
+        let xml = build_iothreads_mapping_xml(
+            VmLaunchIoThreadsSpec {
+                count: 4,
+                queues: 2,
+            },
+            "",
+        );
+        assert!(xml.contains("<iothread id='1'>\n    <queue id='0'/>\n  </iothread>"));
+        assert!(xml.contains("<iothread id='2'>\n    <queue id='1'/>\n  </iothread>"));
+        assert!(xml.contains("<iothread id='3'>\n  </iothread>"));
+        assert!(xml.contains("<iothread id='4'>\n  </iothread>"));
+    }
+
+    #[test]
+    fn builds_disk_xml_for_file_and_block_sources() {
+        let file_xml = build_disk_xml(&disk_spec("vda", "virtio"));
+        assert!(file_xml.contains("<disk type='file' device='disk'>"));
+        assert!(file_xml.contains("<source file='/var/lib/libvirt/images/sys.qcow2'/>"));
+        assert!(file_xml.contains("<target dev='vda' bus='virtio'/>"));
+
+        let mut block = disk_spec("sda", "scsi");
+        block.source = VmLaunchDiskSource::Block;
+        block.path = PathBuf::from("/dev/disk/by-id/test");
+        let block_xml = build_disk_xml(&block);
+        assert!(block_xml.contains("<disk type='block' device='disk'>"));
+        assert!(block_xml.contains("<source dev='/dev/disk/by-id/test'/>"));
+    }
+
+    #[test]
+    fn disk_xml_escapes_paths() {
+        let mut disk = disk_spec("vda", "virtio");
+        disk.path = PathBuf::from("/tmp/a&b.qcow2");
+        let xml = build_disk_xml(&disk);
+        assert!(xml.contains("<source file='/tmp/a&amp;b.qcow2'/>"));
+    }
+
+    #[test]
+    fn domain_xml_only_adds_scsi_controller_for_scsi_disks() {
+        let boot_devices = [BootDevice::Hd];
+        let virtio_disks = [disk_spec("vda", "virtio")];
+        let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
+            name: "test",
+            memory_mib: 1024,
+            vcpus: 1,
+            io_threads: None,
+            disks: &virtio_disks,
+            cdrom: None,
+            serial_log: None,
+            boot_devices: &boot_devices,
+            network: "default",
+            graphics: GraphicsSpec {
+                mode: GraphicsMode::None,
+                vnc_listen: "127.0.0.1",
+                vnc_port: None,
+            },
+        });
+        assert!(!xml.contains("virtio-scsi"));
+
+        let scsi_disks = [disk_spec("sda", "scsi")];
+        let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
+            name: "test",
+            memory_mib: 1024,
+            vcpus: 1,
+            io_threads: None,
+            disks: &scsi_disks,
+            cdrom: None,
+            serial_log: None,
+            boot_devices: &boot_devices,
+            network: "default",
+            graphics: GraphicsSpec {
+                mode: GraphicsMode::None,
+                vnc_listen: "127.0.0.1",
+                vnc_port: None,
+            },
+        });
+        assert!(xml.contains("<controller type='scsi' index='0' model='virtio-scsi'/>"));
+    }
+
+    #[test]
+    fn graphics_xml_sets_autoport_only_without_explicit_port() {
+        let spec = GraphicsSpec {
+            mode: GraphicsMode::Vnc,
+            vnc_listen: "127.0.0.1",
+            vnc_port: None,
+        };
+        let xml = build_graphics_xml(spec);
+        assert!(xml.contains("port='-1' autoport='yes'"));
+
+        let spec = GraphicsSpec {
+            mode: GraphicsMode::Vnc,
+            vnc_listen: "127.0.0.1",
+            vnc_port: Some(5901),
+        };
+        let xml = build_graphics_xml(spec);
+        assert!(xml.contains("port='5901' autoport='no'"));
+
+        let spec = GraphicsSpec {
+            mode: GraphicsMode::None,
+            vnc_listen: "127.0.0.1",
+            vnc_port: None,
+        };
+        assert!(build_graphics_xml(spec).is_empty());
+    }
+}

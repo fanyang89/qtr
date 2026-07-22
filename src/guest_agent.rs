@@ -553,3 +553,65 @@ fn agent_command_timeout_secs(timeout: Duration) -> i32 {
         .saturating_add(u64::from(timeout.subsec_nanos() > 0));
     rounded_secs.clamp(1, i32::MAX as u64) as i32
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exec_status(exitcode: Option<i32>, signal: Option<i32>) -> GuestExecStatusReturn {
+        GuestExecStatusReturn {
+            exited: true,
+            exitcode,
+            signal,
+            out_data: None,
+            err_data: None,
+        }
+    }
+
+    #[test]
+    fn exec_status_prefers_exitcode() {
+        assert_eq!(
+            exec_status_exitcode(&exec_status(Some(3), None)).unwrap(),
+            3
+        );
+        assert_eq!(
+            exec_status_exitcode(&exec_status(Some(0), Some(9))).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn exec_status_maps_signal_to_shell_convention() {
+        assert_eq!(
+            exec_status_exitcode(&exec_status(None, Some(9))).unwrap(),
+            137
+        );
+        assert_eq!(
+            exec_status_exitcode(&exec_status(None, Some(15))).unwrap(),
+            143
+        );
+    }
+
+    #[test]
+    fn exec_status_rejects_missing_outcome() {
+        assert!(exec_status_exitcode(&exec_status(None, None)).is_err());
+    }
+
+    #[test]
+    fn decode_output_handles_absent_and_valid_data() {
+        assert_eq!(decode_output(None, "stdout").unwrap(), Vec::<u8>::new());
+        assert_eq!(decode_output(Some("aGVsbG8="), "stdout").unwrap(), b"hello");
+        assert!(decode_output(Some("!!!not-base64!!!"), "stderr").is_err());
+    }
+
+    #[test]
+    fn agent_timeout_rounds_up_and_clamps() {
+        assert_eq!(agent_command_timeout_secs(Duration::ZERO), 1);
+        assert_eq!(agent_command_timeout_secs(Duration::from_secs(1)), 1);
+        assert_eq!(agent_command_timeout_secs(Duration::from_millis(1500)), 2);
+        assert_eq!(
+            agent_command_timeout_secs(Duration::from_secs(u64::MAX)),
+            i32::MAX
+        );
+    }
+}

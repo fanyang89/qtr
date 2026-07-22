@@ -3307,4 +3307,172 @@ vncListen: 127.0.0.1
             io: None,
         }
     }
+
+    struct TestDiskDir(PathBuf);
+
+    impl TestDiskDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("qtr-test-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&dir).expect("failed to create temp test dir");
+            Self(dir)
+        }
+
+        fn create_disk(&self, name: &str) -> PathBuf {
+            let path = self.0.join(name);
+            fs::write(&path, b"").expect("failed to create temp disk file");
+            path
+        }
+    }
+
+    impl Drop for TestDiskDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn validate_manifest_accepts_valid_manifest() {
+        let dir = TestDiskDir::new();
+        let disk = dir.create_disk("sys.qcow2");
+        let manifest = test_manifest(vec![test_file_disk(
+            disk.to_str().unwrap(),
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        assert!(validate_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_empty_disks() {
+        let manifest = test_manifest(vec![]);
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("at least one disk"));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_zero_iothreads() {
+        let dir = TestDiskDir::new();
+        let disk = dir.create_disk("sys.qcow2");
+
+        let mut manifest = test_manifest(vec![test_file_disk(
+            disk.to_str().unwrap(),
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.io_threads = Some(VmIoThreads {
+            count: 0,
+            queues: None,
+        });
+        assert!(validate_manifest(&manifest).is_err());
+
+        let mut manifest = test_manifest(vec![test_file_disk(
+            disk.to_str().unwrap(),
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.io_threads = Some(VmIoThreads {
+            count: 1,
+            queues: Some(0),
+        });
+        assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn validate_manifest_requires_iothreads_pairing() {
+        let dir = TestDiskDir::new();
+        let disk = dir.create_disk("sys.qcow2");
+
+        let mut threads_disk = test_file_disk(disk.to_str().unwrap(), None, VmDiskBus::VirtioBlk);
+        threads_disk.io = Some(VmDiskIoConfig {
+            mode: VmDiskIoMode::Threads,
+        });
+        let manifest = test_manifest(vec![threads_disk]);
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("requires ioThreads"));
+
+        let mut manifest = test_manifest(vec![test_file_disk(
+            disk.to_str().unwrap(),
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.io_threads = Some(VmIoThreads {
+            count: 2,
+            queues: None,
+        });
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("io.mode threads"));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_duplicate_targets() {
+        let dir = TestDiskDir::new();
+        let first = dir.create_disk("a.qcow2");
+        let second = dir.create_disk("b.qcow2");
+        let manifest = test_manifest(vec![
+            test_file_disk(first.to_str().unwrap(), Some("vda"), VmDiskBus::VirtioBlk),
+            test_file_disk(second.to_str().unwrap(), Some("vda"), VmDiskBus::VirtioBlk),
+        ]);
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("duplicate disk target vda"));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_mismatched_target_prefix() {
+        let dir = TestDiskDir::new();
+        let blk_disk = dir.create_disk("blk.qcow2");
+        let manifest = test_manifest(vec![test_file_disk(
+            blk_disk.to_str().unwrap(),
+            Some("sda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("must start with vd"));
+
+        let scsi_disk = dir.create_disk("scsi.qcow2");
+        let manifest = test_manifest(vec![test_file_disk(
+            scsi_disk.to_str().unwrap(),
+            Some("vda"),
+            VmDiskBus::VirtioScsi,
+        )]);
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("must start with sd"));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_missing_disk_path() {
+        let manifest = test_manifest(vec![test_file_disk(
+            "/nonexistent/qtr-missing-disk.qcow2",
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_relative_block_disk_path() {
+        let name = format!("qtr-test-{}.raw", uuid::Uuid::new_v4());
+        fs::write(&name, b"").expect("failed to create relative test file");
+        let mut disk = test_file_disk(&name, None, VmDiskBus::VirtioScsi);
+        disk.disk_type = VmDiskType::Block;
+        disk.format = DiskFormat::Raw;
+        let manifest = test_manifest(vec![disk]);
+        let err = validate_manifest(&manifest).unwrap_err();
+        let _ = fs::remove_file(&name);
+        assert!(err.to_string().contains("absolute path"));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_missing_cdrom() {
+        let dir = TestDiskDir::new();
+        let disk = dir.create_disk("sys.qcow2");
+        let mut manifest = test_manifest(vec![test_file_disk(
+            disk.to_str().unwrap(),
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.cdrom = Some(PathBuf::from("/nonexistent/qtr-missing.iso"));
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+    }
 }

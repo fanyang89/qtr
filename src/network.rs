@@ -175,3 +175,68 @@ fn escape_xml(value: &str) -> String {
         .replace('\"', "&quot;")
         .replace('\'', "&apos;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_args() -> NetCreateArgs {
+        NetCreateArgs {
+            name: "qtr-test".to_string(),
+            bridge: None,
+            address: "192.168.100.1".to_string(),
+            netmask: "255.255.255.0".to_string(),
+            dhcp_start: "192.168.100.2".to_string(),
+            dhcp_end: "192.168.100.254".to_string(),
+            start: false,
+            autostart: false,
+            connect_uri: "qemu:///system".to_string(),
+        }
+    }
+
+    #[test]
+    fn validate_ipv4_accepts_valid_addresses() {
+        assert!(validate_ipv4("address", "192.168.100.1").is_ok());
+        assert!(validate_ipv4("netmask", "255.255.255.0").is_ok());
+        assert!(validate_ipv4("address", "0.0.0.0").is_ok());
+    }
+
+    #[test]
+    fn validate_ipv4_rejects_invalid_addresses() {
+        for value in [
+            "",
+            "abc",
+            "192.168.100.256",
+            "192.168.100",
+            "::1",
+            "192.168.100.1/24",
+        ] {
+            assert!(validate_ipv4("address", value).is_err(), "value {value:?}");
+        }
+        let err = validate_ipv4("dhcp-start", "abc").unwrap_err();
+        assert!(err.to_string().contains("dhcp-start"));
+    }
+
+    #[test]
+    fn nat_network_xml_contains_ip_and_dhcp_range() {
+        let xml = build_nat_network_xml(&create_args());
+        assert!(xml.contains("<name>qtr-test</name>"));
+        assert!(xml.contains("<forward mode='nat'/>"));
+        assert!(xml.contains("<ip address='192.168.100.1' netmask='255.255.255.0'>"));
+        assert!(xml.contains("<range start='192.168.100.2' end='192.168.100.254'/>"));
+        assert!(!xml.contains("<bridge"));
+    }
+
+    #[test]
+    fn nat_network_xml_includes_bridge_and_escapes_values() {
+        let mut args = create_args();
+        args.bridge = Some("virbr1".to_string());
+        let xml = build_nat_network_xml(&args);
+        assert!(xml.contains("<bridge name='virbr1'/>"));
+
+        let mut args = create_args();
+        args.name = "a&b".to_string();
+        let xml = build_nat_network_xml(&args);
+        assert!(xml.contains("<name>a&amp;b</name>"));
+    }
+}
