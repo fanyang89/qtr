@@ -1716,7 +1716,12 @@ fn current_domain_xml(connect_uri: &str, name: &str) -> Result<String> {
     let conn = connect_read_only(connect_uri)?;
     let domain = match Domain::lookup_by_name(&conn, name) {
         Ok(domain) => domain,
-        Err(_) => return Ok(String::new()),
+        Err(err) if err.code() == virt::error::ErrorNumber::NoDomain => {
+            return Ok(String::new());
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to look up domain {name}"));
+        }
     };
 
     domain
