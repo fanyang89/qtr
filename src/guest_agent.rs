@@ -14,6 +14,8 @@ pub struct GuestExecResult {
     pub exitcode: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 #[derive(Debug)]
@@ -100,6 +102,10 @@ struct GuestExecStatusReturn {
     out_data: Option<String>,
     #[serde(rename = "err-data")]
     err_data: Option<String>,
+    #[serde(default, rename = "out-truncated")]
+    out_truncated: bool,
+    #[serde(default, rename = "err-truncated")]
+    err_truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,8 +183,35 @@ pub fn run_command_with_deadline(
     deadline: &GuestAgentDeadline,
 ) -> Result<GuestExecResult> {
     let child = start_command(domain, command, true, deadline)?;
+    let result = wait_exec_status(domain, child.pid, deadline);
+    if result.is_err()
+        && deadline.expired()
+        && let Err(terminate_error) = terminate_command(domain, child.pid)
+    {
+        return result.with_context(|| {
+            format!(
+                "failed to terminate timed-out guest command pid {}: {terminate_error}",
+                child.pid
+            )
+        });
+    }
 
-    wait_exec_status(domain, child.pid, deadline)
+    result
+}
+
+pub fn terminate_command(domain: &Domain, pid: i64) -> Result<()> {
+    let command =
+        format!("kill -TERM -{pid} 2>/dev/null || true; kill -TERM {pid} 2>/dev/null || true");
+    let deadline = GuestAgentDeadline::new(Duration::from_secs(10));
+    let child = start_command(domain, &command, false, &deadline)
+        .with_context(|| format!("failed to start termination command for guest pid {pid}"))?;
+    let result = wait_exec_status(domain, child.pid, &deadline)
+        .with_context(|| format!("failed to terminate guest process {pid}"))?;
+    if result.exitcode != 0 {
+        bail!("guest termination command exited with {}", result.exitcode);
+    }
+
+    Ok(())
 }
 
 pub fn start_command(
@@ -259,7 +292,7 @@ pub fn write_file_with_deadline(
         }
         flush_file(domain, handle, deadline)
     })();
-    let close_result = close_file(domain, handle, deadline);
+    let close_result = close_file_after_operation(domain, handle);
 
     write_result.and(close_result)
 }
@@ -281,7 +314,7 @@ pub fn read_file_with_deadline(
         }
         Ok(contents)
     })();
-    let close_result = close_file(domain, handle, deadline);
+    let close_result = close_file_after_operation(domain, handle);
     let contents = read_result?;
     close_result?;
 
@@ -300,7 +333,7 @@ pub fn read_file_from(
         seek_file(domain, handle, offset, deadline)?;
         read_file_chunk(domain, handle, count, deadline)
     })();
-    let close_result = close_file(domain, handle, deadline);
+    let close_result = close_file_after_operation(domain, handle);
     let chunk = read_result?;
     close_result?;
 
@@ -442,6 +475,11 @@ fn close_file(domain: &Domain, handle: i64, deadline: &GuestAgentDeadline) -> Re
     Ok(())
 }
 
+fn close_file_after_operation(domain: &Domain, handle: i64) -> Result<()> {
+    let deadline = GuestAgentDeadline::new(Duration::from_secs(10));
+    close_file(domain, handle, &deadline)
+}
+
 fn wait_exec_status(
     domain: &Domain,
     pid: i64,
@@ -463,6 +501,8 @@ fn wait_exec_status(
                 exitcode,
                 stdout,
                 stderr,
+                stdout_truncated: status.result.out_truncated,
+                stderr_truncated: status.result.err_truncated,
             });
         }
 
@@ -559,6 +599,8 @@ mod tests {
             signal,
             out_data: None,
             err_data: None,
+            out_truncated: false,
+            err_truncated: false,
         }
     }
 
@@ -596,6 +638,17 @@ mod tests {
         assert_eq!(decode_output(None, "stdout").unwrap(), Vec::<u8>::new());
         assert_eq!(decode_output(Some("aGVsbG8="), "stdout").unwrap(), b"hello");
         assert!(decode_output(Some("!!!not-base64!!!"), "stderr").is_err());
+    }
+
+    #[test]
+    fn parses_output_truncation_flags() {
+        let response: GuestExecStatusResponse = serde_json::from_str(
+            r#"{"return":{"exited":true,"exitcode":0,"out-truncated":true,"err-truncated":true}}"#,
+        )
+        .unwrap();
+
+        assert!(response.result.out_truncated);
+        assert!(response.result.err_truncated);
     }
 
     #[test]

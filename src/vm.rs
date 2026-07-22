@@ -280,6 +280,8 @@ struct VmExecOutput {
     elapsed_ms: u128,
     stdout: String,
     stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2265,7 +2267,7 @@ fn cp(args: VmCpArgs) -> Result<()> {
     match (source, dest) {
         (VmCopyEndpoint::Host(source), VmCopyEndpoint::Guest(dest)) => {
             if args.parents {
-                create_guest_parent_dir(&domain, &dest)?;
+                create_guest_parent_dir(&domain, &dest, &deadline)?;
             }
             let contents = fs::read(&source)
                 .with_context(|| format!("failed to read {}", source.display()))?;
@@ -2311,7 +2313,11 @@ fn create_host_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn create_guest_parent_dir(domain: &Domain, path: &str) -> Result<()> {
+fn create_guest_parent_dir(
+    domain: &Domain,
+    path: &str,
+    deadline: &guest_agent::GuestAgentDeadline,
+) -> Result<()> {
     let Some(parent) = Path::new(path)
         .parent()
         .map(|path| path.to_string_lossy().into_owned())
@@ -2321,7 +2327,7 @@ fn create_guest_parent_dir(domain: &Domain, path: &str) -> Result<()> {
     };
 
     let command = format!("mkdir -p {}", shell_quote(&parent));
-    let result = guest_agent::run_command(domain, &command, Duration::from_secs(30))
+    let result = guest_agent::run_command_with_deadline(domain, &command, deadline)
         .with_context(|| format!("failed to create guest directory {parent}"))?;
     if result.exitcode != 0 {
         bail!(
@@ -2394,6 +2400,9 @@ fn exec(args: VmExecArgs) -> Result<()> {
 
     let result = exec_result
         .with_context(|| format!("failed to run guest command in domain {}", args.name))?;
+    if result.stdout_truncated || result.stderr_truncated {
+        eprintln!("[qtr] warning: qemu guest agent truncated captured command output");
+    }
 
     if let Some(output_path) = &args.output {
         let output = VmExecOutput {
@@ -2406,6 +2415,8 @@ fn exec(args: VmExecArgs) -> Result<()> {
             elapsed_ms,
             stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
+            stdout_truncated: result.stdout_truncated,
+            stderr_truncated: result.stderr_truncated,
         };
         write_exec_output(output_path, &output)?;
     } else {
@@ -2505,6 +2516,8 @@ fn stream_guest_command(
                         .context("guest command exited without exit code")?,
                     stdout: Vec::new(),
                     stderr: Vec::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                 });
             }
 
@@ -2555,8 +2568,7 @@ fn drain_guest_output_stream<W: Write>(
 }
 
 fn terminate_guest_command(domain: &Domain, pid: i64) {
-    let command = format!("kill -TERM -{pid} 2>/dev/null; kill -TERM {pid} 2>/dev/null");
-    if let Err(err) = guest_agent::run_command(domain, &command, Duration::from_secs(10)) {
+    if let Err(err) = guest_agent::terminate_command(domain, pid) {
         eprintln!("[qtr] warning: failed to terminate guest process {pid}: {err}");
     }
 }
