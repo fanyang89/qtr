@@ -549,7 +549,7 @@ pub struct VmExecArgs {
     #[arg(long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
-    /// Shell command executed inside the guest via /bin/sh -lc.
+    /// Command executed inside the guest; each argument is passed verbatim (use sh -c for shell features).
     #[arg(last = true)]
     pub command: Vec<String>,
 }

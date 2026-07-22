@@ -27,15 +27,15 @@ tasks:
   prepare-vm-filesystem:
     desc: Prepare the kworker e2e guest filesystem
     cmds:
-      - qtr vm exec {{.VM_NAME}} -- "if mountpoint -q {{.MOUNT_POINT}}; then sudo umount {{.MOUNT_POINT}}; fi"
-      - qtr vm exec {{.VM_NAME}} -- "if sudo vgs --noheadings {{.VG_NAME}} >/dev/null 2>&1; then sudo vgremove -ff -y {{.VG_NAME}}; fi"
-      - qtr vm exec {{.VM_NAME}} -- "sudo wipefs -a {{.DATA_DEVICE}}"
-      - qtr vm exec {{.VM_NAME}} -- "sudo pvcreate -ff -y {{.DATA_DEVICE}}"
-      - qtr vm exec {{.VM_NAME}} -- "sudo vgcreate {{.VG_NAME}} {{.DATA_DEVICE}}"
-      - qtr vm exec {{.VM_NAME}} -- "sudo lvcreate -y -n {{.LV_NAME}} -l 100%FREE {{.VG_NAME}}"
-      - qtr vm exec {{.VM_NAME}} -- "sudo mkfs.xfs -f /dev/{{.VG_NAME}}/{{.LV_NAME}}"
-      - qtr vm exec {{.VM_NAME}} -- "sudo mkdir -p {{.MOUNT_POINT}}"
-      - qtr vm exec {{.VM_NAME}} -- "sudo mount -o {{.MOUNT_OPTIONS}} /dev/{{.VG_NAME}}/{{.LV_NAME}} {{.MOUNT_POINT}}"
+      - qtr vm exec {{.VM_NAME}} -- sh -c 'if mountpoint -q {{.MOUNT_POINT}}; then sudo umount {{.MOUNT_POINT}}; fi'
+      - qtr vm exec {{.VM_NAME}} -- sh -c 'if sudo vgs --noheadings {{.VG_NAME}} >/dev/null 2>&1; then sudo vgremove -ff -y {{.VG_NAME}}; fi'
+      - qtr vm exec {{.VM_NAME}} -- sudo wipefs -a {{.DATA_DEVICE}}
+      - qtr vm exec {{.VM_NAME}} -- sudo pvcreate -ff -y {{.DATA_DEVICE}}
+      - qtr vm exec {{.VM_NAME}} -- sudo vgcreate {{.VG_NAME}} {{.DATA_DEVICE}}
+      - qtr vm exec {{.VM_NAME}} -- sudo lvcreate -y -n {{.LV_NAME}} -l 100%FREE {{.VG_NAME}}
+      - qtr vm exec {{.VM_NAME}} -- sudo mkfs.xfs -f /dev/{{.VG_NAME}}/{{.LV_NAME}}
+      - qtr vm exec {{.VM_NAME}} -- sudo mkdir -p {{.MOUNT_POINT}}
+      - qtr vm exec {{.VM_NAME}} -- sudo mount -o {{.MOUNT_OPTIONS}} /dev/{{.VG_NAME}}/{{.LV_NAME}} {{.MOUNT_POINT}}
 
   run-vm-fio:
     desc: Run the kworker e2e fio workload

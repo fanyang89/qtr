@@ -2338,7 +2338,12 @@ fn exec(args: VmExecArgs) -> Result<()> {
                 Some(guest_path),
             )
         }
-        None => (VmExecMode::Command, args.command.join(" "), None, None),
+        None => (
+            VmExecMode::Command,
+            join_command_args(&args.command),
+            None,
+            None,
+        ),
     };
 
     let started = Instant::now();
@@ -2551,6 +2556,13 @@ fn write_exec_output(path: &Path, output: &VmExecOutput) -> Result<()> {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn join_command_args(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn start_by_name(connect_uri: &str, name: &str) -> Result<()> {
@@ -3603,6 +3615,25 @@ vncListen: 127.0.0.1
         let err = validate_manifest(&manifest).unwrap_err();
         let _ = fs::remove_file(&name);
         assert!(err.to_string().contains("absolute path"));
+    }
+
+    #[test]
+    fn join_command_args_quotes_each_argument() {
+        let args = vec!["touch".to_string(), "a b".to_string()];
+        assert_eq!(join_command_args(&args), "'touch' 'a b'");
+
+        let args = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo '$HOME' | head".to_string(),
+        ];
+        assert_eq!(
+            join_command_args(&args),
+            "'sh' '-c' 'echo '\\''$HOME'\\'' | head'"
+        );
+
+        let args = vec!["uname".to_string(), "-a".to_string()];
+        assert_eq!(join_command_args(&args), "'uname' '-a'");
     }
 
     #[test]
