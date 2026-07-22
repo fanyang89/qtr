@@ -7,7 +7,7 @@ use axum::{
         Path, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -77,8 +77,14 @@ where
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
+        tracing::error!(error = ?self.0, %status, "request failed");
+        let message = match status {
+            StatusCode::NOT_FOUND => "VM not found",
+            StatusCode::CONFLICT => "VM state conflicts with the request",
+            _ => "internal server error",
+        };
         let body = Json(ErrorBody {
-            error: self.0.to_string(),
+            error: message.to_string(),
         });
         (status, body).into_response()
     }
@@ -135,6 +141,13 @@ pub fn run(args: WebArgs) -> Result<()> {
 
 async fn run_async(args: WebArgs) -> Result<()> {
     let listen = args.listen;
+    if !listen.ip().is_loopback() {
+        let warning = format!(
+            "qtr web API has no authentication; binding to {listen} exposes full VM control to the network"
+        );
+        eprintln!("[qtr] WARNING: {warning}");
+        tracing::warn!(warning);
+    }
     let app = app(args.connect_uri, args.web_dir);
     let listener = TcpListener::bind(listen)
         .await
@@ -261,8 +274,23 @@ async fn undefine_vm(
 async fn vnc_ws(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        let host = headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !origin_matches_host(origin, host) {
+            tracing::warn!(%origin, %host, "rejected cross-origin VNC WebSocket");
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+
     let connect_uri = state.connect_uri;
     ws.on_upgrade(move |socket| async move {
         if let Err(error) = handle_vnc_upgrade(socket, connect_uri, name).await {
@@ -270,6 +298,15 @@ async fn vnc_ws(
         }
     })
     .into_response()
+}
+
+fn origin_matches_host(origin: &str, host: &str) -> bool {
+    let origin_authority = origin
+        .trim_end_matches('/')
+        .split("://")
+        .nth(1)
+        .unwrap_or(origin);
+    !host.is_empty() && origin_authority.eq_ignore_ascii_case(host)
 }
 
 async fn run_libvirt<T, F>(task: F) -> AppResult<T>
@@ -413,4 +450,43 @@ fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "qtr=info,tower_http=info".into());
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origin_matches_host_accepts_same_origin() {
+        assert!(origin_matches_host(
+            "http://127.0.0.1:8080",
+            "127.0.0.1:8080"
+        ));
+        assert!(origin_matches_host(
+            "https://vm.example.com",
+            "vm.example.com"
+        ));
+        assert!(origin_matches_host(
+            "http://LOCALHOST:8080/",
+            "localhost:8080"
+        ));
+        assert!(origin_matches_host("http://[::1]:8080", "[::1]:8080"));
+    }
+
+    #[test]
+    fn origin_matches_host_rejects_foreign_origins() {
+        assert!(!origin_matches_host(
+            "http://evil.example.com",
+            "127.0.0.1:8080"
+        ));
+        assert!(!origin_matches_host(
+            "http://127.0.0.1:8080.evil.example.com",
+            "127.0.0.1:8080"
+        ));
+        assert!(!origin_matches_host(
+            "http://127.0.0.1:9090",
+            "127.0.0.1:8080"
+        ));
+        assert!(!origin_matches_host("http://127.0.0.1:8080", ""));
+    }
 }
