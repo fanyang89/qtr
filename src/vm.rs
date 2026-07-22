@@ -3051,13 +3051,13 @@ mod tests {
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2'/>
-      <source file='/home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2'/>
+      <source file='/fixtures/qtr/disks/sys.qcow2'/>
       <target dev='vda' bus='virtio'/>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
     </disk>
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
-      <source file='/home/fanmi/workspace/qtr/.tmp/iso/CentOS-7-x86_64-DVD-2207-02.iso'/>
+      <source file='/fixtures/qtr/iso/CentOS-7-x86_64-DVD-2207-02.iso'/>
       <target dev='sda' bus='sata'/>
       <readonly/>
       <address type='drive' controller='0' bus='0' target='0' unit='0'/>
@@ -3072,13 +3072,13 @@ mod tests {
       <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
     </interface>
     <serial type='file'>
-      <source path='/home/fanmi/workspace/qtr/.tmp/logs/install-os.serial.log'/>
+      <source path='/fixtures/qtr/logs/install-os.serial.log'/>
       <target type='isa-serial' port='0'>
         <model name='isa-serial'/>
       </target>
     </serial>
     <console type='file'>
-      <source path='/home/fanmi/workspace/qtr/.tmp/logs/install-os.serial.log'/>
+      <source path='/fixtures/qtr/logs/install-os.serial.log'/>
       <target type='serial' port='0'/>
     </console>
     <channel type='unix'>
@@ -3103,7 +3103,7 @@ mod tests {
             io_threads: None,
             disks: vec![VmDisk {
                 disk_type: VmDiskType::File,
-                path: PathBuf::from("/home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2"),
+                path: PathBuf::from("/fixtures/qtr/disks/sys.qcow2"),
                 format: DiskFormat::Qcow2,
                 target: Some("vda".to_string()),
                 bus: VmDiskBus::VirtioBlk,
@@ -3113,7 +3113,7 @@ mod tests {
                 }),
             }],
             cdrom: Some(PathBuf::from(
-                "/home/fanmi/workspace/qtr/.tmp/iso/CentOS-7-x86_64-DVD-2207-02.iso",
+                "/fixtures/qtr/iso/CentOS-7-x86_64-DVD-2207-02.iso",
             )),
             boot: Some(vec!["hd".to_string()]),
             memory_gib: 4,
@@ -3122,9 +3122,7 @@ mod tests {
             graphics: GraphicsMode::Vnc,
             vnc_listen: "0.0.0.0".to_string(),
             vnc_port: None,
-            serial_log: Some(PathBuf::from(
-                "/home/fanmi/workspace/qtr/.tmp/logs/install-os.serial.log",
-            )),
+            serial_log: Some(PathBuf::from("/fixtures/qtr/logs/install-os.serial.log")),
         };
         let boot_devices = [BootDevice::Hd];
 

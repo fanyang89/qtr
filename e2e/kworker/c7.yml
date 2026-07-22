@@ -5,7 +5,7 @@ memoryGiB: 8
 disks:
   - bus: virtio-blk
     format: qcow2
-    path: /home/fanmi/workspace/qtr/.tmp/disks/sys.qcow2
+    path: ../../.tmp/disks/sys.qcow2
     target: vda
     type: file
   - bus: virtio-blk
@@ -21,4 +21,4 @@ boot:
 graphics: vnc
 vncListen: 0.0.0.0
 network: default
-serialLog: /home/fanmi/workspace/qtr/.tmp/logs/install-os.serial.log
+serialLog: ../../.tmp/logs/install-os.serial.log
