@@ -330,8 +330,31 @@ fn save_state(path: &Path, state: &StorageState) -> Result<()> {
     }
 
     let content = serde_yaml::to_string(state).context("failed to serialize storage config")?;
-    fs::write(path, content)
-        .with_context(|| format!("failed to write storage config {}", path.display()))
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("storage.yaml");
+    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}", uuid::Uuid::new_v4()));
+
+    let write_result = fs::write(&temp_path, content);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to write storage config {}", temp_path.display()));
+    }
+
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to replace storage config {} with {}",
+                path.display(),
+                temp_path.display()
+            )
+        });
+    }
+
+    Ok(())
 }
 
 fn find_backend<'a>(state: &'a StorageState, name: &str) -> Result<&'a StorageBackend> {
@@ -626,5 +649,60 @@ mod tests {
         assert_eq!(state.backends.len(), 1);
         assert_eq!(state.backends[0].name, "lab-san");
         assert_eq!(state.backends[0].driver.name(), "iscsi");
+    }
+
+    #[test]
+    fn save_state_round_trips_without_leaving_temp_files() {
+        let dir = std::env::temp_dir().join(format!("qtr-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("nested").join("storage.yaml");
+        let state = StorageState {
+            backends: vec![StorageBackend {
+                name: "lab-san".to_string(),
+                driver: StorageDriver::Iscsi {
+                    address: "10.0.0.10".to_string(),
+                    port: 3260,
+                    volumes: Vec::new(),
+                },
+            }],
+        };
+
+        save_state(&path, &state).expect("state should save");
+        let loaded = load_state(&path).expect("state should load");
+
+        assert_eq!(loaded.backends.len(), 1);
+        assert_eq!(loaded.backends[0].name, "lab-san");
+        let leftovers = fs::read_dir(dir.join("nested"))
+            .expect("state dir should exist")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name() != "storage.yaml")
+            .count();
+        assert_eq!(leftovers, 0, "no temp files should remain");
+
+        fs::remove_dir_all(&dir).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn save_state_replaces_existing_file() {
+        let dir = std::env::temp_dir().join(format!("qtr-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir should create");
+        let path = dir.join("storage.yaml");
+        fs::write(&path, "backends: []\n").expect("seed state should write");
+
+        let state = StorageState {
+            backends: vec![StorageBackend {
+                name: "lab-san".to_string(),
+                driver: StorageDriver::Iscsi {
+                    address: "10.0.0.10".to_string(),
+                    port: 3260,
+                    volumes: Vec::new(),
+                },
+            }],
+        };
+        save_state(&path, &state).expect("state should save");
+        let loaded = load_state(&path).expect("state should load");
+
+        assert_eq!(loaded.backends.len(), 1);
+
+        fs::remove_dir_all(&dir).expect("temp dir should clean up");
     }
 }
