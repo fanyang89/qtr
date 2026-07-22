@@ -236,6 +236,38 @@ pub struct VmSummaryDisk {
     pub io: Option<VmDiskIoConfig>,
 }
 
+#[derive(Debug)]
+pub enum VmApiError {
+    InvalidRequest(anyhow::Error),
+    NotFound(String),
+    Conflict(anyhow::Error),
+    Internal(anyhow::Error),
+}
+
+pub type VmApiResult<T> = std::result::Result<T, VmApiError>;
+
+impl std::fmt::Display for VmApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRequest(error) | Self::Conflict(error) | Self::Internal(error) => {
+                error.fmt(formatter)
+            }
+            Self::NotFound(name) => write!(formatter, "domain {name} not found"),
+        }
+    }
+}
+
+impl std::error::Error for VmApiError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidRequest(error) | Self::Conflict(error) | Self::Internal(error) => {
+                Some(error.as_ref())
+            }
+            Self::NotFound(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct VmExecOutput {
@@ -1872,10 +1904,10 @@ pub fn list_summaries(connect_uri: &str) -> Result<Vec<VmSummary>> {
     Ok(summaries)
 }
 
-pub fn get_summary(connect_uri: &str, name: &str) -> Result<VmSummary> {
-    let conn = connect_read_only(connect_uri)?;
-    let domain = lookup_domain(&conn, name)?;
-    domain_summary(&domain)
+pub fn get_summary(connect_uri: &str, name: &str) -> VmApiResult<VmSummary> {
+    let conn = connect_read_only(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    domain_summary(&domain).map_err(VmApiError::Internal)
 }
 
 fn domain_summary(domain: &Domain) -> Result<VmSummary> {
@@ -2565,38 +2597,41 @@ fn join_command_args(args: &[String]) -> String {
         .join(" ")
 }
 
-pub fn start_by_name(connect_uri: &str, name: &str) -> Result<()> {
-    let conn = connect(connect_uri)?;
-    let domain = lookup_domain(&conn, name)?;
-    start_domain(&domain, name)
+pub fn start_by_name(connect_uri: &str, name: &str) -> VmApiResult<()> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    start_domain(&domain, name).map_err(VmApiError::Internal)
 }
 
-pub fn shutdown_by_name(connect_uri: &str, name: &str, wait: bool) -> Result<()> {
-    let conn = connect(connect_uri)?;
-    let domain = lookup_domain(&conn, name)?;
+pub fn shutdown_by_name(connect_uri: &str, name: &str, wait: bool) -> VmApiResult<()> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
     if !domain
         .is_active()
-        .with_context(|| format!("failed to query domain {name} state"))?
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
     {
         return Ok(());
     }
 
     domain
         .shutdown()
-        .with_context(|| format!("failed to request shutdown for domain {name}"))?;
+        .with_context(|| format!("failed to request shutdown for domain {name}"))
+        .map_err(VmApiError::Internal)?;
     if wait {
-        wait_shutdown_domain(&domain, name, None)?;
+        wait_shutdown_domain(&domain, name, None).map_err(VmApiError::Internal)?;
     }
 
     Ok(())
 }
 
-pub fn destroy_by_name(connect_uri: &str, name: &str) -> Result<()> {
-    let conn = connect(connect_uri)?;
-    let domain = lookup_domain(&conn, name)?;
+pub fn destroy_by_name(connect_uri: &str, name: &str) -> VmApiResult<()> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
     if !domain
         .is_active()
-        .with_context(|| format!("failed to query domain {name} state"))?
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
     {
         return Ok(());
     }
@@ -2604,79 +2639,101 @@ pub fn destroy_by_name(connect_uri: &str, name: &str) -> Result<()> {
     domain
         .destroy()
         .with_context(|| format!("failed to destroy domain {name}"))
+        .map_err(VmApiError::Internal)
 }
 
-pub fn undefine_by_name(connect_uri: &str, name: &str) -> Result<()> {
-    let conn = connect(connect_uri)?;
-    let domain = lookup_domain(&conn, name)?;
+pub fn undefine_by_name(connect_uri: &str, name: &str) -> VmApiResult<()> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
     if domain
         .is_active()
-        .with_context(|| format!("failed to query domain {name} state"))?
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
     {
-        bail!("domain {name} is active; shutdown or destroy it first");
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} is active; shutdown or destroy it first"
+        )));
     }
 
     domain
         .undefine()
         .with_context(|| format!("failed to undefine domain {name}"))
+        .map_err(VmApiError::Internal)
 }
 
-pub fn create_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> Result<VmSummary> {
-    let base_dir = env::current_dir().context("failed to determine current directory")?;
-    normalize_manifest_paths(&mut manifest, &base_dir)?;
-    validate_manifest(&manifest)?;
+pub fn create_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiResult<VmSummary> {
+    let base_dir = env::current_dir()
+        .context("failed to determine current directory")
+        .map_err(VmApiError::Internal)?;
+    normalize_manifest_paths(&mut manifest, &base_dir).map_err(VmApiError::InvalidRequest)?;
+    validate_manifest(&manifest).map_err(VmApiError::InvalidRequest)?;
 
     let boot = manifest_boot_order(&manifest);
-    let boot_devices = parse_boot_devices(&boot)?;
+    let boot_devices = parse_boot_devices(&boot).map_err(VmApiError::InvalidRequest)?;
     if boot_devices.contains(&BootDevice::Cdrom) && manifest.cdrom.is_none() {
-        bail!("boot order contains cdrom but cdrom was not provided");
+        return Err(VmApiError::InvalidRequest(anyhow::anyhow!(
+            "boot order contains cdrom but cdrom was not provided"
+        )));
     }
 
     let memory_mib = manifest
         .memory_gib
         .checked_mul(1024)
-        .context("memoryGiB is too large")?;
-    let xml = build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)?;
+        .context("memoryGiB is too large")
+        .map_err(VmApiError::InvalidRequest)?;
+    let xml = build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)
+        .map_err(VmApiError::InvalidRequest)?;
 
-    prepare_serial_log_path(manifest.serial_log.as_deref())?;
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    ensure_domain_absent_api(&conn, &manifest.name)?;
+    prepare_serial_log_path(manifest.serial_log.as_deref()).map_err(VmApiError::Internal)?;
 
-    let conn = connect(connect_uri)?;
     let domain = Domain::define_xml(&conn, &xml)
-        .with_context(|| format!("failed to define domain {}", manifest.name))?;
+        .with_context(|| format!("failed to define domain {}", manifest.name))
+        .map_err(VmApiError::Internal)?;
 
-    domain_summary(&domain)
+    domain_summary(&domain).map_err(VmApiError::Internal)
 }
 
-pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> Result<VmSummary> {
-    let base_dir = env::current_dir().context("failed to determine current directory")?;
-    normalize_manifest_paths(&mut manifest, &base_dir)?;
-    validate_manifest(&manifest)?;
+pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiResult<VmSummary> {
+    let base_dir = env::current_dir()
+        .context("failed to determine current directory")
+        .map_err(VmApiError::Internal)?;
+    normalize_manifest_paths(&mut manifest, &base_dir).map_err(VmApiError::InvalidRequest)?;
+    validate_manifest(&manifest).map_err(VmApiError::InvalidRequest)?;
 
     let boot = manifest_boot_order(&manifest);
-    let boot_devices = parse_boot_devices(&boot)?;
+    let boot_devices = parse_boot_devices(&boot).map_err(VmApiError::InvalidRequest)?;
     if boot_devices.contains(&BootDevice::Cdrom) && manifest.cdrom.is_none() {
-        bail!("boot order contains cdrom but cdrom was not provided");
+        return Err(VmApiError::InvalidRequest(anyhow::anyhow!(
+            "boot order contains cdrom but cdrom was not provided"
+        )));
     }
 
     let memory_mib = manifest
         .memory_gib
         .checked_mul(1024)
-        .context("memoryGiB is too large")?;
+        .context("memoryGiB is too large")
+        .map_err(VmApiError::InvalidRequest)?;
 
-    let current_xml = current_domain_xml(connect_uri, &manifest.name)?;
+    let current_xml =
+        current_domain_xml(connect_uri, &manifest.name).map_err(VmApiError::Internal)?;
     let xml = if current_xml.is_empty() {
-        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)?
+        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)
+            .map_err(VmApiError::InvalidRequest)?
     } else {
-        patch_domain_xml(&current_xml, &manifest, &boot_devices, memory_mib)?
+        patch_domain_xml(&current_xml, &manifest, &boot_devices, memory_mib)
+            .map_err(VmApiError::InvalidRequest)?
     };
 
-    prepare_serial_log_path(manifest.serial_log.as_deref())?;
+    prepare_serial_log_path(manifest.serial_log.as_deref()).map_err(VmApiError::Internal)?;
 
-    let conn = connect(connect_uri)?;
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
     let domain = Domain::define_xml_flags(&conn, &xml, sys::VIR_DOMAIN_DEFINE_VALIDATE)
-        .with_context(|| format!("failed to apply VM definition {}", manifest.name))?;
+        .with_context(|| format!("failed to apply VM definition {}", manifest.name))
+        .map_err(VmApiError::Internal)?;
 
-    domain_summary(&domain)
+    domain_summary(&domain).map_err(VmApiError::Internal)
 }
 
 pub fn vnc_endpoint_by_name(connect_uri: &str, name: &str) -> Result<VncEndpoint> {
@@ -2704,6 +2761,30 @@ fn connect_read_only(uri: &str) -> Result<Connect> {
 
 fn lookup_domain(conn: &Connect, name: &str) -> Result<Domain> {
     Domain::lookup_by_name(conn, name).with_context(|| format!("failed to find domain {name}"))
+}
+
+fn lookup_domain_api(conn: &Connect, name: &str) -> VmApiResult<Domain> {
+    match Domain::lookup_by_name(conn, name) {
+        Ok(domain) => Ok(domain),
+        Err(error) if error.code() == virt::error::ErrorNumber::NoDomain => {
+            Err(VmApiError::NotFound(name.to_string()))
+        }
+        Err(error) => Err(VmApiError::Internal(
+            anyhow::Error::new(error).context(format!("failed to find domain {name}")),
+        )),
+    }
+}
+
+fn ensure_domain_absent_api(conn: &Connect, name: &str) -> VmApiResult<()> {
+    match Domain::lookup_by_name(conn, name) {
+        Ok(_) => Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} already exists"
+        ))),
+        Err(error) if error.code() == virt::error::ErrorNumber::NoDomain => Ok(()),
+        Err(error) => Err(VmApiError::Internal(
+            anyhow::Error::new(error).context(format!("failed to check domain {name}")),
+        )),
+    }
 }
 
 fn start_domain(domain: &Domain, name: &str) -> Result<()> {

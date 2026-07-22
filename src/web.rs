@@ -45,40 +45,52 @@ struct ErrorBody {
     error: String,
 }
 
-struct AppError(anyhow::Error);
+#[derive(Debug)]
+enum AppError {
+    Vm(vm::VmApiError),
+    Internal(anyhow::Error),
+}
 
 type AppResult<T> = std::result::Result<T, AppError>;
 
 impl AppError {
     fn status(&self) -> StatusCode {
-        let message = self.0.to_string().to_lowercase();
-        if message.contains("failed to find domain") {
-            StatusCode::NOT_FOUND
-        } else if message.contains("not active")
-            || message.contains("already running")
-            || message.contains("is active; shutdown or destroy")
-        {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
+        match self {
+            Self::Vm(vm::VmApiError::InvalidRequest(_)) => StatusCode::BAD_REQUEST,
+            Self::Vm(vm::VmApiError::NotFound(_)) => StatusCode::NOT_FOUND,
+            Self::Vm(vm::VmApiError::Conflict(_)) => StatusCode::CONFLICT,
+            Self::Vm(vm::VmApiError::Internal(_)) | Self::Internal(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        }
+    }
+
+    fn error(&self) -> &dyn std::fmt::Debug {
+        match self {
+            Self::Vm(error) => error,
+            Self::Internal(error) => error,
         }
     }
 }
 
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(error: E) -> Self {
-        Self(error.into())
+impl From<anyhow::Error> for AppError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Internal(error)
+    }
+}
+
+impl From<vm::VmApiError> for AppError {
+    fn from(error: vm::VmApiError) -> Self {
+        Self::Vm(error)
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
-        tracing::error!(error = ?self.0, %status, "request failed");
+        tracing::error!(error = ?self.error(), %status, "request failed");
         let message = match status {
+            StatusCode::BAD_REQUEST => "invalid request",
             StatusCode::NOT_FOUND => "VM not found",
             StatusCode::CONFLICT => "VM state conflicts with the request",
             _ => "internal server error",
@@ -309,15 +321,16 @@ fn origin_matches_host(origin: &str, host: &str) -> bool {
     !host.is_empty() && origin_authority.eq_ignore_ascii_case(host)
 }
 
-async fn run_libvirt<T, F>(task: F) -> AppResult<T>
+async fn run_libvirt<T, E, F>(task: F) -> AppResult<T>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T> + Send + 'static,
+    E: Into<AppError> + Send + 'static,
+    F: FnOnce() -> std::result::Result<T, E> + Send + 'static,
 {
-    tokio::task::spawn_blocking(task)
-        .await
-        .context("libvirt task panicked")?
-        .map_err(AppError::from)
+    let result = tokio::task::spawn_blocking(task).await.map_err(|error| {
+        AppError::Internal(anyhow::Error::new(error).context("libvirt task panicked"))
+    })?;
+    result.map_err(Into::into)
 }
 
 async fn handle_vnc_upgrade(
@@ -455,6 +468,71 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn typed_errors_map_to_http_statuses() {
+        let app = Router::new()
+            .route(
+                "/invalid",
+                get(|| async {
+                    Err::<StatusCode, AppError>(
+                        vm::VmApiError::InvalidRequest(anyhow::anyhow!("bad input")).into(),
+                    )
+                }),
+            )
+            .route(
+                "/missing",
+                get(|| async {
+                    Err::<StatusCode, AppError>(vm::VmApiError::NotFound("missing".into()).into())
+                }),
+            )
+            .route(
+                "/conflict",
+                get(|| async {
+                    Err::<StatusCode, AppError>(
+                        vm::VmApiError::Conflict(anyhow::anyhow!("already exists")).into(),
+                    )
+                }),
+            )
+            .route(
+                "/internal",
+                get(|| async {
+                    Err::<StatusCode, AppError>(
+                        vm::VmApiError::Internal(anyhow::anyhow!("libvirt failed")).into(),
+                    )
+                }),
+            );
+
+        for (path, status, message) in [
+            ("/invalid", StatusCode::BAD_REQUEST, "invalid request"),
+            ("/missing", StatusCode::NOT_FOUND, "VM not found"),
+            (
+                "/conflict",
+                StatusCode::CONFLICT,
+                "VM state conflicts with the request",
+            ),
+            (
+                "/internal",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"], message);
+        }
+    }
 
     #[test]
     fn origin_matches_host_accepts_same_origin() {
