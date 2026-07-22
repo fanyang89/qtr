@@ -1,16 +1,19 @@
 import { useQuery } from '@tanstack/react-query'
 import { Activity, MonitorPlay, Server, TerminalSquare } from 'lucide-react'
+import { getHealth, getVms } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ConfigDrawer } from '@/components/config-drawer'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
-import { ConfigDrawer } from '@/components/config-drawer'
-import { getHealth, getVms } from '@/lib/api'
 
 export function Dashboard() {
-  const { data: health } = useQuery({ queryKey: ['health'], queryFn: getHealth })
+  const { data: health } = useQuery({
+    queryKey: ['health'],
+    queryFn: getHealth,
+  })
   const { data: vms = [] } = useQuery({ queryKey: ['vms'], queryFn: getVms })
   const running = vms.filter((vm) => vm.state === 'running').length
   const withVnc = vms.filter((vm) => vm.vnc).length
@@ -27,13 +30,28 @@ export function Dashboard() {
       <Main>
         <div className='mb-6 flex flex-col gap-2'>
           <h1 className='text-2xl font-bold tracking-tight'>qtr Dashboard</h1>
-          <p className='text-muted-foreground'>QEMU/libvirt VM control plane.</p>
+          <p className='text-muted-foreground'>
+            QEMU/libvirt VM control plane.
+          </p>
         </div>
         <div className='grid gap-4 sm:grid-cols-2 xl:grid-cols-4'>
-          <MetricCard title='Libvirt' value={health?.libvirtUri ?? 'qemu:///system'} icon={TerminalSquare} badge={health?.ok ? 'online' : 'planned'} />
-          <MetricCard title='Virtual Machines' value={String(vms.length)} icon={Server} />
+          <MetricCard
+            title='Libvirt'
+            value={health?.libvirtUri ?? 'qemu:///system'}
+            icon={TerminalSquare}
+            badge={health?.ok ? 'online' : 'planned'}
+          />
+          <MetricCard
+            title='Virtual Machines'
+            value={String(vms.length)}
+            icon={Server}
+          />
           <MetricCard title='Running' value={String(running)} icon={Activity} />
-          <MetricCard title='VNC Ready' value={String(withVnc)} icon={MonitorPlay} />
+          <MetricCard
+            title='VNC Ready'
+            value={String(withVnc)}
+            icon={MonitorPlay}
+          />
         </div>
         <Card className='mt-6'>
           <CardHeader>
@@ -41,12 +59,21 @@ export function Dashboard() {
           </CardHeader>
           <CardContent className='grid gap-3'>
             {vms.map((vm) => (
-              <div key={vm.name} className='flex items-center justify-between rounded-lg border p-3'>
+              <div
+                key={vm.name}
+                className='flex items-center justify-between rounded-lg border p-3'
+              >
                 <div>
                   <div className='font-medium'>{vm.name}</div>
-                  <div className='text-sm text-muted-foreground'>{vm.serialLog ?? 'No serial log'}</div>
+                  <div className='text-sm text-muted-foreground'>
+                    {vm.serialLog ?? 'No serial log'}
+                  </div>
                 </div>
-                <Badge variant={vm.state === 'running' ? 'default' : 'secondary'}>{vm.state}</Badge>
+                <Badge
+                  variant={vm.state === 'running' ? 'default' : 'secondary'}
+                >
+                  {vm.state}
+                </Badge>
               </div>
             ))}
           </CardContent>

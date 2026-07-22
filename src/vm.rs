@@ -167,17 +167,12 @@ impl VmDiskIoMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VmDiskBus {
+    #[default]
     VirtioBlk,
     VirtioScsi,
-}
-
-impl Default for VmDiskBus {
-    fn default() -> Self {
-        Self::VirtioBlk
-    }
 }
 
 impl<'de> Deserialize<'de> for VmDiskBus {
@@ -715,7 +710,7 @@ fn patch_disks(
         let last_disk = domain_disks
             .iter()
             .map(|entry| entry.node)
-            .last()
+            .next_back()
             .context("cannot append disks because existing domain XML has no disk devices")?;
         let range = last_disk.range();
         let end = line_end(xml, range.end);
@@ -976,7 +971,7 @@ fn memory_value_for_unit(memory_mib: u64, unit: &str) -> Result<u64> {
             .context("memoryGiB is too large for KiB domain memory"),
         "MiB" => Ok(memory_mib),
         "GiB" => {
-            if memory_mib % 1024 != 0 {
+            if !memory_mib.is_multiple_of(1024) {
                 bail!("memoryGiB cannot be represented as whole GiB in existing domain XML");
             }
             Ok(memory_mib / 1024)
@@ -1217,7 +1212,7 @@ fn push_attr_replacement(
         })?;
     let range = attr.range_value();
     let escaped = escape_xml_value(value);
-    if &xml[range.clone()] != escaped {
+    if xml[range.clone()] != *escaped {
         replacements.push(XmlReplacement {
             range,
             value: escaped,
@@ -1898,13 +1893,13 @@ fn domain_metrics(domain: &Domain, xml: &str) -> Option<VmMetrics> {
 
 fn domain_memory_used_kib(domain: &Domain, info: &DomainInfo) -> u64 {
     if let Ok(stats) = domain.memory_stats(0) {
-        let actual = memory_stat_value(&stats, sys::VIR_DOMAIN_MEMORY_STAT_ACTUAL_BALLOON as u32);
-        let unused = memory_stat_value(&stats, sys::VIR_DOMAIN_MEMORY_STAT_UNUSED as u32);
+        let actual = memory_stat_value(&stats, sys::VIR_DOMAIN_MEMORY_STAT_ACTUAL_BALLOON);
+        let unused = memory_stat_value(&stats, sys::VIR_DOMAIN_MEMORY_STAT_UNUSED);
         if let Some(actual) = actual {
             return actual.saturating_sub(unused.unwrap_or(0));
         }
 
-        if let Some(rss) = memory_stat_value(&stats, sys::VIR_DOMAIN_MEMORY_STAT_RSS as u32) {
+        if let Some(rss) = memory_stat_value(&stats, sys::VIR_DOMAIN_MEMORY_STAT_RSS) {
             return rss;
         }
     }
@@ -1979,6 +1974,7 @@ fn parse_summary_resources(xml: &str) -> (Option<u64>, Option<u32>, Option<Strin
     (memory, vcpus, network)
 }
 
+#[allow(clippy::type_complexity)]
 fn parse_summary_definition(
     xml: &str,
 ) -> Result<(

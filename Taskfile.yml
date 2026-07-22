@@ -11,6 +11,29 @@ vars:
     sh: cargo pkgid | cut -d# -f2
 
 tasks:
+  test:
+    desc: Run Rust and web test suites
+    cmds:
+      - cargo test
+      - pnpm -C web test
+
+  lint:
+    desc: Run Rust and web linters
+    cmds:
+      - cargo fmt --check
+      - cargo clippy --all-targets -- -D warnings
+      - pnpm -C web lint
+      - pnpm -C web format:check
+
+  check:
+    desc: Run all local verification (lint, tests, builds)
+    deps:
+      - lint
+      - test
+    cmds:
+      - cargo build
+      - pnpm -C web build
+
   build:
     desc: Build the qtr release binary
     cmds:

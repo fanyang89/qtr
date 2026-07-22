@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
-import { Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import {
   MonitorPlay,
   MoreHorizontal,
@@ -14,6 +14,16 @@ import {
   Trash2,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import {
+  createVm,
+  deleteVm,
+  getVms,
+  postVmAction,
+  updateVm,
+  type VmCreateInput,
+  type VmSummary,
+  type VmUpdateInput,
+} from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -35,21 +45,14 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { ThemeSwitch } from '@/components/theme-switch'
-import {
-  createVm,
-  deleteVm,
-  getVms,
-  postVmAction,
-  updateVm,
-  type VmCreateInput,
-  type VmSummary,
-  type VmUpdateInput,
-} from '@/lib/api'
 import { VmFormDialog } from './vm-form-dialog'
 
 export function VmDashboard() {
   const queryClient = useQueryClient()
-  const { data: vms = [], isLoading } = useQuery({ queryKey: ['vms'], queryFn: getVms })
+  const { data: vms = [], isLoading } = useQuery({
+    queryKey: ['vms'],
+    queryFn: getVms,
+  })
   const [search, setSearch] = useState('')
   const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null)
   const [selectedVm, setSelectedVm] = useState<VmSummary | null>(null)
@@ -73,7 +76,8 @@ export function VmDashboard() {
       await queryClient.invalidateQueries({ queryKey: ['vms'] })
       toast.success(`VM ${action} queued`)
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : 'Action failed'),
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : 'Action failed'),
   })
 
   const createMutation = useMutation({
@@ -83,7 +87,10 @@ export function VmDashboard() {
       toast.success(`VM ${vm.name} created`)
       setFormMode(null)
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : 'Failed to create VM'),
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : 'Failed to create VM'
+      ),
   })
 
   const updateMutation = useMutation({
@@ -96,7 +103,10 @@ export function VmDashboard() {
       setFormMode(null)
       setSelectedVm(null)
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : 'Failed to update VM'),
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : 'Failed to update VM'
+      ),
   })
 
   const deleteMutation = useMutation({
@@ -106,7 +116,10 @@ export function VmDashboard() {
       toast.success(`VM ${name} deleted`)
       setDeleteTarget(null)
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : 'Failed to delete VM'),
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : 'Failed to delete VM'
+      ),
   })
 
   async function handleFormSubmit(input: VmCreateInput | VmUpdateInput) {
@@ -153,7 +166,9 @@ export function VmDashboard() {
       <Main>
         <div className='mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between'>
           <div>
-            <h1 className='text-2xl font-bold tracking-tight'>Virtual Machines</h1>
+            <h1 className='text-2xl font-bold tracking-tight'>
+              Virtual Machines
+            </h1>
             <p className='text-muted-foreground'>Manage qtr libvirt domains.</p>
           </div>
           <Button onClick={openCreate}>
@@ -178,13 +193,19 @@ export function VmDashboard() {
             <TableBody>
               {isLoading ? (
                 <TableRow>
-                  <TableCell colSpan={7} className='h-24 text-center text-muted-foreground'>
+                  <TableCell
+                    colSpan={7}
+                    className='h-24 text-center text-muted-foreground'
+                  >
                     Loading VMs...
                   </TableCell>
                 </TableRow>
               ) : filteredVms.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className='h-24 text-center text-muted-foreground'>
+                  <TableCell
+                    colSpan={7}
+                    className='h-24 text-center text-muted-foreground'
+                  >
                     No virtual machines found.
                   </TableCell>
                 </TableRow>
@@ -193,7 +214,9 @@ export function VmDashboard() {
                   <VmRow
                     key={vm.name}
                     vm={vm}
-                    onAction={(name, action) => actionMutation.mutate({ name, action })}
+                    onAction={(name, action) =>
+                      actionMutation.mutate({ name, action })
+                    }
                     onEdit={openEdit}
                     onDelete={setDeleteTarget}
                   />
@@ -257,10 +280,14 @@ function VmRow({
         </Link>
       </TableCell>
       <TableCell>
-        <Badge variant={vm.state === 'running' ? 'default' : 'secondary'}>{vm.state}</Badge>
+        <Badge variant={vm.state === 'running' ? 'default' : 'secondary'}>
+          {vm.state}
+        </Badge>
       </TableCell>
       <TableCell>{vm.vcpus ?? '-'}</TableCell>
-      <TableCell>{vm.memoryMiB ? `${Math.round(vm.memoryMiB / 1024)} GiB` : '-'}</TableCell>
+      <TableCell>
+        {vm.memoryMiB ? `${Math.round(vm.memoryMiB / 1024)} GiB` : '-'}
+      </TableCell>
       <TableCell>{vm.network ?? '-'}</TableCell>
       <TableCell>
         {vm.vnc ? (
@@ -307,7 +334,10 @@ function VmRow({
               <Pencil className='size-4' />
               Edit
             </DropdownMenuItem>
-            <DropdownMenuItem variant='destructive' onClick={() => onDelete(vm)}>
+            <DropdownMenuItem
+              variant='destructive'
+              onClick={() => onDelete(vm)}
+            >
               <Trash2 className='size-4' />
               Delete
             </DropdownMenuItem>

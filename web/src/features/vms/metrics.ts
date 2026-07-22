@@ -20,15 +20,22 @@ const mibRateFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2,
 })
 
-export function vmMetricsByName(vms: VmSummary[]): Map<string, VmMetricSnapshot> {
+export function vmMetricsByName(
+  vms: VmSummary[]
+): Map<string, VmMetricSnapshot> {
   return new Map(
     vms
-      .filter((vm): vm is VmSummary & { metrics: VmMetricSnapshot } => Boolean(vm.metrics))
+      .filter((vm): vm is VmSummary & { metrics: VmMetricSnapshot } =>
+        Boolean(vm.metrics)
+      )
       .map((vm) => [vm.name, vm.metrics])
   )
 }
 
-export function vmRuntimeMetrics(vm?: VmSummary, previous?: VmMetricSnapshot): VmRuntimeMetrics {
+export function vmRuntimeMetrics(
+  vm?: VmSummary,
+  previous?: VmMetricSnapshot
+): VmRuntimeMetrics {
   if (!vm?.metrics) {
     return emptyRuntimeMetrics()
   }
@@ -36,8 +43,18 @@ export function vmRuntimeMetrics(vm?: VmSummary, previous?: VmMetricSnapshot): V
   return {
     cpu: formatCpuUsage(vm, previous),
     memory: formatMemoryUsage(vm.metrics),
-    tx: formatByteRate(vm.metrics.txBytes, previous?.txBytes, vm.metrics.sampledAtMs, previous?.sampledAtMs),
-    rx: formatByteRate(vm.metrics.rxBytes, previous?.rxBytes, vm.metrics.sampledAtMs, previous?.sampledAtMs),
+    tx: formatByteRate(
+      vm.metrics.txBytes,
+      previous?.txBytes,
+      vm.metrics.sampledAtMs,
+      previous?.sampledAtMs
+    ),
+    rx: formatByteRate(
+      vm.metrics.rxBytes,
+      previous?.rxBytes,
+      vm.metrics.sampledAtMs,
+      previous?.sampledAtMs
+    ),
   }
 }
 
@@ -69,8 +86,18 @@ function formatMemoryUsage(metrics: VmMetricSnapshot): string {
   return percentFormatter.format(percent)
 }
 
-function formatByteRate(current?: number, previous?: number, currentAtMs?: number, previousAtMs?: number): string {
-  if (current === undefined || previous === undefined || currentAtMs === undefined || previousAtMs === undefined) {
+function formatByteRate(
+  current?: number,
+  previous?: number,
+  currentAtMs?: number,
+  previousAtMs?: number
+): string {
+  if (
+    current === undefined ||
+    previous === undefined ||
+    currentAtMs === undefined ||
+    previousAtMs === undefined
+  ) {
     return '-'
   }
 

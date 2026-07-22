@@ -335,10 +335,10 @@ fn resolve_target_user(user: Option<&str>) -> Result<String> {
         return Ok(user.to_string());
     }
 
-    if let Ok(user) = env::var("SUDO_USER") {
-        if !user.is_empty() {
-            return Ok(user);
-        }
+    if let Ok(user) = env::var("SUDO_USER")
+        && !user.is_empty()
+    {
+        return Ok(user);
     }
 
     env::var("USER").context("failed to determine target user; pass --user")

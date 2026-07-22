@@ -11,9 +11,14 @@ export function ConsolePage({ name }: { name: string }) {
     <>
       <Header fixed>
         <Button variant='ghost' size='sm' asChild>
-          <Link to='/vms/$name' params={{ name }}><ArrowLeft className='size-4' />{name}</Link>
+          <Link to='/vms/$name' params={{ name }}>
+            <ArrowLeft className='size-4' />
+            {name}
+          </Link>
         </Button>
-        <div className='ms-auto flex items-center gap-2'><ThemeSwitch /></div>
+        <div className='ms-auto flex items-center gap-2'>
+          <ThemeSwitch />
+        </div>
       </Header>
       <Main fixed fluid className='p-0'>
         <NoVncConsole name={name} />

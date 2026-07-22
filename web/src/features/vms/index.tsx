@@ -1,32 +1,63 @@
-import { Link } from '@tanstack/react-router'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MonitorPlay, MoreHorizontal, Play, Power, Server, Square } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
+import {
+  MonitorPlay,
+  MoreHorizontal,
+  Play,
+  Power,
+  Server,
+  Square,
+} from 'lucide-react'
 import { toast } from 'sonner'
+import { getVms, postVmAction, type VmSummary } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { ConfigDrawer } from '@/components/config-drawer'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
-import { ConfigDrawer } from '@/components/config-drawer'
-import { getVms, postVmAction, type VmSummary } from '@/lib/api'
-import { vmMetricsByName, vmRuntimeMetrics, type VmMetricSnapshot } from './metrics'
+import {
+  vmMetricsByName,
+  vmRuntimeMetrics,
+  type VmMetricSnapshot,
+} from './metrics'
 
 export function VmList() {
   const queryClient = useQueryClient()
-  const [previousMetrics, setPreviousMetrics] = useState<Map<string, VmMetricSnapshot>>(new Map())
-  const { data: vms = [] } = useQuery({ queryKey: ['vms'], queryFn: getVms, refetchInterval: 2000 })
+  const [previousMetrics, setPreviousMetrics] = useState<
+    Map<string, VmMetricSnapshot>
+  >(new Map())
+  const { data: vms = [] } = useQuery({
+    queryKey: ['vms'],
+    queryFn: getVms,
+    refetchInterval: 2000,
+  })
   const action = useMutation({
-    mutationFn: ({ name, action }: { name: string; action: string }) => postVmAction(name, action),
+    mutationFn: ({ name, action }: { name: string; action: string }) =>
+      postVmAction(name, action),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['vms'] })
       toast.success('VM action queued')
@@ -53,7 +84,9 @@ export function VmList() {
       <Main>
         <div className='mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between'>
           <div>
-            <h1 className='text-2xl font-bold tracking-tight'>Virtual Machines</h1>
+            <h1 className='text-2xl font-bold tracking-tight'>
+              Virtual Machines
+            </h1>
             <p className='text-muted-foreground'>Manage qtr libvirt domains.</p>
           </div>
           <Button disabled>Launch VM</Button>
@@ -61,7 +94,9 @@ export function VmList() {
         <Card>
           <CardHeader>
             <CardTitle>Domains</CardTitle>
-            <CardDescription>Live data will come from qtr web API.</CardDescription>
+            <CardDescription>
+              Live data will come from qtr web API.
+            </CardDescription>
           </CardHeader>
           <CardContent>
             <Table>
@@ -85,7 +120,9 @@ export function VmList() {
                     key={vm.name}
                     vm={vm}
                     previousMetrics={previousMetrics.get(vm.name)}
-                    onAction={(name, vmAction) => action.mutate({ name, action: vmAction })}
+                    onAction={(name, vmAction) =>
+                      action.mutate({ name, action: vmAction })
+                    }
                   />
                 ))}
               </TableBody>
@@ -111,12 +148,20 @@ function VmRow({
   return (
     <TableRow>
       <TableCell>
-        <Link to='/vms/$name' params={{ name: vm.name }} className='flex items-center gap-2 font-medium hover:underline'>
+        <Link
+          to='/vms/$name'
+          params={{ name: vm.name }}
+          className='flex items-center gap-2 font-medium hover:underline'
+        >
           <Server className='size-4 text-muted-foreground' />
           {vm.name}
         </Link>
       </TableCell>
-      <TableCell><Badge variant={vm.state === 'running' ? 'default' : 'secondary'}>{vm.state}</Badge></TableCell>
+      <TableCell>
+        <Badge variant={vm.state === 'running' ? 'default' : 'secondary'}>
+          {vm.state}
+        </Badge>
+      </TableCell>
       <TableCell>{metrics.cpu}</TableCell>
       <TableCell>{metrics.memory}</TableCell>
       <TableCell>{metrics.tx}</TableCell>
@@ -138,15 +183,32 @@ function VmRow({
       <TableCell>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant='ghost' size='icon'><MoreHorizontal className='size-4' /></Button>
+            <Button variant='ghost' size='icon'>
+              <MoreHorizontal className='size-4' />
+            </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align='end'>
             <DropdownMenuItem asChild disabled={!vm.vnc}>
-              <Link to='/vms/$name/console' params={{ name: vm.name }}><MonitorPlay />Console</Link>
+              <Link to='/vms/$name/console' params={{ name: vm.name }}>
+                <MonitorPlay />
+                Console
+              </Link>
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onAction(vm.name, 'start')}><Play />Start</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onAction(vm.name, 'shutdown')}><Power />Shutdown</DropdownMenuItem>
-            <DropdownMenuItem variant='destructive' onClick={() => onAction(vm.name, 'destroy')}><Square />Destroy</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onAction(vm.name, 'start')}>
+              <Play />
+              Start
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onAction(vm.name, 'shutdown')}>
+              <Power />
+              Shutdown
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              variant='destructive'
+              onClick={() => onAction(vm.name, 'destroy')}
+            >
+              <Square />
+              Destroy
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </TableCell>
