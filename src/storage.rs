@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use duct::cmd;
 use serde::{Deserialize, Serialize};
 
@@ -176,7 +176,9 @@ fn volumes(config_path: &Path, args: StorageBackendArgs) -> Result<()> {
 
     match &backend.driver {
         StorageDriver::Iscsi { volumes, .. } => {
-            let sessions = IscsiAdm::new().sessions().unwrap_or_default();
+            let sessions = IscsiAdm::new()
+                .sessions()
+                .context("failed to query active iSCSI sessions")?;
             let devices = iscsi_devices_from_by_path(Path::new(DEV_DISK_BY_PATH))?;
             print_iscsi_volumes(volumes, &sessions, &devices);
         }
