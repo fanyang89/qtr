@@ -12,11 +12,18 @@ pub struct VmLaunchDomainSpec<'a> {
     pub cpu: Option<VmLaunchCpuSpec<'a>>,
     pub io_threads: Option<VmLaunchIoThreadsSpec>,
     pub disks: &'a [VmLaunchDiskSpec<'a>],
-    pub cdrom: Option<&'a Path>,
+    pub cdroms: &'a [VmLaunchCdromSpec<'a>],
     pub serial_log: Option<&'a Path>,
     pub boot_devices: &'a [BootDevice],
     pub network: &'a str,
     pub graphics: GraphicsSpec<'a>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VmLaunchCdromSpec<'a> {
+    pub id: &'a str,
+    pub media: Option<&'a Path>,
+    pub target: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,7 +123,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         .map(build_domain_iothreads_xml)
         .unwrap_or_default();
     let scsi_controller_xml = build_scsi_controller_xml(spec.disks);
-    let cdrom_xml = spec.cdrom.map(build_cdrom_xml).unwrap_or_default();
+    let cdroms_xml = spec.cdroms.iter().map(build_cdrom_xml).collect::<String>();
     let console_xml = build_console_xml(spec.serial_log);
     let graphics_xml = build_graphics_xml(spec.graphics);
     let machine = spec
@@ -140,7 +147,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
     <apic/>
   </features>
 {cpu_xml}  <devices>
-{disks_xml}{scsi_controller_xml}{cdrom_xml}    <interface type='network'>
+{disks_xml}{scsi_controller_xml}{cdroms_xml}    <interface type='network'>
       <source network='{network}'/>
       <model type='virtio'/>
     </interface>
@@ -161,7 +168,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         disks_xml = disks_xml,
         scsi_controller_xml = scsi_controller_xml,
         network = escape_xml(spec.network),
-        cdrom_xml = cdrom_xml,
+        cdroms_xml = cdroms_xml,
         console_xml = console_xml,
         graphics_xml = graphics_xml,
     )
@@ -324,16 +331,27 @@ fn disk_suffix(mut index: usize) -> String {
 
 pub const CDROM_TARGET: &str = "sda";
 
-fn build_cdrom_xml(path: &Path) -> String {
+pub fn build_cdrom_xml(cdrom: &VmLaunchCdromSpec<'_>) -> String {
+    let source = cdrom
+        .media
+        .map(|path| {
+            format!(
+                "      <source file='{}'/>\n",
+                escape_xml(&path.display().to_string())
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"    <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
-      <source file='{path}'/>
-      <target dev='{CDROM_TARGET}' bus='sata'/>
+{source}      <target dev='{target}' bus='sata'/>
       <readonly/>
+      <alias name='ua-qtr-cdrom-{id}'/>
     </disk>
 "#,
-        path = escape_xml(&path.display().to_string()),
+        source = source,
+        target = escape_xml(cdrom.target),
+        id = escape_xml(cdrom.id),
     )
 }
 
@@ -526,7 +544,7 @@ mod tests {
             cpu: None,
             io_threads: None,
             disks: &virtio_disks,
-            cdrom: None,
+            cdroms: &[],
             serial_log: None,
             boot_devices: &boot_devices,
             network: "default",
@@ -550,7 +568,7 @@ mod tests {
             cpu: None,
             io_threads: None,
             disks: &scsi_disks,
-            cdrom: None,
+            cdroms: &[],
             serial_log: None,
             boot_devices: &boot_devices,
             network: "default",
@@ -561,6 +579,28 @@ mod tests {
             },
         });
         assert!(xml.contains("<controller type='scsi' index='0' model='virtio-scsi'/>"));
+    }
+
+    #[test]
+    fn builds_loaded_and_empty_cdrom_trays() {
+        let loaded = build_cdrom_xml(&VmLaunchCdromSpec {
+            id: "installer",
+            media: Some(Path::new("/isos/os&tools.iso")),
+            target: "sda",
+        });
+        let empty = build_cdrom_xml(&VmLaunchCdromSpec {
+            id: "tools",
+            media: None,
+            target: "sdb",
+        });
+
+        assert!(loaded.contains("<source file='/isos/os&amp;tools.iso'/>"));
+        assert!(loaded.contains("<target dev='sda' bus='sata'/>"));
+        assert!(loaded.contains("<alias name='ua-qtr-cdrom-installer'/>"));
+        assert!(!empty.contains("<source"));
+        assert!(empty.contains("<target dev='sdb' bus='sata'/>"));
+        assert!(empty.contains("<readonly/>"));
+        assert!(empty.contains("<alias name='ua-qtr-cdrom-tools'/>"));
     }
 
     #[test]
@@ -586,7 +626,7 @@ mod tests {
             }),
             io_threads: None,
             disks: &disks,
-            cdrom: None,
+            cdroms: &[],
             serial_log: None,
             boot_devices: &boot_devices,
             network: "default",

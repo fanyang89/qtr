@@ -24,6 +24,8 @@ pub struct VmManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdrom: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdroms: Option<Vec<VmCdromEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub boot: Option<Vec<String>>,
     #[serde(default = "default_vm_memory_gib", rename = "memoryGiB")]
     pub memory_gib: u64,
@@ -193,7 +195,7 @@ impl Serialize for VmDiskEntry {
     {
         match self {
             Self::Present(disk) => disk.serialize(serializer),
-            Self::Absent { id } => VmAbsentDiskWire {
+            Self::Absent { id } => VmAbsentDeviceWire {
                 id,
                 state: VmDeviceState::Absent,
             }
@@ -253,7 +255,7 @@ enum VmDeviceState {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct VmAbsentDiskWire<'a> {
+struct VmAbsentDeviceWire<'a> {
     id: &'a str,
     state: VmDeviceState,
 }
@@ -272,6 +274,111 @@ struct VmDiskWire {
     bus: Option<VmDiskBus>,
     cache: Option<VmDiskCache>,
     io: Option<VmDiskIoConfig>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmCdrom {
+    pub id: String,
+    pub media: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum VmCdromEntry {
+    Present(VmCdrom),
+    Absent { id: String },
+}
+
+impl VmCdromEntry {
+    pub fn present(cdrom: VmCdrom) -> Self {
+        Self::Present(cdrom)
+    }
+
+    pub fn absent(id: impl Into<String>) -> Self {
+        Self::Absent { id: id.into() }
+    }
+
+    pub fn as_present(&self) -> Option<&VmCdrom> {
+        match self {
+            Self::Present(cdrom) => Some(cdrom),
+            Self::Absent { .. } => None,
+        }
+    }
+
+    pub fn as_present_mut(&mut self) -> Option<&mut VmCdrom> {
+        match self {
+            Self::Present(cdrom) => Some(cdrom),
+            Self::Absent { .. } => None,
+        }
+    }
+
+    pub fn absent_id(&self) -> Option<&str> {
+        match self {
+            Self::Present(_) => None,
+            Self::Absent { id } => Some(id),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Present(cdrom) => &cdrom.id,
+            Self::Absent { id } => id,
+        }
+    }
+}
+
+impl Serialize for VmCdromEntry {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Present(cdrom) => cdrom.serialize(serializer),
+            Self::Absent { id } => VmAbsentDeviceWire {
+                id,
+                state: VmDeviceState::Absent,
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VmCdromEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = VmCdromWire::deserialize(deserializer)?;
+        match wire.state {
+            VmDeviceState::Present => {
+                let id = wire.id.ok_or_else(|| D::Error::missing_field("id"))?;
+                Ok(Self::Present(VmCdrom {
+                    id,
+                    media: wire.media,
+                    target: wire.target,
+                }))
+            }
+            VmDeviceState::Absent => {
+                let id = wire.id.ok_or_else(|| D::Error::missing_field("id"))?;
+                if wire.media.is_some() || wire.target.is_some() {
+                    return Err(D::Error::custom("absent CD-ROM only accepts id and state"));
+                }
+                Ok(Self::Absent { id })
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VmCdromWire {
+    #[serde(default)]
+    state: VmDeviceState,
+    id: Option<String>,
+    media: Option<PathBuf>,
+    target: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

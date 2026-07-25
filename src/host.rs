@@ -82,6 +82,17 @@ fn vm_perms_plan(file: &Path) -> Result<VmPermsPlan> {
         ensure_regular_file(&path, "cdrom ISO")?;
         plan.read_only_files.insert(path);
     }
+    if let Some(cdroms) = &manifest.cdroms {
+        for media in cdroms
+            .iter()
+            .filter_map(|entry| entry.as_present())
+            .filter_map(|cdrom| cdrom.media.as_deref())
+        {
+            let path = manifest_path_ref(&manifest_dir, media);
+            ensure_regular_file(&path, "cdrom ISO")?;
+            plan.read_only_files.insert(path);
+        }
+    }
 
     if let Some(serial_log) = &manifest.serial_log {
         let serial_log = manifest_path_ref(&manifest_dir, serial_log);

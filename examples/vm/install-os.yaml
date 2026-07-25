@@ -15,7 +15,9 @@ disks:
   path: /var/lib/libvirt/images/install-os.qcow2
   type: file
   format: qcow2
-cdrom: /path/to/installer.iso
+cdroms:
+- id: installer
+  media: /path/to/installer.iso
 boot:
 - cdrom
 - hd

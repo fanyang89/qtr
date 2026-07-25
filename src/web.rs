@@ -159,6 +159,7 @@ impl UpdateVmRequest {
                 .map(vm::VmDiskEntry::present)
                 .collect(),
             cdrom: self.cdrom,
+            cdroms: None,
             boot: self.boot,
             memory_gib: self.memory_gib,
             vcpus: self.vcpus,
@@ -205,6 +206,7 @@ impl CreateVmRequest {
                 .map(vm::VmDiskEntry::present)
                 .collect(),
             cdrom: self.cdrom,
+            cdroms: None,
             boot: self.boot,
             memory_gib: self.memory_gib,
             vcpus: self.vcpus,

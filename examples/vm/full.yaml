@@ -30,7 +30,11 @@ disks:
   cache: none
   io:
     mode: threads
-cdrom: /path/to/installer.iso
+cdroms:
+- id: installer
+  media: /path/to/installer.iso
+- id: tools
+  media: null
 boot:
 - cdrom
 - hd

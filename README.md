@@ -150,7 +150,7 @@ cargo run -- vm init --name install-os -o vm.yaml
 cargo run -- vm init --name install-os --machine q35 -o vm.yaml
 ```
 
-Edit `cdrom` to point at the installer ISO. Create or resize disks with `disk` commands before applying the VM definition.
+Edit `cdroms[].media` to point at the installer ISO. Create or resize disks with `disk` commands before applying the VM definition.
 
 The generated YAML is an installer-oriented template:
 
@@ -172,7 +172,9 @@ disks:
   path: .tmp/disks/install-os.qcow2
   type: file
   format: qcow2
-cdrom: /path/to/installer.iso
+cdroms:
+- id: installer
+  media: /path/to/installer.iso
 boot: [cdrom, hd]
 network: default
 graphics: vnc
@@ -195,6 +197,8 @@ disks:
 ```
 
 Detach updates only the inactive libvirt domain definition. It never deletes the disk file, block device, or storage volume. Omitting an existing disk without `state: absent` remains an error.
+
+Multiple CD-ROM trays are supported. Set `media: null` to keep an empty tray, change `media` to swap media, or use `state: absent` with the stable ID to remove the tray from the persistent definition. Existing version 1 definitions using the single `cdrom` field remain supported.
 
 Apply it:
 

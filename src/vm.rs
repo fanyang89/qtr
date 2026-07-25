@@ -36,8 +36,9 @@ use crate::{
 };
 
 pub use crate::vm_model::{
-    VmCpu, VmCpuMode, VmCpuTopology, VmDisk, VmDiskBus, VmDiskCache, VmDiskEntry, VmDiskIoConfig,
-    VmDiskIoMode, VmDiskType, VmIoThreads, VmMachine, VmManifest, VmMemory,
+    VmCdrom, VmCdromEntry, VmCpu, VmCpuMode, VmCpuTopology, VmDisk, VmDiskBus, VmDiskCache,
+    VmDiskEntry, VmDiskIoConfig, VmDiskIoMode, VmDiskType, VmIoThreads, VmMachine, VmManifest,
+    VmMemory,
 };
 
 pub fn run(args: VmArgs) -> Result<()> {
@@ -247,6 +248,10 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
     if has_key("cpu") && has_key("vcpus") {
         bail!("cpu and vcpus are mutually exclusive");
     }
+    if has_key("cdrom") && has_key("cdroms") {
+        bail!("cdrom and cdroms are mutually exclusive");
+    }
+    let has_cdroms = has_key("cdroms");
 
     let version = match mapping.remove(&schema_key) {
         Some(version) => version
@@ -270,6 +275,9 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
             })
     {
         bail!("disk state requires schemaVersion 2");
+    }
+    if version == 1 && has_cdroms {
+        bail!("cdroms requires schemaVersion 2");
     }
 
     serde_yaml::from_value(serde_yaml::Value::Mapping(mapping))
@@ -513,7 +521,12 @@ fn init(args: VmInitArgs) -> Result<()> {
         }),
         io_threads: None,
         disks,
-        cdrom: (!args.no_cdrom).then_some(args.cdrom),
+        cdrom: None,
+        cdroms: (!args.no_cdrom).then_some(vec![VmCdromEntry::present(VmCdrom {
+            id: "installer".to_string(),
+            media: Some(args.cdrom),
+            target: None,
+        })]),
         boot: Some(boot),
         memory_gib: args.memory_gib,
         vcpus: args.vcpus,
@@ -560,7 +573,7 @@ fn apply(args: VmApplyArgs) -> Result<()> {
 
     let boot = manifest_boot_order(&manifest);
     let boot_devices = domain_xml::parse_boot_devices(&boot)?;
-    if boot_devices.contains(&BootDevice::Cdrom) && manifest.cdrom.is_none() {
+    if boot_devices.contains(&BootDevice::Cdrom) && !manifest_has_cdrom(&manifest) {
         bail!("boot order contains cdrom but cdrom was not provided");
     }
 
@@ -630,6 +643,28 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
         .zip(targets)
         .map(|(disk, target)| launch_disk_spec(disk, target, manifest.io_threads))
         .collect::<Vec<_>>();
+    let cdrom_targets = assign_manifest_cdrom_targets(manifest)?;
+    let cdroms = match &manifest.cdroms {
+        Some(entries) => present_cdroms(entries)
+            .zip(cdrom_targets.iter())
+            .map(|(cdrom, target)| domain_xml::VmLaunchCdromSpec {
+                id: &cdrom.id,
+                media: cdrom.media.as_deref(),
+                target,
+            })
+            .collect::<Vec<_>>(),
+        None => manifest
+            .cdrom
+            .as_deref()
+            .map(|media| {
+                vec![domain_xml::VmLaunchCdromSpec {
+                    id: "installer",
+                    media: Some(media),
+                    target: &cdrom_targets[0],
+                }]
+            })
+            .unwrap_or_default(),
+    };
 
     let memory = effective_memory(manifest)?;
     let vcpus = effective_vcpus(manifest)?;
@@ -645,7 +680,7 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
         cpu: launch_cpu(manifest),
         io_threads: manifest.io_threads.map(VmIoThreads::effective),
         disks: &disks,
-        cdrom: manifest.cdrom.as_deref(),
+        cdroms: &cdroms,
         serial_log: manifest.serial_log.as_deref(),
         boot_devices,
         network: &manifest.network,
@@ -695,10 +730,9 @@ fn disk_target_or(disk: &VmDisk, index: usize) -> String {
 }
 
 fn assign_manifest_disk_targets(manifest: &VmManifest) -> Result<Vec<String>> {
-    let mut occupied = BTreeSet::new();
-    if manifest.cdrom.is_some() {
-        occupied.insert(domain_xml::CDROM_TARGET.to_string());
-    }
+    let mut occupied = assign_manifest_cdrom_targets(manifest)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
 
     present_disks(&manifest.disks)
         .enumerate()
@@ -728,8 +762,57 @@ fn assign_manifest_disk_targets(manifest: &VmManifest) -> Result<Vec<String>> {
         .collect()
 }
 
+fn assign_manifest_cdrom_targets(manifest: &VmManifest) -> Result<Vec<String>> {
+    let Some(entries) = &manifest.cdroms else {
+        return Ok(manifest
+            .cdrom
+            .is_some()
+            .then(|| domain_xml::CDROM_TARGET.to_string())
+            .into_iter()
+            .collect());
+    };
+    let cdroms = present_cdroms(entries).collect::<Vec<_>>();
+    let mut occupied = BTreeSet::new();
+    let mut targets = vec![None; cdroms.len()];
+    for (index, cdrom) in cdroms.iter().enumerate() {
+        if let Some(target) = cdrom.target.as_deref() {
+            validate_cdrom_target(target)?;
+            if !occupied.insert(target.to_string()) {
+                bail!("duplicate CD-ROM target {target}");
+            }
+            targets[index] = Some(target.to_string());
+        }
+    }
+    for target in &mut targets {
+        if target.is_none() {
+            for index in 0.. {
+                let candidate = domain_xml::virtio_scsi_disk_target(index);
+                if occupied.insert(candidate.clone()) {
+                    *target = Some(candidate);
+                    break;
+                }
+            }
+        }
+    }
+    Ok(targets
+        .into_iter()
+        .map(|target| target.expect("CD-ROM target planning should be complete"))
+        .collect())
+}
+
 fn present_disks(disks: &[VmDiskEntry]) -> impl Iterator<Item = &VmDisk> {
     disks.iter().filter_map(VmDiskEntry::as_present)
+}
+
+fn present_cdroms(cdroms: &[VmCdromEntry]) -> impl Iterator<Item = &VmCdrom> {
+    cdroms.iter().filter_map(VmCdromEntry::as_present)
+}
+
+fn manifest_has_cdrom(manifest: &VmManifest) -> bool {
+    match &manifest.cdroms {
+        Some(cdroms) => present_cdroms(cdroms).next().is_some(),
+        None => manifest.cdrom.is_some(),
+    }
 }
 
 fn validate_new_vm_disks(manifest: &VmManifest) -> Result<()> {
@@ -781,7 +864,7 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
         .map(VmDiskEntry::present)
         .collect();
     let io_threads = io_threads_from_domain_xml(domain, devices)?;
-    let cdrom = optional_disk_source_path(devices, "cdrom", None)?;
+    let cdroms = cdroms_from_domain_xml(devices)?;
     let network = network_name(devices)?;
     let (graphics, vnc_listen, vnc_port) = graphics_config(devices)?;
     let serial_log = serial_log_path(devices);
@@ -793,7 +876,8 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
         memory: Some(memory),
         io_threads,
         disks,
-        cdrom,
+        cdrom: None,
+        cdroms: (!cdroms.is_empty()).then_some(cdroms),
         boot: Some(boot),
         memory_gib: memory.size_mib / 1024,
         vcpus,
@@ -833,11 +917,18 @@ fn patch_domain_xml(
     patch_machine(xml, domain, manifest.machine.as_ref(), &mut replacements)?;
     patch_cpu(xml, domain, manifest.cpu.as_ref(), &mut replacements)?;
     patch_boot_order(xml, domain, boot_devices, &mut replacements)?;
+    let mut reserved_cdrom_targets = devices
+        .children()
+        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("cdrom"))
+        .filter_map(disk_target_dev)
+        .collect::<BTreeSet<_>>();
+    reserved_cdrom_targets.extend(assign_manifest_cdrom_targets(manifest)?);
     patch_disks(
         xml,
         devices,
         &manifest.disks,
         manifest.io_threads,
+        &reserved_cdrom_targets,
         &mut replacements,
     )?;
     let present_manifest_disks = present_disks(&manifest.disks).cloned().collect::<Vec<_>>();
@@ -851,6 +942,8 @@ fn patch_domain_xml(
 
     if let Some(cdrom) = &manifest.cdrom {
         patch_disk_source(xml, devices, "cdrom", None, cdrom, &mut replacements)?;
+    } else if let Some(cdroms) = &manifest.cdroms {
+        patch_cdroms(xml, devices, cdroms, &mut replacements)?;
     }
 
     patch_network(xml, devices, &manifest.network, &mut replacements)?;
@@ -860,7 +953,25 @@ fn patch_domain_xml(
         patch_serial_log(xml, devices, serial_log, &mut replacements)?;
     }
 
-    apply_xml_replacements(xml, replacements)
+    let output = apply_xml_replacements(xml, replacements)?;
+    validate_unique_domain_disk_targets(&output)?;
+    Ok(output)
+}
+
+fn validate_unique_domain_disk_targets(xml: &str) -> Result<()> {
+    let doc = Document::parse(xml).context("failed to parse reconciled domain XML")?;
+    let devices = required_child(doc.root_element(), "devices")?;
+    let mut targets = BTreeSet::new();
+    for target in devices
+        .children()
+        .filter(|child| child.has_tag_name("disk"))
+        .filter_map(disk_target_dev)
+    {
+        if !targets.insert(target.clone()) {
+            bail!("reconciled domain XML has duplicate disk target {target}");
+        }
+    }
+    Ok(())
 }
 
 fn patch_disks(
@@ -868,6 +979,7 @@ fn patch_disks(
     devices: Node<'_, '_>,
     manifest_disks: &[VmDiskEntry],
     io_threads: Option<VmIoThreads>,
+    reserved_cdrom_targets: &BTreeSet<String>,
     replacements: &mut Vec<XmlReplacement>,
 ) -> Result<()> {
     let domain_disk_nodes = devices
@@ -924,11 +1036,7 @@ fn patch_disks(
         );
     }
 
-    let mut output_targets = devices
-        .children()
-        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("cdrom"))
-        .filter_map(disk_target_dev)
-        .collect::<BTreeSet<_>>();
+    let mut output_targets = reserved_cdrom_targets.clone();
     for (_, disk, matched_index, target) in &mut plans {
         let requested = disk
             .target
@@ -1017,6 +1125,163 @@ fn devices_closing_tag_start(xml: &str, devices: Node<'_, '_>) -> usize {
         .rfind("</devices>")
         .map(|offset| line_start(xml, range.start + offset))
         .expect("parsed devices element should have a closing tag")
+}
+
+fn patch_cdroms(
+    xml: &str,
+    devices: Node<'_, '_>,
+    manifest_cdroms: &[VmCdromEntry],
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let domain_nodes = devices
+        .children()
+        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("cdrom"))
+        .collect::<Vec<_>>();
+    let domain_cdroms = cdroms_from_domain_xml(devices)?;
+    let mut domain_cdroms = domain_nodes
+        .into_iter()
+        .zip(domain_cdroms)
+        .map(|(node, entry)| DomainCdromPatchEntry {
+            node,
+            cdrom: entry
+                .as_present()
+                .expect("domain CD-ROM parser returns present entries")
+                .clone(),
+            used: false,
+        })
+        .collect::<Vec<_>>();
+
+    for id in manifest_cdroms.iter().filter_map(VmCdromEntry::absent_id) {
+        let matches = domain_cdroms
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.used && entry.cdrom.id == id)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("existing domain XML has duplicate CD-ROM id {id}");
+        }
+        let Some(index) = matches.into_iter().next() else {
+            continue;
+        };
+        domain_cdroms[index].used = true;
+        let range = domain_cdroms[index].node.range();
+        replacements.push(XmlReplacement {
+            range: line_start(xml, range.start)..line_end(xml, range.end),
+            value: String::new(),
+        });
+    }
+
+    let desired = present_cdroms(manifest_cdroms).collect::<Vec<_>>();
+    let mut plans = Vec::with_capacity(desired.len());
+    for cdrom in desired {
+        let matches = domain_cdroms
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                !entry.used
+                    && (entry.cdrom.id == cdrom.id
+                        || cdrom.target.as_deref() == entry.cdrom.target.as_deref())
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!(
+                "existing domain XML has multiple CD-ROMs matching {}",
+                cdrom.id
+            );
+        }
+        let matched = matches.into_iter().next();
+        if let Some(index) = matched {
+            domain_cdroms[index].used = true;
+        }
+        plans.push((cdrom, matched, None::<String>));
+    }
+
+    let mut occupied = devices
+        .children()
+        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("disk"))
+        .filter_map(disk_target_dev)
+        .chain(
+            domain_cdroms
+                .iter()
+                .filter(|entry| !entry.used)
+                .filter_map(|entry| entry.cdrom.target.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    for (cdrom, matched, target) in &mut plans {
+        let requested = cdrom
+            .target
+            .as_deref()
+            .or_else(|| matched.and_then(|index| domain_cdroms[index].cdrom.target.as_deref()));
+        if let Some(requested) = requested {
+            validate_cdrom_target(requested)?;
+            if !occupied.insert(requested.to_string()) {
+                bail!("CD-ROM target {requested} is already in use");
+            }
+            *target = Some(requested.to_string());
+        }
+    }
+    for (_, _, target) in &mut plans {
+        if target.is_none() {
+            for index in 0.. {
+                let candidate = domain_xml::virtio_scsi_disk_target(index);
+                if occupied.insert(candidate.clone()) {
+                    *target = Some(candidate);
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut new_xml = String::new();
+    for (cdrom, matched, target) in plans {
+        let target = target.expect("CD-ROM target planning should be complete");
+        let desired_xml = domain_xml::build_cdrom_xml(&domain_xml::VmLaunchCdromSpec {
+            id: &cdrom.id,
+            media: cdrom.media.as_deref(),
+            target: &target,
+        });
+        if let Some(index) = matched {
+            let node = domain_cdroms[index].node;
+            let range = node.range();
+            replacements.push(XmlReplacement {
+                range: line_start(xml, range.start)..line_end(xml, range.end),
+                value: vm_reconcile::merge_cdrom_xml(xml, node, &desired_xml),
+            });
+        } else {
+            new_xml.push_str(&desired_xml);
+        }
+    }
+
+    if !new_xml.is_empty() {
+        let end = devices
+            .children()
+            .rfind(|child| child.has_tag_name("disk"))
+            .map(|node| line_end(xml, node.range().end))
+            .or_else(|| {
+                optional_child(devices, "emulator").map(|node| line_end(xml, node.range().end))
+            })
+            .or_else(|| {
+                devices
+                    .children()
+                    .find(Node::is_element)
+                    .map(|node| line_start(xml, node.range().start))
+            })
+            .unwrap_or_else(|| devices_closing_tag_start(xml, devices));
+        replacements.push(XmlReplacement {
+            range: end..end,
+            value: new_xml,
+        });
+    }
+
+    Ok(())
+}
+
+struct DomainCdromPatchEntry<'a, 'input> {
+    node: Node<'a, 'input>,
+    cdrom: VmCdrom,
+    used: bool,
 }
 
 fn patch_virtio_scsi_controller(
@@ -1913,6 +2178,41 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
     Ok(disks)
 }
 
+fn cdroms_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmCdromEntry>> {
+    devices
+        .children()
+        .filter(|child| child.has_tag_name("disk") && child.attribute("device") == Some("cdrom"))
+        .map(|cdrom| {
+            if cdrom.attribute("type").unwrap_or("file") != "file" {
+                bail!("unsupported non-file CD-ROM device");
+            }
+            let target = required_child(cdrom, "target")?
+                .attribute("dev")
+                .context("domain XML CD-ROM target is missing dev")?
+                .to_string();
+            let media = optional_child(cdrom, "source")
+                .map(|source| {
+                    source
+                        .attribute("file")
+                        .map(PathBuf::from)
+                        .context("domain XML CD-ROM source is missing file")
+                })
+                .transpose()?;
+            let id = optional_child(cdrom, "alias")
+                .and_then(|alias| alias.attribute("name"))
+                .and_then(|name| name.strip_prefix("ua-qtr-cdrom-"))
+                .filter(|id| is_valid_disk_id(id))
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("cdrom-{target}"));
+            Ok(VmCdromEntry::present(VmCdrom {
+                id,
+                media,
+                target: Some(target),
+            }))
+        })
+        .collect()
+}
+
 fn disk_id_from_domain_xml(disk: Node<'_, '_>, target: &str) -> String {
     optional_child(disk, "alias")
         .and_then(|alias| alias.attribute("name"))
@@ -2224,6 +2524,15 @@ fn normalize_manifest_paths(manifest: &mut VmManifest, base_dir: &Path) -> Resul
     if let Some(cdrom) = &manifest.cdrom {
         manifest.cdrom = Some(manifest_relative_path(base_dir, cdrom));
     }
+    if let Some(cdroms) = &mut manifest.cdroms {
+        for entry in cdroms {
+            if let Some(cdrom) = entry.as_present_mut()
+                && let Some(media) = &cdrom.media
+            {
+                cdrom.media = Some(manifest_relative_path(base_dir, media));
+            }
+        }
+    }
 
     if let Some(serial_log) = &manifest.serial_log {
         manifest.serial_log = Some(manifest_relative_path(base_dir, serial_log));
@@ -2351,6 +2660,26 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
         }
     }
 
+    if manifest.cdrom.is_some() && manifest.cdroms.is_some() {
+        bail!("cdrom and cdroms are mutually exclusive");
+    }
+    if let Some(cdroms) = &manifest.cdroms {
+        let mut ids = BTreeSet::new();
+        for entry in cdroms {
+            validate_cdrom_id(entry.id())?;
+            if !ids.insert(entry.id()) {
+                bail!("duplicate CD-ROM id {}", entry.id());
+            }
+            if let Some(cdrom) = entry.as_present()
+                && let Some(media) = &cdrom.media
+                && !media.is_file()
+            {
+                bail!("CD-ROM media {} does not exist", media.display());
+            }
+        }
+        assign_manifest_cdrom_targets(manifest)?;
+    }
+
     if let Some(cdrom) = &manifest.cdrom
         && !cdrom.exists()
     {
@@ -2366,6 +2695,20 @@ fn validate_disk_id(id: &str) -> Result<()> {
     }
     if !is_valid_disk_id(id) {
         bail!("disk id {id:?} contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn validate_cdrom_id(id: &str) -> Result<()> {
+    if !is_valid_disk_id(id) {
+        bail!("CD-ROM id {id:?} must contain 1 to 48 letters, numbers, '-', '_' or '.'");
+    }
+    Ok(())
+}
+
+fn validate_cdrom_target(target: &str) -> Result<()> {
+    if !target.starts_with("sd") || target.len() <= 2 {
+        bail!("CD-ROM target {target} must start with sd");
     }
     Ok(())
 }
@@ -3198,7 +3541,7 @@ pub fn create_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiR
 
     let boot = manifest_boot_order(&manifest);
     let boot_devices = parse_boot_devices(&boot).map_err(VmApiError::InvalidRequest)?;
-    if boot_devices.contains(&BootDevice::Cdrom) && manifest.cdrom.is_none() {
+    if boot_devices.contains(&BootDevice::Cdrom) && !manifest_has_cdrom(&manifest) {
         return Err(VmApiError::InvalidRequest(anyhow::anyhow!(
             "boot order contains cdrom but cdrom was not provided"
         )));
@@ -3227,7 +3570,7 @@ pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiRe
 
     let boot = manifest_boot_order(&manifest);
     let boot_devices = parse_boot_devices(&boot).map_err(VmApiError::InvalidRequest)?;
-    if boot_devices.contains(&BootDevice::Cdrom) && manifest.cdrom.is_none() {
+    if boot_devices.contains(&BootDevice::Cdrom) && !manifest_has_cdrom(&manifest) {
         return Err(VmApiError::InvalidRequest(anyhow::anyhow!(
             "boot order contains cdrom but cdrom was not provided"
         )));
@@ -3526,7 +3869,7 @@ fn wait_for_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain_xml::VmLaunchMemorySpec;
+    use crate::domain_xml::{VmLaunchCdromSpec, VmLaunchMemorySpec};
 
     #[test]
     fn dumps_qtr_domain_xml_to_manifest() {
@@ -3558,6 +3901,11 @@ mod tests {
                 }),
             },
         ];
+        let cdroms = [VmLaunchCdromSpec {
+            id: "installer",
+            media: Some(Path::new("/isos/os.iso")),
+            target: "sda",
+        }];
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "install-os",
             machine: None,
@@ -3576,7 +3924,7 @@ mod tests {
                 queues: 4,
             }),
             disks: &disks,
-            cdrom: Some(Path::new("/isos/os.iso")),
+            cdroms: &cdroms,
             serial_log: Some(Path::new("/logs/install-os.serial.log")),
             boot_devices: &boot_devices,
             network: "default",
@@ -3626,7 +3974,10 @@ mod tests {
         );
         assert!(xml.contains("<iothreads>4</iothreads>"));
         assert!(xml.contains("<controller type='scsi' index='0' model='virtio-scsi'>"));
-        assert_eq!(manifest.cdrom, Some(PathBuf::from("/isos/os.iso")));
+        let cdrom = manifest.cdroms.as_ref().unwrap()[0].as_present().unwrap();
+        assert_eq!(cdrom.id, "installer");
+        assert_eq!(cdrom.media, Some(PathBuf::from("/isos/os.iso")));
+        assert_eq!(cdrom.target.as_deref(), Some("sda"));
         assert_eq!(
             manifest.boot,
             Some(vec!["cdrom".to_string(), "hd".to_string()])
@@ -3749,6 +4100,7 @@ mod tests {
             cdrom: Some(PathBuf::from(
                 "/fixtures/qtr/iso/CentOS-7-x86_64-DVD-2207-02.iso",
             )),
+            cdroms: None,
             boot: Some(vec!["hd".to_string()]),
             memory_gib: 4,
             vcpus: 2,
@@ -4001,6 +4353,37 @@ mod tests {
     }
 
     #[test]
+    fn builds_multiple_cdroms_and_reserves_scsi_targets() {
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/scsi.qcow2",
+            None,
+            VmDiskBus::VirtioScsi,
+        )]);
+        manifest.cdroms = Some(vec![
+            VmCdromEntry::present(VmCdrom {
+                id: "installer".to_string(),
+                media: Some(PathBuf::from("/isos/os.iso")),
+                target: None,
+            }),
+            VmCdromEntry::present(VmCdrom {
+                id: "tools".to_string(),
+                media: None,
+                target: None,
+            }),
+        ]);
+
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Cdrom, BootDevice::Hd])
+            .expect("multi-CD-ROM domain XML should build");
+
+        assert!(xml.contains("<target dev='sda' bus='sata'/>"));
+        assert!(xml.contains("<target dev='sdb' bus='sata'/>"));
+        assert!(xml.contains("<target dev='sdc' bus='scsi'/>"));
+        assert!(xml.contains("<alias name='ua-qtr-cdrom-installer'/>"));
+        assert!(xml.contains("<alias name='ua-qtr-cdrom-tools'/>"));
+        assert_eq!(xml.matches("device='cdrom'").count(), 2);
+    }
+
+    #[test]
     fn appended_scsi_disk_skips_existing_cdrom_target() {
         let xml_with_cdrom = test_domain_xml().replace(
             "    <interface type='network'>",
@@ -4018,6 +4401,88 @@ mod tests {
             patched
                 .contains("<source file='/vm/scsi.qcow2'/>\n      <target dev='sdb' bus='scsi'/>")
         );
+    }
+
+    #[test]
+    fn reconciles_cdrom_media_empty_trays_and_detach() {
+        let current_cdrom = domain_xml::build_cdrom_xml(&domain_xml::VmLaunchCdromSpec {
+            id: "installer",
+            media: Some(Path::new("/isos/old.iso")),
+            target: "sda",
+        })
+        .replace(
+            "<source file='/isos/old.iso'/>",
+            "<source file='/isos/old.iso' startupPolicy='optional'/>",
+        )
+        .replace(
+            "    </disk>",
+            "      <address type='drive' controller='0' bus='0' target='0' unit='0'/>\n    </disk>",
+        );
+        let xml = test_domain_xml().replace(
+            "    <interface type='network'>",
+            &format!("{current_cdrom}    <interface type='network'>"),
+        );
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/sys.qcow2",
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.cdroms = Some(vec![
+            VmCdromEntry::present(VmCdrom {
+                id: "installer".to_string(),
+                media: Some(PathBuf::from("/isos/new.iso")),
+                target: None,
+            }),
+            VmCdromEntry::present(VmCdrom {
+                id: "tools".to_string(),
+                media: None,
+                target: None,
+            }),
+        ]);
+
+        let changed = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd])
+            .expect("CD-ROM media should reconcile");
+        assert!(changed.contains("<source file='/isos/new.iso' startupPolicy='optional'/>"));
+        assert!(changed.contains("<target dev='sda' bus='sata'/>"));
+        assert!(changed.contains("<target dev='sdb' bus='sata'/>"));
+        assert!(changed.contains("<alias name='ua-qtr-cdrom-tools'/>"));
+        assert!(changed.contains("<address type='drive' controller='0'"));
+        assert_eq!(changed.matches("device='cdrom'").count(), 2);
+
+        let changed_again = patch_domain_xml(&changed, &manifest, &[BootDevice::Hd])
+            .expect("CD-ROM reconciliation should be idempotent");
+        assert_eq!(changed_again, changed);
+
+        manifest.cdroms = Some(vec![
+            VmCdromEntry::present(VmCdrom {
+                id: "installer".to_string(),
+                media: None,
+                target: None,
+            }),
+            VmCdromEntry::present(VmCdrom {
+                id: "tools".to_string(),
+                media: None,
+                target: None,
+            }),
+        ]);
+        let ejected = patch_domain_xml(&changed, &manifest, &[BootDevice::Hd])
+            .expect("CD-ROM media should eject");
+        assert!(!ejected.contains("/isos/new.iso"));
+        assert!(ejected.contains("ua-qtr-cdrom-installer"));
+
+        manifest.cdroms = Some(vec![
+            VmCdromEntry::absent("installer"),
+            VmCdromEntry::present(VmCdrom {
+                id: "tools".to_string(),
+                media: None,
+                target: None,
+            }),
+        ]);
+        let detached = patch_domain_xml(&ejected, &manifest, &[BootDevice::Hd])
+            .expect("CD-ROM should detach persistently");
+        assert!(!detached.contains("ua-qtr-cdrom-installer"));
+        assert!(detached.contains("ua-qtr-cdrom-tools"));
+        assert_eq!(detached.matches("device='cdrom'").count(), 1);
     }
 
     #[test]
@@ -4239,6 +4704,7 @@ disks:
                 io: None,
             })],
             cdrom: None,
+            cdroms: None,
             boot: Some(vec!["hd".to_string()]),
             memory_gib: 4,
             vcpus: 2,
@@ -4341,6 +4807,56 @@ disks:
         );
         let error = parse_manifest_yaml(invalid_absent).unwrap_err();
         assert!(format!("{error:#}").contains("absent disk only accepts id and state"));
+    }
+
+    #[test]
+    fn parses_loaded_empty_and_absent_cdroms() {
+        let yaml = r#"schemaVersion: 2
+name: vm
+disks:
+- id: root
+  path: /tmp/root.qcow2
+  format: qcow2
+cdroms:
+- id: installer
+  media: /isos/os.iso
+- id: tools
+  media: null
+- id: retired
+  state: absent
+"#;
+
+        let manifest = parse_manifest_yaml(yaml).expect("CD-ROM entries should parse");
+        let output = serialize_manifest_yaml(&manifest).expect("CD-ROM entries should serialize");
+        let cdroms = manifest.cdroms.as_ref().unwrap();
+
+        assert_eq!(
+            cdroms[0].as_present().unwrap().media,
+            Some(PathBuf::from("/isos/os.iso"))
+        );
+        assert_eq!(cdroms[1].as_present().unwrap().media, None);
+        assert_eq!(cdroms[2].absent_id(), Some("retired"));
+        assert!(output.contains("media: null"));
+        assert!(output.contains("state: absent"));
+    }
+
+    #[test]
+    fn rejects_cdroms_in_v1_and_legacy_cdrom_conflict() {
+        let v1 = "schemaVersion: 1\nname: vm\ndisks: []\ncdroms: []\n";
+        let conflict = "schemaVersion: 2\nname: vm\ndisks: []\ncdrom: /isos/os.iso\ncdroms: []\n";
+
+        assert!(
+            parse_manifest_yaml(v1)
+                .unwrap_err()
+                .to_string()
+                .contains("cdroms requires schemaVersion 2")
+        );
+        assert!(
+            parse_manifest_yaml(conflict)
+                .unwrap_err()
+                .to_string()
+                .contains("cdrom and cdroms are mutually exclusive")
+        );
     }
 
     #[test]
@@ -4500,6 +5016,7 @@ disks:
             io_threads: None,
             disks: disks.into_iter().map(VmDiskEntry::present).collect(),
             cdrom: None,
+            cdroms: None,
             boot: Some(vec!["hd".to_string()]),
             memory_gib: 4,
             vcpus: 2,

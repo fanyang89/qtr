@@ -103,10 +103,154 @@ pub(crate) fn merge_disk_xml(
     output
 }
 
+pub(crate) fn merge_cdrom_xml(
+    current_xml: &str,
+    current_cdrom: Node<'_, '_>,
+    desired_xml: &str,
+) -> String {
+    let desired_doc = Document::parse(desired_xml).expect("generated CD-ROM XML should parse");
+    let desired_cdrom = desired_doc.root_element();
+    let desired_driver = desired_child(desired_cdrom, "driver");
+    let desired_source = desired_cdrom
+        .children()
+        .find(|child| child.has_tag_name("source"));
+    let desired_target = desired_child(desired_cdrom, "target");
+    let desired_readonly = desired_child(desired_cdrom, "readonly");
+    let desired_alias = desired_child(desired_cdrom, "alias");
+
+    let mut output = render_element_start(
+        "    ",
+        desired_cdrom,
+        Some(current_cdrom),
+        &["type", "device"],
+    );
+    output.push_str(">\n");
+
+    let mut emitted_driver = !current_cdrom
+        .children()
+        .any(|child| child.has_tag_name("driver"));
+    if emitted_driver {
+        output.push_str(&render_disk_child(
+            current_xml,
+            desired_xml,
+            desired_driver,
+            None,
+        ));
+    }
+    let mut emitted_source = false;
+    let mut emitted_target = false;
+    let mut emitted_readonly = false;
+    let mut emitted_alias = false;
+    for child in current_cdrom.children().filter(Node::is_element) {
+        match child.tag_name().name() {
+            "driver" if !emitted_driver => {
+                output.push_str(&render_disk_child(
+                    current_xml,
+                    desired_xml,
+                    desired_driver,
+                    Some(child),
+                ));
+                emitted_driver = true;
+            }
+            "source" if !emitted_source => {
+                if let Some(desired_source) = desired_source {
+                    output.push_str(&render_disk_child(
+                        current_xml,
+                        desired_xml,
+                        desired_source,
+                        Some(child),
+                    ));
+                }
+                emitted_source = true;
+            }
+            "target" if !emitted_target => {
+                if !emitted_source && let Some(desired_source) = desired_source {
+                    output.push_str(&render_disk_child(
+                        current_xml,
+                        desired_xml,
+                        desired_source,
+                        None,
+                    ));
+                    emitted_source = true;
+                }
+                output.push_str(&render_disk_child(
+                    current_xml,
+                    desired_xml,
+                    desired_target,
+                    Some(child),
+                ));
+                emitted_target = true;
+            }
+            "readonly" if !emitted_readonly => {
+                output.push_str(&render_raw_node(desired_xml, desired_readonly, "      "));
+                emitted_readonly = true;
+            }
+            "alias" if !emitted_alias => {
+                if is_qtr_alias(child, "ua-qtr-cdrom-") {
+                    output.push_str(&render_raw_node(desired_xml, desired_alias, "      "));
+                } else {
+                    output.push_str(&render_raw_node(current_xml, child, "      "));
+                }
+                emitted_alias = true;
+            }
+            "address" => {
+                if !emitted_readonly {
+                    output.push_str(&render_raw_node(desired_xml, desired_readonly, "      "));
+                    emitted_readonly = true;
+                }
+                if !emitted_alias {
+                    output.push_str(&render_raw_node(desired_xml, desired_alias, "      "));
+                    emitted_alias = true;
+                }
+                output.push_str(&render_raw_node(current_xml, child, "      "));
+            }
+            "driver" | "source" | "target" | "readonly" | "alias" => {}
+            _ => output.push_str(&render_raw_node(current_xml, child, "      ")),
+        }
+    }
+
+    if !emitted_driver {
+        output.push_str(&render_disk_child(
+            current_xml,
+            desired_xml,
+            desired_driver,
+            None,
+        ));
+    }
+    if !emitted_source && let Some(desired_source) = desired_source {
+        output.push_str(&render_disk_child(
+            current_xml,
+            desired_xml,
+            desired_source,
+            None,
+        ));
+    }
+    if !emitted_target {
+        output.push_str(&render_disk_child(
+            current_xml,
+            desired_xml,
+            desired_target,
+            None,
+        ));
+    }
+    if !emitted_readonly {
+        output.push_str(&render_raw_node(desired_xml, desired_readonly, "      "));
+    }
+    if !emitted_alias {
+        output.push_str(&render_raw_node(desired_xml, desired_alias, "      "));
+    }
+    output.push_str("    </disk>\n");
+    output
+}
+
 fn is_qtr_disk_alias(alias: Node<'_, '_>) -> bool {
+    is_qtr_alias(alias, "ua-qtr-disk-")
+}
+
+fn is_qtr_alias(alias: Node<'_, '_>, prefix: &str) -> bool {
     alias
         .attribute("name")
-        .is_some_and(|name| name.starts_with("ua-qtr-disk-"))
+        .is_some_and(|name| name.starts_with(prefix))
 }
 
 fn desired_child<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Node<'a, 'input> {
