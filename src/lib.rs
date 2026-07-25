@@ -7,4 +7,5 @@ pub mod host;
 pub mod network;
 pub mod storage;
 pub mod vm;
+pub mod vm_model;
 pub mod web;
