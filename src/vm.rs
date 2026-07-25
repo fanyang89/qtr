@@ -29,8 +29,9 @@ use crate::{
         VmStartArgs, VmStopArgs,
     },
     domain_xml::{
-        self, BootDevice, GraphicsSpec, VmLaunchDiskSource, VmLaunchDiskSpec, VmLaunchDomainSpec,
-        VmLaunchIoThreadsSpec, build_vm_launch_domain_xml, parse_boot_devices,
+        self, BootDevice, GraphicsSpec, VmLaunchCpuSpec, VmLaunchCpuTopology, VmLaunchDiskSource,
+        VmLaunchDiskSpec, VmLaunchDomainSpec, VmLaunchIoThreadsSpec, VmLaunchMemorySpec,
+        build_vm_launch_domain_xml, parse_boot_devices,
     },
     guest_agent,
 };
@@ -60,6 +61,12 @@ const VM_MANIFEST_SCHEMA_VERSION: u64 = 1;
 pub struct VmManifest {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<VmMachine>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<VmCpu>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<VmMemory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub io_threads: Option<VmIoThreads>,
     pub disks: Vec<VmDisk>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,6 +87,88 @@ pub struct VmManifest {
     pub vnc_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial_log: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmMachine {
+    #[serde(rename = "type")]
+    pub machine_type: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmCpu {
+    #[serde(default)]
+    pub mode: VmCpuMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vcpus: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topology: Option<VmCpuTopology>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VmCpuMode {
+    #[default]
+    HostPassthrough,
+    HostModel,
+    Custom,
+}
+
+impl VmCpuMode {
+    fn as_xml(self) -> &'static str {
+        match self {
+            Self::HostPassthrough => "host-passthrough",
+            Self::HostModel => "host-model",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmCpuTopology {
+    pub sockets: u32,
+    pub cores: u32,
+    pub threads: u32,
+}
+
+impl VmCpuTopology {
+    fn vcpus(self) -> Result<u32> {
+        self.sockets
+            .checked_mul(self.cores)
+            .and_then(|value| value.checked_mul(self.threads))
+            .context("CPU topology is too large")
+    }
+
+    fn launch(self) -> VmLaunchCpuTopology {
+        VmLaunchCpuTopology {
+            sockets: self.sockets,
+            cores: self.cores,
+            threads: self.threads,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmMemory {
+    #[serde(rename = "sizeMiB")]
+    pub size_mib: u64,
+    #[serde(rename = "maxMiB", skip_serializing_if = "Option::is_none")]
+    pub max_mib: Option<u64>,
+}
+
+impl VmMemory {
+    fn launch(self) -> VmLaunchMemorySpec {
+        VmLaunchMemorySpec {
+            size_mib: self.size_mib,
+            max_mib: self.max_mib,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -362,6 +451,40 @@ fn default_vm_disk_type() -> VmDiskType {
     VmDiskType::File
 }
 
+fn effective_memory(manifest: &VmManifest) -> Result<VmMemory> {
+    match manifest.memory {
+        Some(memory) => Ok(memory),
+        None => Ok(VmMemory {
+            size_mib: manifest
+                .memory_gib
+                .checked_mul(1024)
+                .context("memoryGiB is too large")?,
+            max_mib: None,
+        }),
+    }
+}
+
+fn effective_vcpus(manifest: &VmManifest) -> Result<u32> {
+    let Some(cpu) = &manifest.cpu else {
+        return Ok(manifest.vcpus);
+    };
+
+    match (cpu.vcpus, cpu.topology) {
+        (Some(vcpus), None) => Ok(vcpus),
+        (None, Some(topology)) => topology.vcpus(),
+        (Some(_), Some(_)) => bail!("cpu.vcpus and cpu.topology are mutually exclusive"),
+        (None, None) => bail!("cpu requires vcpus or topology"),
+    }
+}
+
+fn launch_cpu(manifest: &VmManifest) -> Option<VmLaunchCpuSpec<'_>> {
+    manifest.cpu.as_ref().map(|cpu| VmLaunchCpuSpec {
+        mode: cpu.mode.as_xml(),
+        model: cpu.model.as_deref(),
+        topology: cpu.topology.map(VmCpuTopology::launch),
+    })
+}
+
 pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
     let value: serde_yaml::Value =
         serde_yaml::from_str(input).context("failed to parse VM YAML document")?;
@@ -370,6 +493,14 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
         _ => bail!("VM YAML document must be a mapping"),
     };
     let schema_key = serde_yaml::Value::String("schemaVersion".to_string());
+    let has_key = |key: &str| mapping.contains_key(serde_yaml::Value::String(key.to_string()));
+
+    if has_key("memory") && has_key("memoryGiB") {
+        bail!("memory and memoryGiB are mutually exclusive");
+    }
+    if has_key("cpu") && has_key("vcpus") {
+        bail!("cpu and vcpus are mutually exclusive");
+    }
 
     if let Some(version) = mapping.remove(&schema_key) {
         let version = version
@@ -386,9 +517,15 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
 
 pub fn serialize_manifest_yaml(manifest: &VmManifest) -> Result<String> {
     let value = serde_yaml::to_value(manifest).context("failed to serialize VM manifest")?;
-    let serde_yaml::Value::Mapping(manifest_mapping) = value else {
+    let serde_yaml::Value::Mapping(mut manifest_mapping) = value else {
         unreachable!("VmManifest must serialize to a mapping");
     };
+    if manifest.memory.is_some() {
+        manifest_mapping.remove(serde_yaml::Value::String("memoryGiB".to_string()));
+    }
+    if manifest.cpu.is_some() {
+        manifest_mapping.remove(serde_yaml::Value::String("vcpus".to_string()));
+    }
     let mut document = serde_yaml::Mapping::new();
     document.insert(
         serde_yaml::Value::String("schemaVersion".to_string()),
@@ -587,9 +724,28 @@ fn init(args: VmInitArgs) -> Result<()> {
     } else {
         vec!["cdrom".to_string(), "hd".to_string()]
     };
+    let memory_mib = args
+        .memory_gib
+        .checked_mul(1024)
+        .context("memoryGiB is too large")?;
 
     let manifest = VmManifest {
         name: args.name,
+        machine: args.machine.map(|machine_type| VmMachine { machine_type }),
+        cpu: Some(VmCpu {
+            mode: VmCpuMode::HostPassthrough,
+            model: None,
+            vcpus: None,
+            topology: Some(VmCpuTopology {
+                sockets: 1,
+                cores: args.vcpus,
+                threads: 1,
+            }),
+        }),
+        memory: Some(VmMemory {
+            size_mib: memory_mib,
+            max_mib: None,
+        }),
         io_threads: None,
         disks,
         cdrom: (!args.no_cdrom).then_some(args.cdrom),
@@ -643,16 +799,11 @@ fn apply(args: VmApplyArgs) -> Result<()> {
         bail!("boot order contains cdrom but cdrom was not provided");
     }
 
-    let memory_mib = manifest
-        .memory_gib
-        .checked_mul(1024)
-        .context("memoryGiB is too large")?;
-
     let current_xml = current_domain_xml(&args.connect_uri, &manifest.name)?;
     let xml = if current_xml.is_empty() {
-        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)?
+        build_manifest_domain_xml(&manifest, &boot_devices)?
     } else {
-        patch_domain_xml(&current_xml, &manifest, &boot_devices, memory_mib)?
+        patch_domain_xml(&current_xml, &manifest, &boot_devices)?
     };
 
     if args.dry_run {
@@ -707,11 +858,7 @@ fn apply(args: VmApplyArgs) -> Result<()> {
     Ok(())
 }
 
-fn build_manifest_domain_xml(
-    manifest: &VmManifest,
-    boot_devices: &[BootDevice],
-    memory_mib: u64,
-) -> Result<String> {
+fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice]) -> Result<String> {
     let targets = assign_manifest_disk_targets(manifest)?;
     let disks = manifest
         .disks
@@ -720,10 +867,18 @@ fn build_manifest_domain_xml(
         .map(|(disk, target)| launch_disk_spec(disk, target, manifest.io_threads))
         .collect::<Vec<_>>();
 
+    let memory = effective_memory(manifest)?;
+    let vcpus = effective_vcpus(manifest)?;
+
     Ok(build_vm_launch_domain_xml(VmLaunchDomainSpec {
         name: &manifest.name,
-        memory_mib,
-        vcpus: manifest.vcpus,
+        machine: manifest
+            .machine
+            .as_ref()
+            .map(|machine| machine.machine_type.as_str()),
+        memory: memory.launch(),
+        vcpus,
+        cpu: launch_cpu(manifest),
         io_threads: manifest.io_threads.map(VmIoThreads::effective),
         disks: &disks,
         cdrom: manifest.cdrom.as_deref(),
@@ -840,10 +995,10 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
     let domain = doc.root_element();
 
     let name = required_child_text(domain, "name")?.to_string();
-    let memory_mib = memory_mib(domain)?;
-    if memory_mib % 1024 != 0 {
-        bail!("domain memory {memory_mib} MiB cannot be represented as whole GiB");
-    }
+    let memory = memory_from_domain_xml(domain)?;
+    let vcpus = required_child_text(domain, "vcpu")?
+        .parse()
+        .context("failed to parse domain vcpus")?;
 
     let boot = boot_order(domain)?;
     let devices = required_child(domain, "devices")?;
@@ -856,14 +1011,15 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
 
     Ok(VmManifest {
         name,
+        machine: machine_from_domain_xml(domain),
+        cpu: cpu_from_domain_xml(domain, vcpus)?,
+        memory: Some(memory),
         io_threads,
         disks,
         cdrom,
         boot: Some(boot),
-        memory_gib: memory_mib / 1024,
-        vcpus: required_child_text(domain, "vcpu")?
-            .parse()
-            .context("failed to parse domain vcpus")?,
+        memory_gib: memory.size_mib / 1024,
+        vcpus,
         network,
         graphics,
         vnc_listen,
@@ -881,21 +1037,24 @@ fn patch_domain_xml(
     xml: &str,
     manifest: &VmManifest,
     boot_devices: &[BootDevice],
-    memory_mib: u64,
 ) -> Result<String> {
     let doc = Document::parse(xml).context("failed to parse existing libvirt domain XML")?;
     let domain = doc.root_element();
     let devices = required_child(domain, "devices")?;
     let mut replacements = Vec::new();
+    let memory = effective_memory(manifest)?;
+    let vcpus = effective_vcpus(manifest)?;
 
-    patch_memory(xml, domain, memory_mib, &mut replacements)?;
+    patch_memory(xml, domain, memory, &mut replacements)?;
     patch_io_threads(xml, domain, manifest.io_threads, &mut replacements)?;
     push_text_replacement(
         xml,
         required_child(domain, "vcpu")?,
-        &manifest.vcpus.to_string(),
+        &vcpus.to_string(),
         &mut replacements,
     )?;
+    patch_machine(xml, domain, manifest.machine.as_ref(), &mut replacements)?;
+    patch_cpu(xml, domain, manifest.cpu.as_ref(), &mut replacements)?;
     patch_boot_order(xml, domain, boot_devices, &mut replacements)?;
     patch_disks(
         xml,
@@ -1267,31 +1426,175 @@ fn build_patched_disk_xml(
     desired
 }
 
-fn patch_memory(
+fn patch_machine(
     xml: &str,
     domain: Node<'_, '_>,
-    memory_mib: u64,
+    machine: Option<&VmMachine>,
     replacements: &mut Vec<XmlReplacement>,
 ) -> Result<()> {
-    for tag in ["memory", "currentMemory"] {
-        let node = required_child(domain, tag)?;
-        let unit = node.attribute("unit").unwrap_or("KiB");
-        let value = memory_value_for_unit(memory_mib, unit)?;
-        push_text_replacement(xml, node, &value.to_string(), replacements)?;
+    let Some(machine) = machine else {
+        return Ok(());
+    };
+    let os_type = required_child(required_child(domain, "os")?, "type")?;
+    push_attr_upsert_replacement(xml, os_type, "machine", &machine.machine_type, replacements)
+}
+
+fn patch_cpu(
+    xml: &str,
+    domain: Node<'_, '_>,
+    cpu: Option<&VmCpu>,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let Some(cpu) = cpu else {
+        return Ok(());
+    };
+    let spec = VmLaunchCpuSpec {
+        mode: cpu.mode.as_xml(),
+        model: cpu.model.as_deref(),
+        topology: cpu.topology.map(VmCpuTopology::launch),
+    };
+
+    if let Some(current) = optional_child(domain, "cpu") {
+        let range = current.range();
+        replacements.push(XmlReplacement {
+            range: line_start(xml, range.start)..line_end(xml, range.end),
+            value: build_patched_cpu_xml(xml, current, spec),
+        });
+    } else {
+        let devices = required_child(domain, "devices")?;
+        let start = line_start(xml, devices.range().start);
+        replacements.push(XmlReplacement {
+            range: start..start,
+            value: domain_xml::build_cpu_xml(spec),
+        });
     }
 
     Ok(())
+}
+
+fn build_patched_cpu_xml(xml: &str, current: Node<'_, '_>, spec: VmLaunchCpuSpec<'_>) -> String {
+    let mut desired = domain_xml::build_cpu_xml(spec);
+    let extra_attributes = current
+        .attributes()
+        .filter(|attribute| !matches!(attribute.name(), "mode" | "check" | "migratable" | "match"))
+        .map(|attribute| {
+            format!(
+                " {}='{}'",
+                attribute.name(),
+                escape_xml_value(attribute.value())
+            )
+        })
+        .collect::<String>();
+    if !extra_attributes.is_empty() {
+        let tag_end = desired.find('>').expect("generated CPU XML has start tag");
+        let insert_at = if desired.as_bytes()[tag_end - 1] == b'/' {
+            tag_end - 1
+        } else {
+            tag_end
+        };
+        desired.insert_str(insert_at, &extra_attributes);
+    }
+
+    let extra_children = current
+        .children()
+        .filter(|child| {
+            child.is_element() && !child.has_tag_name("model") && !child.has_tag_name("topology")
+        })
+        .map(|child| {
+            let range = child.range();
+            (child.tag_name().name(), format!("    {}\n", &xml[range]))
+        })
+        .collect::<Vec<_>>();
+    if extra_children.is_empty() {
+        return desired;
+    }
+
+    if !desired.contains("  </cpu>\n") {
+        let self_close = desired
+            .rfind("/>\n")
+            .expect("generated CPU XML is self-closing or has a closing tag");
+        desired.replace_range(self_close.., ">\n  </cpu>\n");
+    }
+
+    let before_topology = extra_children
+        .iter()
+        .filter(|(name, _)| *name == "vendor")
+        .map(|(_, xml)| xml.as_str())
+        .collect::<String>();
+    if !before_topology.is_empty() {
+        let insert_at = desired
+            .find("    <topology")
+            .or_else(|| desired.rfind("  </cpu>\n"))
+            .expect("expanded CPU XML has a closing tag");
+        desired.insert_str(insert_at, &before_topology);
+    }
+
+    let after_topology = extra_children
+        .iter()
+        .filter(|(name, _)| *name != "vendor")
+        .map(|(_, xml)| xml.as_str())
+        .collect::<String>();
+    if !after_topology.is_empty() {
+        let close = desired
+            .rfind("  </cpu>\n")
+            .expect("expanded CPU XML has a closing tag");
+        desired.insert_str(close, &after_topology);
+    }
+
+    desired
+}
+
+fn patch_memory(
+    xml: &str,
+    domain: Node<'_, '_>,
+    memory: VmMemory,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let max_memory_mib = memory.max_mib.unwrap_or(memory.size_mib);
+    let max_memory = required_child(domain, "memory")?;
+    patch_memory_element(xml, max_memory, max_memory_mib, replacements)?;
+
+    if let Some(current_memory) = optional_child(domain, "currentMemory") {
+        patch_memory_element(xml, current_memory, memory.size_mib, replacements)?;
+    } else {
+        let end = line_end(xml, max_memory.range().end);
+        replacements.push(XmlReplacement {
+            range: end..end,
+            value: format!(
+                "  <currentMemory unit='MiB'>{}</currentMemory>\n",
+                memory.size_mib
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn patch_memory_element(
+    xml: &str,
+    node: Node<'_, '_>,
+    memory_mib: u64,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let unit = node.attribute("unit").unwrap_or("KiB");
+    if unit == "GiB" && !memory_mib.is_multiple_of(1024) {
+        push_attr_upsert_replacement(xml, node, "unit", "MiB", replacements)?;
+        return push_text_replacement(xml, node, &memory_mib.to_string(), replacements);
+    }
+
+    let value = memory_value_for_unit(memory_mib, unit)?;
+    push_text_replacement(xml, node, &value.to_string(), replacements)
 }
 
 fn memory_value_for_unit(memory_mib: u64, unit: &str) -> Result<u64> {
     match unit {
         "KiB" => memory_mib
             .checked_mul(1024)
-            .context("memoryGiB is too large for KiB domain memory"),
+            .context("memory is too large for KiB domain memory"),
         "MiB" => Ok(memory_mib),
         "GiB" => {
             if !memory_mib.is_multiple_of(1024) {
-                bail!("memoryGiB cannot be represented as whole GiB in existing domain XML");
+                bail!("memory cannot be represented as whole GiB in existing domain XML");
             }
             Ok(memory_mib / 1024)
         }
@@ -1541,6 +1844,35 @@ fn push_attr_replacement(
     Ok(())
 }
 
+fn push_attr_upsert_replacement(
+    xml: &str,
+    node: Node<'_, '_>,
+    attr_name: &str,
+    value: &str,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    if node.attribute(attr_name).is_some() {
+        return push_attr_replacement(xml, node, attr_name, value, replacements);
+    }
+
+    let start = node.range().start;
+    let tag_end = xml[start..]
+        .find('>')
+        .map(|offset| start + offset)
+        .with_context(|| format!("domain XML <{}> has no end bracket", node.tag_name().name()))?;
+    let insert_at = if xml.as_bytes().get(tag_end.saturating_sub(1)) == Some(&b'/') {
+        tag_end - 1
+    } else {
+        tag_end
+    };
+    replacements.push(XmlReplacement {
+        range: insert_at..insert_at,
+        value: format!(" {attr_name}='{}'", escape_xml_value(value)),
+    });
+
+    Ok(())
+}
+
 fn node_text_range(node: Node<'_, '_>) -> Result<Range<usize>> {
     node.children()
         .find(|child| child.is_text())
@@ -1604,8 +1936,7 @@ fn required_child_text<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Result<
         .with_context(|| format!("domain XML <{tag}> is empty"))
 }
 
-fn memory_mib(domain: Node<'_, '_>) -> Result<u64> {
-    let memory = required_child(domain, "memory")?;
+fn memory_element_mib(memory: Node<'_, '_>) -> Result<u64> {
     let value = memory
         .text()
         .map(str::trim)
@@ -1626,6 +1957,78 @@ fn memory_mib(domain: Node<'_, '_>) -> Result<u64> {
             .context("domain memory is too large"),
         unit => bail!("unsupported domain memory unit {unit:?}"),
     }
+}
+
+fn memory_from_domain_xml(domain: Node<'_, '_>) -> Result<VmMemory> {
+    let max_mib = memory_element_mib(required_child(domain, "memory")?)?;
+    let size_mib = optional_child(domain, "currentMemory")
+        .map(memory_element_mib)
+        .transpose()?
+        .unwrap_or(max_mib);
+
+    Ok(VmMemory {
+        size_mib,
+        max_mib: (max_mib != size_mib).then_some(max_mib),
+    })
+}
+
+fn memory_mib(domain: Node<'_, '_>) -> Result<u64> {
+    Ok(memory_from_domain_xml(domain)?.size_mib)
+}
+
+fn machine_from_domain_xml(domain: Node<'_, '_>) -> Option<VmMachine> {
+    optional_child(domain, "os")
+        .and_then(|os| optional_child(os, "type"))
+        .and_then(|os_type| os_type.attribute("machine"))
+        .map(|machine_type| VmMachine {
+            machine_type: machine_type.to_string(),
+        })
+}
+
+fn cpu_from_domain_xml(domain: Node<'_, '_>, vcpus: u32) -> Result<Option<VmCpu>> {
+    let Some(cpu) = optional_child(domain, "cpu") else {
+        return Ok(None);
+    };
+    let mode = match cpu.attribute("mode").unwrap_or("custom") {
+        "host-passthrough" => VmCpuMode::HostPassthrough,
+        "host-model" => VmCpuMode::HostModel,
+        "custom" => VmCpuMode::Custom,
+        mode => bail!("unsupported CPU mode {mode:?}"),
+    };
+    let model = if mode == VmCpuMode::Custom {
+        Some(required_child_text(cpu, "model")?.to_string())
+    } else {
+        None
+    };
+    let topology = optional_child(cpu, "topology")
+        .map(|topology| -> Result<VmCpuTopology> {
+            if let Some(attribute) = topology
+                .attributes()
+                .find(|attribute| !matches!(attribute.name(), "sockets" | "cores" | "threads"))
+            {
+                bail!("unsupported CPU topology attribute {:?}", attribute.name());
+            }
+            Ok(VmCpuTopology {
+                sockets: required_u32_attr(topology, "sockets")?,
+                cores: required_u32_attr(topology, "cores")?,
+                threads: required_u32_attr(topology, "threads")?,
+            })
+        })
+        .transpose()?;
+
+    Ok(Some(VmCpu {
+        mode,
+        model,
+        vcpus: topology.is_none().then_some(vcpus),
+        topology,
+    }))
+}
+
+fn required_u32_attr(node: Node<'_, '_>, name: &str) -> Result<u32> {
+    node.attribute(name)
+        .with_context(|| format!("domain XML <{}> is missing {name}", node.tag_name().name()))?
+        .parse()
+        .with_context(|| format!("failed to parse domain XML {name}"))
 }
 
 fn boot_order(domain: Node<'_, '_>) -> Result<Vec<String>> {
@@ -2033,6 +2436,49 @@ fn manifest_relative_path(base_dir: &Path, path: &Path) -> PathBuf {
 fn validate_manifest(manifest: &VmManifest) -> Result<()> {
     if manifest.disks.is_empty() {
         bail!("VM definition must contain at least one disk");
+    }
+
+    if let Some(machine) = &manifest.machine
+        && machine.machine_type.trim().is_empty()
+    {
+        bail!("machine.type must not be empty");
+    }
+
+    let memory = effective_memory(manifest)?;
+    if memory.size_mib == 0 {
+        bail!("memory.sizeMiB must be greater than 0");
+    }
+    if let Some(max_mib) = memory.max_mib
+        && max_mib < memory.size_mib
+    {
+        bail!("memory.maxMiB must be greater than or equal to memory.sizeMiB");
+    }
+
+    let vcpus = effective_vcpus(manifest)?;
+    if vcpus == 0 {
+        bail!("VM vCPU count must be greater than 0");
+    }
+    if let Some(cpu) = &manifest.cpu {
+        match cpu.mode {
+            VmCpuMode::Custom => {
+                if cpu
+                    .model
+                    .as_deref()
+                    .is_none_or(|model| model.trim().is_empty())
+                {
+                    bail!("custom CPU mode requires cpu.model");
+                }
+            }
+            VmCpuMode::HostPassthrough | VmCpuMode::HostModel if cpu.model.is_some() => {
+                bail!("cpu.model is only valid with custom CPU mode");
+            }
+            _ => {}
+        }
+        if let Some(topology) = cpu.topology
+            && (topology.sockets == 0 || topology.cores == 0 || topology.threads == 0)
+        {
+            bail!("CPU topology values must be greater than 0");
+        }
     }
 
     if let Some(io_threads) = manifest.io_threads {
@@ -2921,19 +3367,14 @@ pub fn create_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiR
         )));
     }
 
-    let memory_mib = manifest
-        .memory_gib
-        .checked_mul(1024)
-        .context("memoryGiB is too large")
-        .map_err(VmApiError::InvalidRequest)?;
-    let xml = build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)
-        .map_err(VmApiError::InvalidRequest)?;
+    let xml =
+        build_manifest_domain_xml(&manifest, &boot_devices).map_err(VmApiError::InvalidRequest)?;
 
     let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
     ensure_domain_absent_api(&conn, &manifest.name)?;
     prepare_serial_log_path(manifest.serial_log.as_deref()).map_err(VmApiError::Internal)?;
 
-    let domain = Domain::define_xml(&conn, &xml)
+    let domain = Domain::define_xml_flags(&conn, &xml, sys::VIR_DOMAIN_DEFINE_VALIDATE)
         .with_context(|| format!("failed to define domain {}", manifest.name))
         .map_err(VmApiError::Internal)?;
 
@@ -2955,19 +3396,12 @@ pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiRe
         )));
     }
 
-    let memory_mib = manifest
-        .memory_gib
-        .checked_mul(1024)
-        .context("memoryGiB is too large")
-        .map_err(VmApiError::InvalidRequest)?;
-
     let current_xml =
         current_domain_xml(connect_uri, &manifest.name).map_err(VmApiError::Internal)?;
     let xml = if current_xml.is_empty() {
-        build_manifest_domain_xml(&manifest, &boot_devices, memory_mib)
-            .map_err(VmApiError::InvalidRequest)?
+        build_manifest_domain_xml(&manifest, &boot_devices).map_err(VmApiError::InvalidRequest)?
     } else {
-        patch_domain_xml(&current_xml, &manifest, &boot_devices, memory_mib)
+        patch_domain_xml(&current_xml, &manifest, &boot_devices)
             .map_err(VmApiError::InvalidRequest)?
     };
 
@@ -3285,8 +3719,17 @@ mod tests {
         ];
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "install-os",
-            memory_mib: 4096,
+            machine: None,
+            memory: VmLaunchMemorySpec {
+                size_mib: 4096,
+                max_mib: None,
+            },
             vcpus: 2,
+            cpu: Some(VmLaunchCpuSpec {
+                mode: "host-passthrough",
+                model: None,
+                topology: None,
+            }),
             io_threads: Some(VmLaunchIoThreadsSpec {
                 count: 4,
                 queues: 4,
@@ -3345,6 +3788,22 @@ mod tests {
         );
         assert_eq!(manifest.memory_gib, 4);
         assert_eq!(manifest.vcpus, 2);
+        assert_eq!(
+            manifest.memory,
+            Some(VmMemory {
+                size_mib: 4096,
+                max_mib: None,
+            })
+        );
+        assert_eq!(
+            manifest.cpu,
+            Some(VmCpu {
+                mode: VmCpuMode::HostPassthrough,
+                model: None,
+                vcpus: Some(2),
+                topology: None,
+            })
+        );
         assert_eq!(manifest.network, "default");
         assert_eq!(manifest.graphics, GraphicsMode::Vnc);
         assert_eq!(manifest.vnc_listen, "0.0.0.0");
@@ -3426,6 +3885,9 @@ mod tests {
 "#;
         let manifest = VmManifest {
             name: "install-os".to_string(),
+            machine: None,
+            cpu: None,
+            memory: None,
             io_threads: None,
             disks: vec![VmDisk {
                 disk_type: VmDiskType::File,
@@ -3452,8 +3914,7 @@ mod tests {
         };
         let boot_devices = [BootDevice::Hd];
 
-        let patched =
-            patch_domain_xml(xml, &manifest, &boot_devices, 4096).expect("XML should patch");
+        let patched = patch_domain_xml(xml, &manifest, &boot_devices).expect("XML should patch");
 
         assert!(patched.contains("<uuid>c194be5c-a0ba-4e90-8b23-18c8df0825f1</uuid>"));
         assert!(patched.contains("machine='pc-i440fx-10.2'"));
@@ -3468,13 +3929,108 @@ mod tests {
     }
 
     #[test]
+    fn patches_machine_cpu_topology_and_memory_idempotently() {
+        let xml = test_domain_xml().replace(
+            "  <devices>",
+            "  <cpu mode='custom' deprecated='no'>\n    <model fallback='allow'>OldModel</model>\n    <vendor>AuthenticAMD</vendor>\n    <feature policy='require' name='aes'/>\n  </cpu>\n  <devices>",
+        );
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/sys.qcow2",
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.machine = Some(VmMachine {
+            machine_type: "pc-q35-10.0".to_string(),
+        });
+        manifest.cpu = Some(VmCpu {
+            mode: VmCpuMode::HostModel,
+            model: None,
+            vcpus: None,
+            topology: Some(VmCpuTopology {
+                sockets: 2,
+                cores: 2,
+                threads: 2,
+            }),
+        });
+        manifest.memory = Some(VmMemory {
+            size_mib: 2048,
+            max_mib: Some(8192),
+        });
+
+        let patched = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd])
+            .expect("resource configuration should patch");
+
+        assert!(patched.contains("<memory unit='MiB'>8192</memory>"));
+        assert!(patched.contains("<currentMemory unit='MiB'>2048</currentMemory>"));
+        assert!(patched.contains("<vcpu placement='static'>8</vcpu>"));
+        assert!(patched.contains("<type arch='x86_64' machine='pc-q35-10.0'>hvm</type>"));
+        assert!(patched.contains("<cpu mode='host-model' deprecated='no'>"));
+        assert!(patched.contains("<topology sockets='2' cores='2' threads='2'/>"));
+        assert!(patched.contains("<feature policy='require' name='aes'/>"));
+        assert!(!patched.contains("OldModel"));
+        let vendor = patched
+            .find("<vendor>AuthenticAMD</vendor>")
+            .expect("vendor should be preserved");
+        let topology = patched
+            .find("<topology sockets=")
+            .expect("topology should be generated");
+        assert!(vendor < topology);
+
+        let patched_again = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd])
+            .expect("second resource patch should succeed");
+        assert_eq!(patched_again, patched);
+    }
+
+    #[test]
+    fn dumps_non_gib_memory_and_cpu_topology() {
+        let xml = test_domain_xml()
+            .replace("<memory unit='MiB'>4096</memory>", "<memory unit='MiB'>6144</memory>")
+            .replace(
+                "<currentMemory unit='MiB'>4096</currentMemory>",
+                "<currentMemory unit='MiB'>1536</currentMemory>",
+            )
+            .replace(
+                "  <devices>",
+                "  <cpu mode='host-model'>\n    <topology sockets='1' cores='2' threads='1'/>\n  </cpu>\n  <devices>",
+            );
+
+        let manifest = manifest_from_domain_xml(&xml).expect("domain XML should dump");
+        let yaml = serialize_manifest_yaml(&manifest).expect("manifest should serialize");
+
+        assert_eq!(
+            manifest.memory,
+            Some(VmMemory {
+                size_mib: 1536,
+                max_mib: Some(6144),
+            })
+        );
+        assert_eq!(
+            manifest.cpu,
+            Some(VmCpu {
+                mode: VmCpuMode::HostModel,
+                model: None,
+                vcpus: None,
+                topology: Some(VmCpuTopology {
+                    sockets: 1,
+                    cores: 2,
+                    threads: 1,
+                }),
+            })
+        );
+        assert!(yaml.contains("sizeMiB: 1536"));
+        assert!(yaml.contains("maxMiB: 6144"));
+        assert!(!yaml.contains("memoryGiB"));
+        assert!(!yaml.contains("\nvcpus:"));
+    }
+
+    #[test]
     fn preserves_existing_disk_target_when_manifest_order_changes() {
         let manifest = test_manifest(vec![
             test_file_disk("/vm/data.qcow2", None, VmDiskBus::VirtioBlk),
             test_file_disk("/vm/sys.qcow2", None, VmDiskBus::VirtioBlk),
         ]);
 
-        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd])
             .expect("XML should patch");
 
         assert_eq!(patched.matches("device='disk'").count(), 2);
@@ -3496,7 +4052,7 @@ mod tests {
             test_file_disk("/vm/scsi.qcow2", None, VmDiskBus::VirtioScsi),
         ]);
 
-        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd])
             .expect("XML should patch");
 
         assert!(
@@ -3545,7 +4101,7 @@ mod tests {
         )]);
         manifest.cdrom = Some(PathBuf::from("/isos/os.iso"));
 
-        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Cdrom, BootDevice::Hd], 4096)
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Cdrom, BootDevice::Hd])
             .expect("domain XML should build");
 
         assert!(xml.contains("<target dev='sda' bus='sata'/>"));
@@ -3564,7 +4120,7 @@ mod tests {
             test_file_disk("/vm/scsi.qcow2", None, VmDiskBus::VirtioScsi),
         ]);
 
-        let patched = patch_domain_xml(&xml_with_cdrom, &manifest, &[BootDevice::Hd], 4096)
+        let patched = patch_domain_xml(&xml_with_cdrom, &manifest, &[BootDevice::Hd])
             .expect("XML should patch");
 
         assert!(
@@ -3588,7 +4144,7 @@ mod tests {
             mode: VmDiskIoMode::Threads,
         });
 
-        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd], 4096)
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd])
             .expect("domain XML should build");
 
         assert!(xml.contains("<iothreads>2</iothreads>"));
@@ -3615,7 +4171,7 @@ mod tests {
             mode: VmDiskIoMode::Threads,
         });
 
-        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd])
             .expect("XML should patch");
 
         assert!(patched.contains("<iothreads>2</iothreads>"));
@@ -3652,7 +4208,7 @@ disks:
     fn rejects_removing_existing_disks_from_domain_xml() {
         let manifest = test_manifest(Vec::new());
 
-        let error = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+        let error = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd])
             .expect_err("removing disks should be rejected");
 
         assert!(
@@ -3670,7 +4226,7 @@ disks:
             VmDiskBus::VirtioBlk,
         )]);
 
-        let error = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+        let error = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd])
             .expect_err("ambiguous disk replacement should be rejected");
 
         assert!(error.to_string().contains("existing disk target vda"));
@@ -3685,7 +4241,7 @@ disks:
             VmDiskBus::VirtioBlk,
         )]);
 
-        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd])
             .expect("explicit disk replacement should patch");
 
         assert!(patched.contains("<source file='/vm/replacement.qcow2'/>"));
@@ -3697,6 +4253,9 @@ disks:
     fn leaves_serial_log_unconfigured_when_manifest_omits_it() {
         let mut manifest = VmManifest {
             name: "install-os".to_string(),
+            machine: None,
+            cpu: None,
+            memory: None,
             io_threads: None,
             disks: vec![VmDisk {
                 disk_type: VmDiskType::File,
@@ -3720,7 +4279,7 @@ disks:
 
         normalize_manifest_paths(&mut manifest, Path::new("/tmp/qtr"))
             .expect("manifest paths should normalize");
-        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd], 4096)
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd])
             .expect("domain XML should build");
 
         assert_eq!(manifest.serial_log, None);
@@ -3776,6 +4335,63 @@ disks:
 
         assert!(yaml.starts_with("schemaVersion: 1\n"));
         assert!(yaml.contains("name: install-os\n"));
+    }
+
+    #[test]
+    fn parses_and_serializes_structured_resources_without_legacy_fields() {
+        let yaml = r#"schemaVersion: 1
+name: install-os
+machine:
+  type: pc-q35-10.0
+cpu:
+  mode: custom
+  model: EPYC-Milan
+  topology:
+    sockets: 2
+    cores: 4
+    threads: 2
+memory:
+  sizeMiB: 6144
+  maxMiB: 8192
+disks:
+- path: /tmp/sys.qcow2
+  format: qcow2
+"#;
+
+        let manifest = parse_manifest_yaml(yaml).expect("structured resources should parse");
+        let output = serialize_manifest_yaml(&manifest).expect("manifest should serialize");
+
+        assert_eq!(
+            manifest.machine,
+            Some(VmMachine {
+                machine_type: "pc-q35-10.0".to_string(),
+            })
+        );
+        assert_eq!(effective_vcpus(&manifest).unwrap(), 16);
+        assert_eq!(effective_memory(&manifest).unwrap().size_mib, 6144);
+        assert!(output.contains("mode: custom"));
+        assert!(output.contains("sizeMiB: 6144"));
+        assert!(!output.contains("memoryGiB"));
+        assert!(!output.contains("\nvcpus:"));
+    }
+
+    #[test]
+    fn rejects_mixed_legacy_and_structured_resources() {
+        let mixed_memory = "name: vm\nmemoryGiB: 4\nmemory:\n  sizeMiB: 4096\ndisks: []\n";
+        let mixed_cpu = "name: vm\nvcpus: 2\ncpu:\n  vcpus: 2\ndisks: []\n";
+
+        assert!(
+            parse_manifest_yaml(mixed_memory)
+                .unwrap_err()
+                .to_string()
+                .contains("memory and memoryGiB are mutually exclusive")
+        );
+        assert!(
+            parse_manifest_yaml(mixed_cpu)
+                .unwrap_err()
+                .to_string()
+                .contains("cpu and vcpus are mutually exclusive")
+        );
     }
 
     #[test]
@@ -3872,6 +4488,9 @@ disks:
     fn test_manifest(disks: Vec<VmDisk>) -> VmManifest {
         VmManifest {
             name: "install-os".to_string(),
+            machine: None,
+            cpu: None,
+            memory: None,
             io_threads: None,
             disks,
             cdrom: None,
@@ -3930,6 +4549,88 @@ disks:
             VmDiskBus::VirtioBlk,
         )]);
         assert!(validate_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_accepts_structured_resources() {
+        let dir = TestDiskDir::new();
+        let disk = dir.create_disk("sys.qcow2");
+        let mut manifest = test_manifest(vec![test_file_disk(
+            disk.to_str().unwrap(),
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.machine = Some(VmMachine {
+            machine_type: "q35".to_string(),
+        });
+        manifest.cpu = Some(VmCpu {
+            mode: VmCpuMode::Custom,
+            model: Some("EPYC-Milan".to_string()),
+            vcpus: None,
+            topology: Some(VmCpuTopology {
+                sockets: 1,
+                cores: 4,
+                threads: 2,
+            }),
+        });
+        manifest.memory = Some(VmMemory {
+            size_mib: 6144,
+            max_mib: Some(8192),
+        });
+
+        assert!(validate_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_invalid_structured_resources() {
+        let dir = TestDiskDir::new();
+        let disk = dir.create_disk("sys.qcow2");
+        let mut manifest = test_manifest(vec![test_file_disk(
+            disk.to_str().unwrap(),
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.memory = Some(VmMemory {
+            size_mib: 4096,
+            max_mib: Some(2048),
+        });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("memory.maxMiB")
+        );
+
+        manifest.memory = None;
+        manifest.cpu = Some(VmCpu {
+            mode: VmCpuMode::Custom,
+            model: None,
+            vcpus: Some(2),
+            topology: None,
+        });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("requires cpu.model")
+        );
+
+        manifest.cpu = Some(VmCpu {
+            mode: VmCpuMode::HostModel,
+            model: None,
+            vcpus: Some(2),
+            topology: Some(VmCpuTopology {
+                sockets: 1,
+                cores: 2,
+                threads: 1,
+            }),
+        });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("mutually exclusive")
+        );
     }
 
     #[test]

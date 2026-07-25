@@ -1,5 +1,15 @@
 schemaVersion: 1
 name: install-os
+machine:
+  type: q35
+cpu:
+  mode: host-passthrough
+  topology:
+    sockets: 1
+    cores: 2
+    threads: 1
+memory:
+  sizeMiB: 4096
 disks:
 - path: /var/lib/libvirt/images/install-os.qcow2
   type: file
@@ -8,8 +18,6 @@ cdrom: /path/to/installer.iso
 boot:
 - cdrom
 - hd
-memoryGiB: 4
-vcpus: 2
 network: default
 graphics: vnc
 vncListen: 127.0.0.1

@@ -6,8 +6,10 @@ use crate::config::{DiskFormat, GraphicsMode};
 
 pub struct VmLaunchDomainSpec<'a> {
     pub name: &'a str,
-    pub memory_mib: u64,
+    pub machine: Option<&'a str>,
+    pub memory: VmLaunchMemorySpec,
     pub vcpus: u32,
+    pub cpu: Option<VmLaunchCpuSpec<'a>>,
     pub io_threads: Option<VmLaunchIoThreadsSpec>,
     pub disks: &'a [VmLaunchDiskSpec<'a>],
     pub cdrom: Option<&'a Path>,
@@ -15,6 +17,26 @@ pub struct VmLaunchDomainSpec<'a> {
     pub boot_devices: &'a [BootDevice],
     pub network: &'a str,
     pub graphics: GraphicsSpec<'a>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmLaunchMemorySpec {
+    pub size_mib: u64,
+    pub max_mib: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmLaunchCpuSpec<'a> {
+    pub mode: &'a str,
+    pub model: Option<&'a str>,
+    pub topology: Option<VmLaunchCpuTopology>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmLaunchCpuTopology {
+    pub sockets: u32,
+    pub cores: u32,
+    pub threads: u32,
 }
 
 pub struct VmLaunchDiskSpec<'a> {
@@ -96,22 +118,27 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
     let cdrom_xml = spec.cdrom.map(build_cdrom_xml).unwrap_or_default();
     let console_xml = build_console_xml(spec.serial_log);
     let graphics_xml = build_graphics_xml(spec.graphics);
+    let machine = spec
+        .machine
+        .map(|machine| format!(" machine='{}'", escape_xml(machine)))
+        .unwrap_or_default();
+    let max_memory_mib = spec.memory.max_mib.unwrap_or(spec.memory.size_mib);
+    let cpu_xml = spec.cpu.map(build_cpu_xml).unwrap_or_default();
 
     format!(
         r#"<domain type='kvm'>
   <name>{name}</name>
-  <memory unit='MiB'>{memory_mib}</memory>
+  <memory unit='MiB'>{max_memory_mib}</memory>
   <currentMemory unit='MiB'>{memory_mib}</currentMemory>
   <vcpu placement='static'>{vcpus}</vcpu>
 {io_threads_xml}  <os>
-    <type arch='x86_64'>hvm</type>
+    <type arch='x86_64'{machine}>hvm</type>
 {boot_xml}  </os>
   <features>
     <acpi/>
     <apic/>
   </features>
-  <cpu mode='host-passthrough' check='none' migratable='off'/>
-  <devices>
+{cpu_xml}  <devices>
 {disks_xml}{scsi_controller_xml}{cdrom_xml}    <interface type='network'>
       <source network='{network}'/>
       <model type='virtio'/>
@@ -123,8 +150,11 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
 </domain>
 "#,
         name = escape_xml(spec.name),
-        memory_mib = spec.memory_mib,
+        max_memory_mib = max_memory_mib,
+        memory_mib = spec.memory.size_mib,
         vcpus = spec.vcpus,
+        machine = machine,
+        cpu_xml = cpu_xml,
         io_threads_xml = io_threads_xml,
         boot_xml = boot_xml,
         disks_xml = disks_xml,
@@ -134,6 +164,39 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         console_xml = console_xml,
         graphics_xml = graphics_xml,
     )
+}
+
+pub fn build_cpu_xml(spec: VmLaunchCpuSpec<'_>) -> String {
+    let attributes = match spec.mode {
+        "host-passthrough" => " mode='host-passthrough' check='none' migratable='off'".to_string(),
+        "host-model" => " mode='host-model'".to_string(),
+        "custom" => " mode='custom' match='exact'".to_string(),
+        mode => format!(" mode='{}'", escape_xml(mode)),
+    };
+    let model = spec
+        .model
+        .map(|model| {
+            format!(
+                "    <model fallback='forbid'>{}</model>\n",
+                escape_xml(model)
+            )
+        })
+        .unwrap_or_default();
+    let topology = spec
+        .topology
+        .map(|topology| {
+            format!(
+                "    <topology sockets='{}' cores='{}' threads='{}'/>\n",
+                topology.sockets, topology.cores, topology.threads
+            )
+        })
+        .unwrap_or_default();
+
+    if model.is_empty() && topology.is_empty() {
+        format!("  <cpu{attributes}/>\n")
+    } else {
+        format!("  <cpu{attributes}>\n{model}{topology}  </cpu>\n")
+    }
 }
 
 fn build_domain_iothreads_xml(spec: VmLaunchIoThreadsSpec) -> String {
@@ -444,8 +507,13 @@ mod tests {
         let virtio_disks = [disk_spec("vda", "virtio")];
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "test",
-            memory_mib: 1024,
+            machine: None,
+            memory: VmLaunchMemorySpec {
+                size_mib: 1024,
+                max_mib: None,
+            },
             vcpus: 1,
+            cpu: None,
             io_threads: None,
             disks: &virtio_disks,
             cdrom: None,
@@ -463,8 +531,13 @@ mod tests {
         let scsi_disks = [disk_spec("sda", "scsi")];
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "test",
-            memory_mib: 1024,
+            machine: None,
+            memory: VmLaunchMemorySpec {
+                size_mib: 1024,
+                max_mib: None,
+            },
             vcpus: 1,
+            cpu: None,
             io_threads: None,
             disks: &scsi_disks,
             cdrom: None,
@@ -478,6 +551,49 @@ mod tests {
             },
         });
         assert!(xml.contains("<controller type='scsi' index='0' model='virtio-scsi'/>"));
+    }
+
+    #[test]
+    fn builds_machine_cpu_topology_and_memory_range() {
+        let boot_devices = [BootDevice::Hd];
+        let disks = [disk_spec("vda", "virtio")];
+        let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
+            name: "test",
+            machine: Some("pc-q35-10.0"),
+            memory: VmLaunchMemorySpec {
+                size_mib: 4096,
+                max_mib: Some(8192),
+            },
+            vcpus: 8,
+            cpu: Some(VmLaunchCpuSpec {
+                mode: "custom",
+                model: Some("EPYC-Milan"),
+                topology: Some(VmLaunchCpuTopology {
+                    sockets: 2,
+                    cores: 2,
+                    threads: 2,
+                }),
+            }),
+            io_threads: None,
+            disks: &disks,
+            cdrom: None,
+            serial_log: None,
+            boot_devices: &boot_devices,
+            network: "default",
+            graphics: GraphicsSpec {
+                mode: GraphicsMode::None,
+                vnc_listen: "127.0.0.1",
+                vnc_port: None,
+            },
+        });
+
+        assert!(xml.contains("<memory unit='MiB'>8192</memory>"));
+        assert!(xml.contains("<currentMemory unit='MiB'>4096</currentMemory>"));
+        assert!(xml.contains("<vcpu placement='static'>8</vcpu>"));
+        assert!(xml.contains("<type arch='x86_64' machine='pc-q35-10.0'>hvm</type>"));
+        assert!(xml.contains("<cpu mode='custom' match='exact'>"));
+        assert!(xml.contains("<model fallback='forbid'>EPYC-Milan</model>"));
+        assert!(xml.contains("<topology sockets='2' cores='2' threads='2'/>"));
     }
 
     #[test]

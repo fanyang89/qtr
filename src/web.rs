@@ -124,6 +124,9 @@ impl CreateVmRequest {
     fn into_manifest(self) -> vm::VmManifest {
         vm::VmManifest {
             name: self.name,
+            machine: None,
+            cpu: None,
+            memory: None,
             io_threads: self.io_threads,
             disks: self.disks,
             cdrom: self.cdrom,

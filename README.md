@@ -147,6 +147,7 @@ Generate a starter VM definition:
 
 ```bash
 cargo run -- vm init --name install-os -o vm.yaml
+cargo run -- vm init --name install-os --machine q35 -o vm.yaml
 ```
 
 Edit `cdrom` to point at the installer ISO. Create or resize disks with `disk` commands before applying the VM definition.
@@ -156,18 +157,28 @@ The generated YAML is an installer-oriented template:
 ```yaml
 schemaVersion: 1
 name: install-os
+machine:
+  type: q35
+cpu:
+  mode: host-passthrough
+  topology:
+    sockets: 1
+    cores: 2
+    threads: 1
+memory:
+  sizeMiB: 4096
 disks:
 - path: .tmp/disks/install-os.qcow2
   type: file
   format: qcow2
 cdrom: /path/to/installer.iso
 boot: [cdrom, hd]
-memoryGiB: 4
-vcpus: 2
 network: default
 graphics: vnc
 vncListen: 127.0.0.1
 ```
+
+`machine.type` is optional; omit it to let libvirt select the machine type. CPU configuration accepts `host-passthrough`, `host-model`, or `custom`. A custom CPU requires `model`. Set either `cpu.vcpus` or `cpu.topology`, but not both. `memory.sizeMiB` is the current guest memory allocation and optional `memory.maxMiB` sets the maximum allocation. Legacy `vcpus` and `memoryGiB` remain supported for existing definitions but cannot be mixed with their structured replacements.
 
 Apply it:
 

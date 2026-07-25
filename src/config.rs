@@ -410,6 +410,10 @@ pub struct VmInitArgs {
     #[arg(long, default_value_t = 2)]
     pub vcpus: u32,
 
+    /// QEMU machine type. Omit to use the libvirt default.
+    #[arg(long)]
+    pub machine: Option<String>,
+
     /// Libvirt network attached to the VM.
     #[arg(long, default_value = "default")]
     pub network: String,

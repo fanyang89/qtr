@@ -1,5 +1,16 @@
 schemaVersion: 1
 name: install-os
+machine:
+  type: q35
+cpu:
+  mode: host-model
+  topology:
+    sockets: 1
+    cores: 4
+    threads: 1
+memory:
+  sizeMiB: 6144
+  maxMiB: 8192
 ioThreads:
   count: 4
   queues: 4
@@ -21,8 +32,6 @@ cdrom: /path/to/installer.iso
 boot:
 - cdrom
 - hd
-memoryGiB: 4
-vcpus: 2
 network: default
 graphics: vnc
 vncListen: 127.0.0.1
