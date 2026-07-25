@@ -323,6 +323,9 @@ pub struct VmArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum VmCommand {
+    #[command(about = "Print VM capabilities reported by libvirt")]
+    Capabilities(VmCapabilitiesArgs),
+
     #[command(about = "Write a starter VM YAML definition")]
     Init(VmInitArgs),
 
@@ -352,6 +355,29 @@ pub enum VmCommand {
 
     #[command(about = "Copy one file between host and guest")]
     Cp(VmCpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VmCapabilitiesArgs {
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+
+    /// Guest architecture to query. Omit to use the libvirt default.
+    #[arg(long)]
+    pub arch: Option<String>,
+
+    /// QEMU machine type to query. Omit to use the libvirt default.
+    #[arg(long)]
+    pub machine: Option<String>,
+
+    /// Libvirt virtualization type.
+    #[arg(long, default_value = "kvm")]
+    pub virtualization: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

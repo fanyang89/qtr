@@ -134,6 +134,15 @@ Serial console file output is disabled by default. Configure `serialLog` in the 
 
 ## Declarative VM Config
 
+VM YAML emitted by qtr includes `schemaVersion: 1`. Existing unversioned definitions remain supported.
+
+Query the VM features reported by the current libvirt/QEMU host before using host-specific machine, firmware, CPU or device options:
+
+```bash
+cargo run -- vm capabilities
+cargo run -- vm capabilities --machine q35 --json
+```
+
 Generate a starter VM definition:
 
 ```bash
@@ -145,6 +154,7 @@ Edit `cdrom` to point at the installer ISO. Create or resize disks with `disk` c
 The generated YAML is an installer-oriented template:
 
 ```yaml
+schemaVersion: 1
 name: install-os
 disks:
 - path: .tmp/disks/install-os.qcow2

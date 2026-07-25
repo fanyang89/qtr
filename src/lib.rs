@@ -1,0 +1,10 @@
+pub mod cli_table;
+pub mod config;
+pub mod disk;
+pub mod domain_xml;
+pub mod guest_agent;
+pub mod host;
+pub mod network;
+pub mod storage;
+pub mod vm;
+pub mod web;

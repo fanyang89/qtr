@@ -1,3 +1,4 @@
+schemaVersion: 1
 name: install-os
 disks:
 - path: /var/lib/libvirt/images/install-os.qcow2

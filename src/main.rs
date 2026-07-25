@@ -1,17 +1,9 @@
-mod cli_table;
-mod config;
-mod disk;
-mod domain_xml;
-mod guest_agent;
-mod host;
-mod network;
-mod storage;
-mod vm;
-mod web;
-
 use anyhow::Result;
 use clap::Parser;
-use config::{Cli, Command};
+use qtr::{
+    config::{Cli, Command},
+    disk, host, network, storage, vm, web,
+};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();

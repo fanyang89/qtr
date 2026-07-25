@@ -9,7 +9,7 @@ use duct::cmd;
 
 use crate::{
     config::{FixVmPermsArgs, HostArgs, HostCommand, SetupLibvirtAccessArgs},
-    vm::{VmDiskType, VmManifest},
+    vm::{VmDiskType, parse_manifest_yaml},
 };
 
 const LIBVIRT_MANAGE_ACTION: &str = "org.libvirt.unix.manage";
@@ -59,7 +59,7 @@ fn vm_perms_plan(file: &Path) -> Result<VmPermsPlan> {
         .to_path_buf();
     let manifest_text = fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read VM definition {}", manifest_path.display()))?;
-    let manifest: VmManifest = serde_yaml::from_str(&manifest_text)
+    let manifest = parse_manifest_yaml(&manifest_text)
         .with_context(|| format!("failed to parse VM definition {}", manifest_path.display()))?;
 
     let mut plan = VmPermsPlan {

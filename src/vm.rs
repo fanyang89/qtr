@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{self, IsTerminal, Write},
     net::IpAddr,
@@ -24,8 +24,9 @@ use virt::{
 
 use crate::{
     config::{
-        ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCommand, VmCpArgs, VmDumpArgs,
-        VmExecArgs, VmInitArgs, VmListArgs, VmNameArgs, VmRemoveArgs, VmStartArgs, VmStopArgs,
+        ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCapabilitiesArgs, VmCommand,
+        VmCpArgs, VmDumpArgs, VmExecArgs, VmInitArgs, VmListArgs, VmNameArgs, VmRemoveArgs,
+        VmStartArgs, VmStopArgs,
     },
     domain_xml::{
         self, BootDevice, GraphicsSpec, VmLaunchDiskSource, VmLaunchDiskSpec, VmLaunchDomainSpec,
@@ -38,6 +39,7 @@ pub fn run(args: VmArgs) -> Result<()> {
     clear_error_callback();
 
     match args.command {
+        VmCommand::Capabilities(args) => capabilities(args),
         VmCommand::Init(args) => init(args),
         VmCommand::Apply(args) => apply(args),
         VmCommand::Dump(args) => dump(args),
@@ -50,6 +52,8 @@ pub fn run(args: VmArgs) -> Result<()> {
         VmCommand::Cp(args) => cp(args),
     }
 }
+
+const VM_MANIFEST_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -76,6 +80,26 @@ pub struct VmManifest {
     pub vnc_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial_log: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmCapabilities {
+    pub emulator: Option<String>,
+    pub domain_type: String,
+    pub architecture: String,
+    pub machine: Option<String>,
+    pub max_vcpus: Option<u32>,
+    pub firmware: Vec<String>,
+    pub cpu_modes: Vec<String>,
+    pub devices: Vec<VmDeviceCapability>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmDeviceCapability {
+    pub device: String,
+    pub options: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -338,6 +362,208 @@ fn default_vm_disk_type() -> VmDiskType {
     VmDiskType::File
 }
 
+pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(input).context("failed to parse VM YAML document")?;
+    let mut mapping = match value {
+        serde_yaml::Value::Mapping(mapping) => mapping,
+        _ => bail!("VM YAML document must be a mapping"),
+    };
+    let schema_key = serde_yaml::Value::String("schemaVersion".to_string());
+
+    if let Some(version) = mapping.remove(&schema_key) {
+        let version = version
+            .as_u64()
+            .context("schemaVersion must be a positive integer")?;
+        if version != VM_MANIFEST_SCHEMA_VERSION {
+            bail!("unsupported VM schemaVersion {version}; expected {VM_MANIFEST_SCHEMA_VERSION}");
+        }
+    }
+
+    serde_yaml::from_value(serde_yaml::Value::Mapping(mapping))
+        .context("failed to parse VM manifest")
+}
+
+pub fn serialize_manifest_yaml(manifest: &VmManifest) -> Result<String> {
+    let value = serde_yaml::to_value(manifest).context("failed to serialize VM manifest")?;
+    let serde_yaml::Value::Mapping(manifest_mapping) = value else {
+        unreachable!("VmManifest must serialize to a mapping");
+    };
+    let mut document = serde_yaml::Mapping::new();
+    document.insert(
+        serde_yaml::Value::String("schemaVersion".to_string()),
+        serde_yaml::Value::Number(VM_MANIFEST_SCHEMA_VERSION.into()),
+    );
+    document.extend(manifest_mapping);
+
+    serde_yaml::to_string(&document).context("failed to serialize VM YAML document")
+}
+
+fn capabilities(args: VmCapabilitiesArgs) -> Result<()> {
+    let capabilities = query_capabilities(
+        &args.connect_uri,
+        args.arch.as_deref(),
+        args.machine.as_deref(),
+        &args.virtualization,
+    )?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&capabilities)
+                .context("failed to serialize VM capabilities")?
+        );
+        return Ok(());
+    }
+
+    let mut rows = vec![
+        vec!["Domain type".to_string(), capabilities.domain_type.clone()],
+        vec![
+            "Architecture".to_string(),
+            capabilities.architecture.clone(),
+        ],
+        vec![
+            "Machine".to_string(),
+            capabilities.machine.as_deref().unwrap_or("-").to_string(),
+        ],
+        vec![
+            "Emulator".to_string(),
+            capabilities.emulator.as_deref().unwrap_or("-").to_string(),
+        ],
+        vec![
+            "Max vCPUs".to_string(),
+            capabilities
+                .max_vcpus
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ],
+        vec![
+            "Firmware".to_string(),
+            join_capability_values(&capabilities.firmware),
+        ],
+        vec![
+            "CPU modes".to_string(),
+            join_capability_values(&capabilities.cpu_modes),
+        ],
+    ];
+    rows.extend(capabilities.devices.iter().map(|device| {
+        let options = device
+            .options
+            .iter()
+            .map(|(name, values)| format!("{name}={}", values.join("|")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        vec![format!("Device: {}", device.device), options]
+    }));
+    crate::cli_table::print_table(&["Capability", "Value"], rows);
+
+    Ok(())
+}
+
+fn join_capability_values(values: &[String]) -> String {
+    if values.is_empty() {
+        "-".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+pub fn query_capabilities(
+    connect_uri: &str,
+    arch: Option<&str>,
+    machine: Option<&str>,
+    virtualization: &str,
+) -> Result<VmCapabilities> {
+    let conn = connect(connect_uri)?;
+    let xml = conn
+        .get_domain_capabilities(None, arch, machine, Some(virtualization), 0)
+        .with_context(|| {
+            format!("failed to query VM capabilities from libvirt at {connect_uri}")
+        })?;
+    parse_domain_capabilities(&xml)
+}
+
+fn parse_domain_capabilities(xml: &str) -> Result<VmCapabilities> {
+    let doc = Document::parse(xml).context("failed to parse libvirt domain capabilities XML")?;
+    let root = doc.root_element();
+    if !root.has_tag_name("domainCapabilities") {
+        bail!("expected domainCapabilities XML root");
+    }
+
+    let firmware = optional_child(root, "os")
+        .and_then(|node| enum_values(node, "firmware"))
+        .unwrap_or_default();
+    let cpu_modes = optional_child(root, "cpu")
+        .map(|cpu| {
+            cpu.children()
+                .filter(|node| {
+                    node.has_tag_name("mode") && node.attribute("supported") == Some("yes")
+                })
+                .filter_map(|node| node.attribute("name").map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let devices = optional_child(root, "devices")
+        .map(|devices| {
+            devices
+                .children()
+                .filter(|node| node.is_element() && node.attribute("supported") == Some("yes"))
+                .map(|node| VmDeviceCapability {
+                    device: node.tag_name().name().to_string(),
+                    options: node
+                        .children()
+                        .filter(|child| child.has_tag_name("enum"))
+                        .filter_map(|child| {
+                            let name = child.attribute("name")?.to_string();
+                            let values = child
+                                .children()
+                                .filter(|value| value.has_tag_name("value"))
+                                .filter_map(|value| value.text().map(str::to_string))
+                                .collect();
+                            Some((name, values))
+                        })
+                        .collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(VmCapabilities {
+        emulator: optional_child(root, "path")
+            .and_then(|node| node.text())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        domain_type: required_child_text(root, "domain")?.to_string(),
+        architecture: required_child_text(root, "arch")?.to_string(),
+        machine: optional_child(root, "machine")
+            .and_then(|node| node.text())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        max_vcpus: optional_child(root, "vcpu")
+            .and_then(|node| node.attribute("max"))
+            .map(str::parse)
+            .transpose()
+            .context("failed to parse maximum vCPU count")?,
+        firmware,
+        cpu_modes,
+        devices,
+    })
+}
+
+fn enum_values(node: Node<'_, '_>, name: &str) -> Option<Vec<String>> {
+    node.children()
+        .find(|child| child.has_tag_name("enum") && child.attribute("name") == Some(name))
+        .map(|enumeration| {
+            enumeration
+                .children()
+                .filter(|child| child.has_tag_name("value"))
+                .filter_map(|child| child.text().map(str::to_string))
+                .collect()
+        })
+}
+
 fn init(args: VmInitArgs) -> Result<()> {
     let disk_paths = if args.disk.is_empty() {
         vec![PathBuf::from(format!(".tmp/disks/{}.qcow2", args.name))]
@@ -377,7 +603,7 @@ fn init(args: VmInitArgs) -> Result<()> {
         serial_log: None,
     };
 
-    let yaml = serde_yaml::to_string(&manifest).context("failed to serialize VM template")?;
+    let yaml = serialize_manifest_yaml(&manifest).context("failed to serialize VM template")?;
     match args.output {
         Some(path) => {
             if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
@@ -405,7 +631,7 @@ fn apply(args: VmApplyArgs) -> Result<()> {
     let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let manifest_text = fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read VM definition {}", manifest_path.display()))?;
-    let mut manifest: VmManifest = serde_yaml::from_str(&manifest_text)
+    let mut manifest = parse_manifest_yaml(&manifest_text)
         .with_context(|| format!("failed to parse VM definition {}", manifest_path.display()))?;
 
     normalize_manifest_paths(&mut manifest, manifest_dir)?;
@@ -590,7 +816,7 @@ fn dump(args: VmDumpArgs) -> Result<()> {
         xml
     } else {
         let manifest = manifest_from_domain_xml(&xml)?;
-        serde_yaml::to_string(&manifest)
+        serialize_manifest_yaml(&manifest)
             .with_context(|| format!("failed to serialize VM {} as YAML", args.name))?
     };
 
@@ -777,6 +1003,13 @@ fn patch_disks(
                 io_threads,
             )));
         }
+    }
+
+    if let Some(unmatched) = domain_disks.iter().find(|entry| !entry.used) {
+        let target = unmatched.disk.target.as_deref().unwrap_or("unknown");
+        bail!(
+            "manifest does not identify existing disk target {target}; set target explicitly when changing a disk path"
+        );
     }
 
     let needs_scsi_controller = manifest_disks
@@ -3430,6 +3663,37 @@ disks:
     }
 
     #[test]
+    fn rejects_replacing_disk_path_without_explicit_target() {
+        let manifest = test_manifest(vec![test_file_disk(
+            "/vm/replacement.qcow2",
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+
+        let error = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+            .expect_err("ambiguous disk replacement should be rejected");
+
+        assert!(error.to_string().contains("existing disk target vda"));
+        assert!(error.to_string().contains("set target explicitly"));
+    }
+
+    #[test]
+    fn replaces_disk_path_with_explicit_target() {
+        let manifest = test_manifest(vec![test_file_disk(
+            "/vm/replacement.qcow2",
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+
+        let patched = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd], 4096)
+            .expect("explicit disk replacement should patch");
+
+        assert!(patched.contains("<source file='/vm/replacement.qcow2'/>"));
+        assert!(!patched.contains("<source file='/vm/sys.qcow2'/>"));
+        assert_eq!(patched.matches("device='disk'").count(), 1);
+    }
+
+    #[test]
     fn leaves_serial_log_unconfigured_when_manifest_omits_it() {
         let mut manifest = VmManifest {
             name: "install-os".to_string(),
@@ -3483,6 +3747,86 @@ vncListen: 127.0.0.1
         let manifest: VmManifest = serde_yaml::from_str(yaml).expect("legacy YAML should parse");
 
         assert_eq!(manifest.disks[0].bus, VmDiskBus::VirtioBlk);
+    }
+
+    #[test]
+    fn parses_versioned_and_unversioned_manifest_documents() {
+        let unversioned = r#"name: install-os
+disks:
+- path: /tmp/sys.qcow2
+  format: qcow2
+"#;
+        let versioned = format!("schemaVersion: 1\n{unversioned}");
+
+        let legacy = parse_manifest_yaml(unversioned).expect("unversioned manifest should parse");
+        let current = parse_manifest_yaml(&versioned).expect("versioned manifest should parse");
+
+        assert_eq!(legacy.name, current.name);
+        assert_eq!(legacy.disks[0].path, current.disks[0].path);
+    }
+
+    #[test]
+    fn serializes_current_manifest_schema_version_first() {
+        let yaml = serialize_manifest_yaml(&test_manifest(vec![test_file_disk(
+            "/vm/sys.qcow2",
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]))
+        .expect("manifest should serialize");
+
+        assert!(yaml.starts_with("schemaVersion: 1\n"));
+        assert!(yaml.contains("name: install-os\n"));
+    }
+
+    #[test]
+    fn rejects_unsupported_manifest_schema_version() {
+        let error = parse_manifest_yaml("schemaVersion: 2\nname: vm\ndisks: []\n")
+            .expect_err("future schema should be rejected");
+
+        assert!(error.to_string().contains("unsupported VM schemaVersion 2"));
+    }
+
+    #[test]
+    fn parses_domain_capabilities() {
+        let xml = r#"<domainCapabilities>
+  <path>/usr/bin/qemu-system-x86_64</path>
+  <domain>kvm</domain>
+  <machine>pc-q35-10.0</machine>
+  <arch>x86_64</arch>
+  <vcpu max='288'/>
+  <os supported='yes'>
+    <enum name='firmware'>
+      <value>bios</value>
+      <value>efi</value>
+    </enum>
+  </os>
+  <cpu>
+    <mode name='host-passthrough' supported='yes'/>
+    <mode name='host-model' supported='yes'/>
+    <mode name='custom' supported='no'/>
+  </cpu>
+  <devices>
+    <disk supported='yes'>
+      <enum name='diskDevice'><value>disk</value><value>cdrom</value></enum>
+      <enum name='bus'><value>scsi</value><value>virtio</value></enum>
+    </disk>
+    <tpm supported='yes'>
+      <enum name='backendVersion'><value>2.0</value></enum>
+    </tpm>
+    <hostdev supported='no'/>
+  </devices>
+</domainCapabilities>"#;
+
+        let capabilities = parse_domain_capabilities(xml).expect("capabilities should parse");
+
+        assert_eq!(capabilities.domain_type, "kvm");
+        assert_eq!(capabilities.architecture, "x86_64");
+        assert_eq!(capabilities.machine.as_deref(), Some("pc-q35-10.0"));
+        assert_eq!(capabilities.max_vcpus, Some(288));
+        assert_eq!(capabilities.firmware, ["bios", "efi"]);
+        assert_eq!(capabilities.cpu_modes, ["host-passthrough", "host-model"]);
+        assert_eq!(capabilities.devices[0].options["bus"], ["scsi", "virtio"]);
+        assert_eq!(capabilities.devices[1].device, "tpm");
     }
 
     #[test]
