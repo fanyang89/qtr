@@ -134,7 +134,7 @@ Serial console file output is disabled by default. Configure `serialLog` in the 
 
 ## Declarative VM Config
 
-VM YAML emitted by qtr includes `schemaVersion: 1`. Existing unversioned definitions remain supported.
+VM YAML emitted by qtr includes `schemaVersion: 2`. Existing unversioned and version 1 definitions remain supported.
 
 Query the VM features reported by the current libvirt/QEMU host before using host-specific machine, firmware, CPU or device options:
 
@@ -155,7 +155,7 @@ Edit `cdrom` to point at the installer ISO. Create or resize disks with `disk` c
 The generated YAML is an installer-oriented template:
 
 ```yaml
-schemaVersion: 1
+schemaVersion: 2
 name: install-os
 machine:
   type: q35
@@ -182,6 +182,19 @@ vncListen: 127.0.0.1
 `machine.type` is optional; omit it to let libvirt select the machine type. CPU configuration accepts `host-passthrough`, `host-model`, or `custom`. A custom CPU requires `model`. Set either `cpu.vcpus` or `cpu.topology`, but not both. `memory.sizeMiB` is the current guest memory allocation and optional `memory.maxMiB` sets the maximum allocation. Legacy `vcpus` and `memoryGiB` remain supported for existing definitions but cannot be mixed with their structured replacements.
 
 `disks[].id` is the stable qtr device identity and is written to libvirt as a `ua-qtr-disk-*` alias. Keep the ID unchanged when moving a disk source or reordering disks. Existing definitions without IDs remain supported; `vm dump` derives deterministic IDs from disk targets.
+
+Persistently detach a disk by keeping its ID as an absent tombstone:
+
+```yaml
+disks:
+- id: root
+  path: .tmp/disks/install-os.qcow2
+  format: qcow2
+- id: old-data
+  state: absent
+```
+
+Detach updates only the inactive libvirt domain definition. It never deletes the disk file, block device, or storage volume. Omitting an existing disk without `state: absent` remains an error.
 
 Apply it:
 

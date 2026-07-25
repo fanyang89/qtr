@@ -103,7 +103,7 @@ impl IntoResponse for AppError {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmRequest {
     name: String,
     io_threads: Option<vm::VmIoThreads>,
@@ -120,6 +120,77 @@ struct CreateVmRequest {
     serial_log: Option<PathBuf>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateVmRequest {
+    name: String,
+    machine: Option<vm::VmMachine>,
+    cpu: Option<vm::VmCpu>,
+    memory: Option<vm::VmMemory>,
+    io_threads: Option<vm::VmIoThreads>,
+    disks: Vec<vm::VmDisk>,
+    cdrom: Option<PathBuf>,
+    boot: Option<Vec<String>>,
+    #[serde(default = "default_memory_gib", rename = "memoryGiB")]
+    memory_gib: u64,
+    #[serde(default = "default_vcpus")]
+    vcpus: u32,
+    #[serde(default = "default_network")]
+    network: String,
+    #[serde(default = "default_graphics")]
+    graphics: GraphicsMode,
+    #[serde(default = "default_vnc_listen")]
+    vnc_listen: String,
+    vnc_port: Option<u16>,
+    serial_log: Option<PathBuf>,
+}
+
+impl UpdateVmRequest {
+    fn into_manifest(self) -> vm::VmManifest {
+        vm::VmManifest {
+            name: self.name,
+            machine: self.machine,
+            cpu: self.cpu,
+            memory: self.memory,
+            io_threads: self.io_threads,
+            disks: self
+                .disks
+                .into_iter()
+                .map(vm::VmDiskEntry::present)
+                .collect(),
+            cdrom: self.cdrom,
+            boot: self.boot,
+            memory_gib: self.memory_gib,
+            vcpus: self.vcpus,
+            network: self.network,
+            graphics: self.graphics,
+            vnc_listen: self.vnc_listen,
+            vnc_port: self.vnc_port,
+            serial_log: self.serial_log,
+        }
+    }
+}
+
+fn default_memory_gib() -> u64 {
+    4
+}
+
+fn default_vcpus() -> u32 {
+    2
+}
+
+fn default_network() -> String {
+    "default".to_string()
+}
+
+fn default_graphics() -> GraphicsMode {
+    GraphicsMode::Vnc
+}
+
+fn default_vnc_listen() -> String {
+    "127.0.0.1".to_string()
+}
+
 impl CreateVmRequest {
     fn into_manifest(self) -> vm::VmManifest {
         vm::VmManifest {
@@ -128,7 +199,11 @@ impl CreateVmRequest {
             cpu: None,
             memory: None,
             io_threads: self.io_threads,
-            disks: self.disks,
+            disks: self
+                .disks
+                .into_iter()
+                .map(vm::VmDiskEntry::present)
+                .collect(),
             cdrom: self.cdrom,
             boot: self.boot,
             memory_gib: self.memory_gib,
@@ -242,8 +317,9 @@ async fn create_vm(
 async fn update_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(mut manifest): Json<vm::VmManifest>,
+    Json(request): Json<UpdateVmRequest>,
 ) -> AppResult<Json<vm::VmSummary>> {
+    let mut manifest = request.into_manifest();
     manifest.name = name;
     let connect_uri = state.connect_uri;
     let vm = run_libvirt(move || vm::apply_by_manifest(&connect_uri, manifest)).await?;
@@ -473,6 +549,27 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+
+    #[test]
+    fn update_request_keeps_disk_detach_out_of_http_api() {
+        let present = r#"{
+            "name": "vm",
+            "disks": [{"id": "root", "path": "/tmp/root.qcow2", "format": "qcow2"}]
+        }"#;
+        let absent = r#"{
+            "name": "vm",
+            "disks": [{"id": "root", "state": "absent"}]
+        }"#;
+        let cdroms = r#"{
+            "name": "vm",
+            "disks": [{"id": "root", "path": "/tmp/root.qcow2", "format": "qcow2"}],
+            "cdroms": []
+        }"#;
+
+        assert!(serde_json::from_str::<UpdateVmRequest>(present).is_ok());
+        assert!(serde_json::from_str::<UpdateVmRequest>(absent).is_err());
+        assert!(serde_json::from_str::<UpdateVmRequest>(cdroms).is_err());
+    }
 
     #[tokio::test]
     async fn typed_errors_map_to_http_statuses() {

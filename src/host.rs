@@ -69,7 +69,7 @@ fn vm_perms_plan(file: &Path) -> Result<VmPermsPlan> {
         read_only_files: BTreeSet::new(),
     };
 
-    for disk in &manifest.disks {
+    for disk in manifest.disks.iter().filter_map(|entry| entry.as_present()) {
         if disk.disk_type == VmDiskType::File {
             let path = manifest_path_ref(&manifest_dir, &disk.path);
             ensure_regular_file(&path, "disk")?;

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::{
     config::{DiskFormat, GraphicsMode},
@@ -20,7 +20,7 @@ pub struct VmManifest {
     pub memory: Option<VmMemory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub io_threads: Option<VmIoThreads>,
-    pub disks: Vec<VmDisk>,
+    pub disks: Vec<VmDiskEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdrom: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,6 +140,138 @@ pub struct VmDisk {
     pub cache: Option<VmDiskCache>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub io: Option<VmDiskIoConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub enum VmDiskEntry {
+    Present(VmDisk),
+    Absent { id: String },
+}
+
+impl VmDiskEntry {
+    pub fn present(disk: VmDisk) -> Self {
+        Self::Present(disk)
+    }
+
+    pub fn absent(id: impl Into<String>) -> Self {
+        Self::Absent { id: id.into() }
+    }
+
+    pub fn as_present(&self) -> Option<&VmDisk> {
+        match self {
+            Self::Present(disk) => Some(disk),
+            Self::Absent { .. } => None,
+        }
+    }
+
+    pub fn as_present_mut(&mut self) -> Option<&mut VmDisk> {
+        match self {
+            Self::Present(disk) => Some(disk),
+            Self::Absent { .. } => None,
+        }
+    }
+
+    pub fn absent_id(&self) -> Option<&str> {
+        match self {
+            Self::Present(_) => None,
+            Self::Absent { id } => Some(id),
+        }
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Self::Present(disk) => disk.id.as_deref(),
+            Self::Absent { id } => Some(id),
+        }
+    }
+}
+
+impl Serialize for VmDiskEntry {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Present(disk) => disk.serialize(serializer),
+            Self::Absent { id } => VmAbsentDiskWire {
+                id,
+                state: VmDeviceState::Absent,
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VmDiskEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = VmDiskWire::deserialize(deserializer)?;
+        match wire.state {
+            VmDeviceState::Present => {
+                let path = wire.path.ok_or_else(|| D::Error::missing_field("path"))?;
+                let format = wire
+                    .format
+                    .ok_or_else(|| D::Error::missing_field("format"))?;
+                Ok(Self::Present(VmDisk {
+                    id: wire.id,
+                    disk_type: wire.disk_type.unwrap_or(VmDiskType::File),
+                    path,
+                    format,
+                    target: wire.target,
+                    bus: wire.bus.unwrap_or_default(),
+                    cache: wire.cache,
+                    io: wire.io,
+                }))
+            }
+            VmDeviceState::Absent => {
+                let id = wire.id.ok_or_else(|| D::Error::missing_field("id"))?;
+                if wire.path.is_some()
+                    || wire.format.is_some()
+                    || wire.disk_type.is_some()
+                    || wire.target.is_some()
+                    || wire.bus.is_some()
+                    || wire.cache.is_some()
+                    || wire.io.is_some()
+                {
+                    return Err(D::Error::custom("absent disk only accepts id and state"));
+                }
+                Ok(Self::Absent { id })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum VmDeviceState {
+    #[default]
+    Present,
+    Absent,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VmAbsentDiskWire<'a> {
+    id: &'a str,
+    state: VmDeviceState,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VmDiskWire {
+    #[serde(default)]
+    state: VmDeviceState,
+    id: Option<String>,
+    #[serde(rename = "type")]
+    disk_type: Option<VmDiskType>,
+    path: Option<PathBuf>,
+    format: Option<DiskFormat>,
+    target: Option<String>,
+    bus: Option<VmDiskBus>,
+    cache: Option<VmDiskCache>,
+    io: Option<VmDiskIoConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
