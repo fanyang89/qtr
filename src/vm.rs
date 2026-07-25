@@ -32,7 +32,7 @@ use crate::{
         self, BootDevice, GraphicsSpec, VmLaunchCpuSpec, VmLaunchDiskSource, VmLaunchDiskSpec,
         VmLaunchDomainSpec, VmLaunchIoThreadsSpec, build_vm_launch_domain_xml, parse_boot_devices,
     },
-    guest_agent,
+    guest_agent, vm_reconcile,
 };
 
 pub use crate::vm_model::{
@@ -1147,29 +1147,12 @@ fn build_patched_disk_xml(
     index: usize,
     io_threads: Option<VmIoThreads>,
 ) -> String {
-    let mut desired = domain_xml::build_disk_xml(&launch_disk_spec(
+    let desired_xml = domain_xml::build_disk_xml(&launch_disk_spec(
         manifest_disk,
         disk_target_or(manifest_disk, index),
         io_threads,
     ));
-    let addresses = domain_disk
-        .children()
-        .filter(|child| child.has_tag_name("address"))
-        .map(|address| {
-            let range = address.range();
-            let start = line_start(xml, range.start);
-            let end = line_end(xml, range.end);
-            &xml[start..end]
-        })
-        .collect::<String>();
-
-    if !addresses.is_empty()
-        && let Some(pos) = desired.rfind("    </disk>\n")
-    {
-        desired.insert_str(pos, &addresses);
-    }
-
-    desired
+    vm_reconcile::merge_disk_xml(xml, domain_disk, &desired_xml)
 }
 
 fn patch_machine(
@@ -3673,6 +3656,51 @@ mod tests {
         assert!(patched.contains("<video>"));
         assert!(!patched.contains("<boot dev='cdrom'/>"));
         assert!(patched.contains("    <boot dev='hd'/>\n"));
+    }
+
+    #[test]
+    fn preserves_opaque_disk_xml_when_patching_managed_fields() {
+        let xml = test_domain_xml().replace(
+            "    <disk type='file' device='disk'>\n      <driver name='qemu' type='qcow2'/>\n      <source file='/vm/sys.qcow2'/>\n      <target dev='vda' bus='virtio'/>\n      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>\n    </disk>",
+            "    <disk type='file' device='disk' snapshot='external'>\n      <driver name='qemu' type='qcow2' cache='writeback' io='threads' queues='8' error_policy='stop'/>\n      <auth username='storage-user'>\n        <secret type='ceph' usage='qtr-test'/>\n      </auth>\n      <source file='/vm/sys.qcow2' startupPolicy='optional'>\n        <seclabel model='dac' relabel='no'/>\n      </source>\n      <backingStore type='file'>\n        <format type='qcow2'/>\n        <source file='/vm/base.qcow2'/>\n      </backingStore>\n      <target dev='vda' bus='virtio' rotation_rate='1'/>\n      <readonly/>\n      <serial>root-disk</serial>\n      <iotune><read_iops_sec>1000</read_iops_sec></iotune>\n      <encryption format='luks'>\n        <secret type='passphrase' usage='qtr-luks'/>\n      </encryption>\n      <boot order='1'/>\n      <alias name='ua-qtr-disk-root'/>\n      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>\n    </disk>",
+        );
+        let mut disk = test_file_disk("/vm/sys.qcow2", Some("vda"), VmDiskBus::VirtioBlk);
+        disk.cache = Some(VmDiskCache::None);
+        disk.io = Some(VmDiskIoConfig {
+            mode: VmDiskIoMode::Native,
+        });
+        let manifest = test_manifest(vec![disk]);
+
+        let patched = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd])
+            .expect("opaque disk XML should survive a managed update");
+
+        for expected in [
+            "snapshot='external'",
+            "error_policy='stop'",
+            "<auth username='storage-user'>",
+            "<secret type='ceph' usage='qtr-test'/>",
+            "startupPolicy='optional'",
+            "<seclabel model='dac' relabel='no'/>",
+            "<backingStore type='file'>",
+            "<source file='/vm/base.qcow2'/>",
+            "rotation_rate='1'",
+            "<readonly/>",
+            "<serial>root-disk</serial>",
+            "<iotune><read_iops_sec>1000</read_iops_sec></iotune>",
+            "<encryption format='luks'>",
+            "<boot order='1'/>",
+            "<alias name='ua-qtr-disk-root'/>",
+            "<address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>",
+        ] {
+            assert!(patched.contains(expected), "missing {expected}");
+        }
+        assert!(patched.contains("cache='none' io='native'"));
+        assert!(!patched.contains("cache='writeback'"));
+        assert!(!patched.contains("queues='8'"));
+
+        let patched_again = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd])
+            .expect("second opaque disk patch should succeed");
+        assert_eq!(patched_again, patched);
     }
 
     #[test]

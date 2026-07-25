@@ -8,4 +8,5 @@ pub mod network;
 pub mod storage;
 pub mod vm;
 pub mod vm_model;
+mod vm_reconcile;
 pub mod web;
