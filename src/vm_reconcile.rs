@@ -10,6 +10,9 @@ pub(crate) fn merge_disk_xml(
     let desired_driver = desired_child(desired_disk, "driver");
     let desired_source = desired_child(desired_disk, "source");
     let desired_target = desired_child(desired_disk, "target");
+    let desired_alias = desired_disk
+        .children()
+        .find(|child| child.has_tag_name("alias"));
 
     let mut output = render_element_start(
         "    ",
@@ -32,6 +35,7 @@ pub(crate) fn merge_disk_xml(
     }
     let mut emitted_source = false;
     let mut emitted_target = false;
+    let mut emitted_alias = false;
     for child in current_disk.children().filter(Node::is_element) {
         match child.tag_name().name() {
             "driver" if !emitted_driver => {
@@ -61,6 +65,23 @@ pub(crate) fn merge_disk_xml(
                 ));
                 emitted_target = true;
             }
+            "alias" if !emitted_alias => {
+                if is_qtr_disk_alias(child)
+                    && let Some(desired_alias) = desired_alias
+                {
+                    output.push_str(&render_raw_node(desired_xml, desired_alias, "      "));
+                } else {
+                    output.push_str(&render_raw_node(current_xml, child, "      "));
+                }
+                emitted_alias = true;
+            }
+            "address" if !emitted_alias => {
+                if let Some(desired_alias) = desired_alias {
+                    output.push_str(&render_raw_node(desired_xml, desired_alias, "      "));
+                }
+                emitted_alias = true;
+                output.push_str(&render_raw_node(current_xml, child, "      "));
+            }
             "driver" | "source" | "target" => {}
             _ => output.push_str(&render_raw_node(current_xml, child, "      ")),
         }
@@ -75,8 +96,17 @@ pub(crate) fn merge_disk_xml(
             output.push_str(&render_disk_child(current_xml, desired_xml, desired, None));
         }
     }
+    if !emitted_alias && let Some(desired_alias) = desired_alias {
+        output.push_str(&render_raw_node(desired_xml, desired_alias, "      "));
+    }
     output.push_str("    </disk>\n");
     output
+}
+
+fn is_qtr_disk_alias(alias: Node<'_, '_>) -> bool {
+    alias
+        .attribute("name")
+        .is_some_and(|name| name.starts_with("ua-qtr-disk-"))
 }
 
 fn desired_child<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Node<'a, 'input> {

@@ -40,6 +40,7 @@ pub struct VmLaunchCpuTopology {
 }
 
 pub struct VmLaunchDiskSpec<'a> {
+    pub id: Option<&'a str>,
     pub path: PathBuf,
     pub format: DiskFormat,
     pub source: VmLaunchDiskSource,
@@ -263,12 +264,16 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
             queues = queues,
         ),
     };
+    let alias = disk
+        .id
+        .map(|id| format!("      <alias name='ua-qtr-disk-{}'/>\n", escape_xml(id)))
+        .unwrap_or_default();
 
     format!(
         r#"    <disk type='{disk_type}' device='disk'>
 {driver}      <source {source_attr}='{path}'/>
       <target dev='{target}' bus='{bus}'/>
-    </disk>
+{alias}    </disk>
 "#,
         disk_type = disk_type,
         driver = driver,
@@ -276,6 +281,7 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         path = escape_xml(&disk.path.display().to_string()),
         target = escape_xml(&disk.target),
         bus = escape_xml(&disk.bus),
+        alias = alias,
     )
 }
 
@@ -389,6 +395,7 @@ mod tests {
 
     fn disk_spec(target: &str, bus: &str) -> VmLaunchDiskSpec<'static> {
         VmLaunchDiskSpec {
+            id: None,
             path: PathBuf::from("/var/lib/libvirt/images/sys.qcow2"),
             format: DiskFormat::Qcow2,
             source: VmLaunchDiskSource::File,
@@ -480,10 +487,13 @@ mod tests {
 
     #[test]
     fn builds_disk_xml_for_file_and_block_sources() {
-        let file_xml = build_disk_xml(&disk_spec("vda", "virtio"));
+        let mut file = disk_spec("vda", "virtio");
+        file.id = Some("root");
+        let file_xml = build_disk_xml(&file);
         assert!(file_xml.contains("<disk type='file' device='disk'>"));
         assert!(file_xml.contains("<source file='/var/lib/libvirt/images/sys.qcow2'/>"));
         assert!(file_xml.contains("<target dev='vda' bus='virtio'/>"));
+        assert!(file_xml.contains("<alias name='ua-qtr-disk-root'/>"));
 
         let mut block = disk_spec("sda", "scsi");
         block.source = VmLaunchDiskSource::Block;

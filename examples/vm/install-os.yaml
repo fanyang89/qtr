@@ -11,7 +11,8 @@ cpu:
 memory:
   sizeMiB: 4096
 disks:
-- path: /var/lib/libvirt/images/install-os.qcow2
+- id: root
+  path: /var/lib/libvirt/images/install-os.qcow2
   type: file
   format: qcow2
 cdrom: /path/to/installer.iso

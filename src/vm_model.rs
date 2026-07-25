@@ -126,6 +126,8 @@ impl VmMemory {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VmDisk {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(default = "default_vm_disk_type", rename = "type")]
     pub disk_type: VmDiskType,
     pub path: PathBuf,

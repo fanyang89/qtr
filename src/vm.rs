@@ -455,7 +455,9 @@ fn init(args: VmInitArgs) -> Result<()> {
     };
     let disks = disk_paths
         .into_iter()
-        .map(|path| VmDisk {
+        .enumerate()
+        .map(|(index, path)| VmDisk {
+            id: Some(format!("disk{index}")),
             disk_type: VmDiskType::File,
             path,
             format: DiskFormat::Qcow2,
@@ -657,6 +659,7 @@ fn launch_disk_spec(
     .flatten();
 
     VmLaunchDiskSpec {
+        id: disk.id.as_deref(),
         path: disk.path.clone(),
         format: disk.format,
         source: disk_launch_source(disk.disk_type),
@@ -1012,6 +1015,21 @@ fn find_domain_disk_match(
     domain_disks: &[DomainDiskPatchEntry<'_, '_>],
     manifest_disk: &VmDisk,
 ) -> Result<Option<usize>> {
+    if let Some(id) = manifest_disk.id.as_deref() {
+        let matches = domain_disks
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.used && entry.disk.id.as_deref() == Some(id))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("existing domain XML has duplicate disk id {id}");
+        }
+        if let Some(index) = matches.into_iter().next() {
+            return Ok(Some(index));
+        }
+    }
+
     if let Some(target) = manifest_disk.target.as_deref() {
         let matches = domain_disks
             .iter()
@@ -1828,6 +1846,7 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 .transpose()?;
 
             Ok(VmDisk {
+                id: Some(disk_id_from_domain_xml(disk, &target_dev)),
                 disk_type,
                 path: PathBuf::from(path),
                 format,
@@ -1844,6 +1863,15 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
     }
 
     Ok(disks)
+}
+
+fn disk_id_from_domain_xml(disk: Node<'_, '_>, target: &str) -> String {
+    optional_child(disk, "alias")
+        .and_then(|alias| alias.attribute("name"))
+        .and_then(|name| name.strip_prefix("ua-qtr-disk-"))
+        .filter(|id| is_valid_disk_id(id))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("disk-{target}"))
 }
 
 fn has_virtio_scsi_controller(devices: Node<'_, '_>) -> bool {
@@ -2230,6 +2258,16 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
         bail!("ioThreads requires at least one disk with io.mode threads");
     }
 
+    let mut disk_ids = BTreeSet::new();
+    for disk in &manifest.disks {
+        if let Some(id) = disk.id.as_deref() {
+            validate_disk_id(id)?;
+            if !disk_ids.insert(id) {
+                bail!("duplicate disk id {id}");
+            }
+        }
+    }
+
     let targets = assign_manifest_disk_targets(manifest)?;
     for (disk, target) in manifest.disks.iter().zip(&targets) {
         validate_disk_target_for_bus(target, disk.bus)?;
@@ -2269,6 +2307,24 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_disk_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 48 {
+        bail!("disk id must contain 1 to 48 characters");
+    }
+    if !is_valid_disk_id(id) {
+        bail!("disk id {id:?} contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn is_valid_disk_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 48
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn manifest_boot_order(manifest: &VmManifest) -> String {
@@ -3424,6 +3480,7 @@ mod tests {
         let boot_devices = [BootDevice::Cdrom, BootDevice::Hd];
         let disks = [
             VmLaunchDiskSpec {
+                id: None,
                 path: PathBuf::from("/var/lib/libvirt/images/sys.qcow2"),
                 format: DiskFormat::Qcow2,
                 source: VmLaunchDiskSource::File,
@@ -3434,6 +3491,7 @@ mod tests {
                 io_threads: None,
             },
             VmLaunchDiskSpec {
+                id: None,
                 path: PathBuf::from("/dev/disk/by-id/qtr-test-disk"),
                 format: DiskFormat::Raw,
                 source: VmLaunchDiskSource::Block,
@@ -3485,6 +3543,7 @@ mod tests {
         );
         assert_eq!(manifest.disks[0].disk_type, VmDiskType::File);
         assert_eq!(manifest.disks[0].format, DiskFormat::Qcow2);
+        assert_eq!(manifest.disks[0].id.as_deref(), Some("disk-vda"));
         assert_eq!(manifest.disks[0].target.as_deref(), Some("vda"));
         assert_eq!(manifest.disks[0].bus, VmDiskBus::VirtioBlk);
         assert_eq!(manifest.disks[1].disk_type, VmDiskType::Block);
@@ -3493,6 +3552,7 @@ mod tests {
             PathBuf::from("/dev/disk/by-id/qtr-test-disk")
         );
         assert_eq!(manifest.disks[1].format, DiskFormat::Raw);
+        assert_eq!(manifest.disks[1].id.as_deref(), Some("disk-sda"));
         assert_eq!(manifest.disks[1].target.as_deref(), Some("sda"));
         assert_eq!(manifest.disks[1].bus, VmDiskBus::VirtioScsi);
         assert_eq!(manifest.disks[1].cache, Some(VmDiskCache::None));
@@ -3620,6 +3680,7 @@ mod tests {
             memory: None,
             io_threads: None,
             disks: vec![VmDisk {
+                id: None,
                 disk_type: VmDiskType::File,
                 path: PathBuf::from("/fixtures/qtr/disks/sys.qcow2"),
                 format: DiskFormat::Qcow2,
@@ -4025,6 +4086,50 @@ disks:
     }
 
     #[test]
+    fn replaces_disk_path_by_stable_id() {
+        let xml = test_domain_xml().replace(
+            "      <address type='pci'",
+            "      <alias name='ua-qtr-disk-root'/>
+      <address type='pci'",
+        );
+        let mut disk = test_file_disk("/vm/replacement.qcow2", None, VmDiskBus::VirtioBlk);
+        disk.id = Some("root".to_string());
+        let manifest = test_manifest(vec![disk]);
+
+        let patched = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd])
+            .expect("stable disk id should identify a changed source");
+
+        assert!(patched.contains("<source file='/vm/replacement.qcow2'/>"));
+        assert!(patched.contains("<target dev='vda' bus='virtio'/>"));
+        assert!(patched.contains("<alias name='ua-qtr-disk-root'/>"));
+    }
+
+    #[test]
+    fn adopts_stable_disk_id_without_overwriting_foreign_alias() {
+        let mut disk = test_file_disk("/vm/sys.qcow2", Some("vda"), VmDiskBus::VirtioBlk);
+        disk.id = Some("root".to_string());
+        let manifest = test_manifest(vec![disk.clone()]);
+
+        let adopted = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd])
+            .expect("disk id should add an alias");
+        assert!(adopted.contains("<alias name='ua-qtr-disk-root'/>"));
+
+        let adopted_again = patch_domain_xml(&adopted, &manifest, &[BootDevice::Hd])
+            .expect("adopted disk id should remain stable");
+        assert_eq!(adopted_again, adopted);
+
+        let foreign = test_domain_xml().replace(
+            "      <address type='pci'",
+            "      <alias name='ua-external-root'/>
+      <address type='pci'",
+        );
+        let preserved = patch_domain_xml(&foreign, &manifest, &[BootDevice::Hd])
+            .expect("foreign alias should be preserved");
+        assert!(preserved.contains("<alias name='ua-external-root'/>"));
+        assert!(!preserved.contains("ua-qtr-disk-root"));
+    }
+
+    #[test]
     fn leaves_serial_log_unconfigured_when_manifest_omits_it() {
         let mut manifest = VmManifest {
             name: "install-os".to_string(),
@@ -4033,6 +4138,7 @@ disks:
             memory: None,
             io_threads: None,
             disks: vec![VmDisk {
+                id: None,
                 disk_type: VmDiskType::File,
                 path: PathBuf::from("sys.qcow2"),
                 format: DiskFormat::Qcow2,
@@ -4282,6 +4388,7 @@ disks:
 
     fn test_file_disk(path: &str, target: Option<&str>, bus: VmDiskBus) -> VmDisk {
         VmDisk {
+            id: None,
             disk_type: VmDiskType::File,
             path: PathBuf::from(path),
             format: DiskFormat::Qcow2,
@@ -4480,6 +4587,35 @@ disks:
         ]);
         let err = validate_manifest(&manifest).unwrap_err();
         assert!(err.to_string().contains("duplicate disk target vda"));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_invalid_and_duplicate_disk_ids() {
+        let dir = TestDiskDir::new();
+        let first = dir.create_disk("a.qcow2");
+        let second = dir.create_disk("b.qcow2");
+        let mut first_disk =
+            test_file_disk(first.to_str().unwrap(), Some("vda"), VmDiskBus::VirtioBlk);
+        let mut second_disk =
+            test_file_disk(second.to_str().unwrap(), Some("vdb"), VmDiskBus::VirtioBlk);
+        first_disk.id = Some("root".to_string());
+        second_disk.id = Some("root".to_string());
+        let manifest = test_manifest(vec![first_disk.clone(), second_disk]);
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate disk id root")
+        );
+
+        first_disk.id = Some("invalid/id".to_string());
+        let manifest = test_manifest(vec![first_disk]);
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported characters")
+        );
     }
 
     #[test]

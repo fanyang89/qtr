@@ -15,12 +15,14 @@ ioThreads:
   count: 4
   queues: 4
 disks:
-- path: .tmp/disks/install-os.qcow2
+- id: root
+  path: .tmp/disks/install-os.qcow2
   type: file
   format: qcow2
   target: vda
   bus: virtio-blk
-- path: /dev/disk/by-id/example-block-device
+- id: data
+  path: /dev/disk/by-id/example-block-device
   type: block
   format: raw
   target: sda

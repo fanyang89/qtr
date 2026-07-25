@@ -168,7 +168,8 @@ cpu:
 memory:
   sizeMiB: 4096
 disks:
-- path: .tmp/disks/install-os.qcow2
+- id: disk0
+  path: .tmp/disks/install-os.qcow2
   type: file
   format: qcow2
 cdrom: /path/to/installer.iso
@@ -179,6 +180,8 @@ vncListen: 127.0.0.1
 ```
 
 `machine.type` is optional; omit it to let libvirt select the machine type. CPU configuration accepts `host-passthrough`, `host-model`, or `custom`. A custom CPU requires `model`. Set either `cpu.vcpus` or `cpu.topology`, but not both. `memory.sizeMiB` is the current guest memory allocation and optional `memory.maxMiB` sets the maximum allocation. Legacy `vcpus` and `memoryGiB` remain supported for existing definitions but cannot be mixed with their structured replacements.
+
+`disks[].id` is the stable qtr device identity and is written to libvirt as a `ua-qtr-disk-*` alias. Keep the ID unchanged when moving a disk source or reordering disks. Existing definitions without IDs remain supported; `vm dump` derives deterministic IDs from disk targets.
 
 Apply it:
 
