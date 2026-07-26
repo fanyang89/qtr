@@ -70,8 +70,8 @@ export function AccessPage() {
               close to metal.
             </h1>
             <p className='mt-7 max-w-md text-sm leading-6 text-muted-foreground'>
-              Manage libvirt machines, installation media, and Fedora deployment
-              jobs from one host.
+              Manage libvirt machines, virtual disks, ISOs, and Fedora
+              deployment jobs from one host.
             </p>
           </section>
 

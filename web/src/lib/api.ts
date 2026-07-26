@@ -283,11 +283,11 @@ export async function cancelInstallJob(id: string): Promise<InstallJob> {
   )
 }
 
-export async function getImages(): Promise<ManagedResource[]> {
+export async function getDisks(): Promise<ManagedResource[]> {
   return parseResponse(apiClient.get('/images'), managedResourceArraySchema)
 }
 
-export async function getMedia(): Promise<ManagedResource[]> {
+export async function getIsos(): Promise<ManagedResource[]> {
   return parseResponse(apiClient.get('/media'), managedResourceArraySchema)
 }
 

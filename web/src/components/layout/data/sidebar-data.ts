@@ -12,7 +12,7 @@ export const sidebarData: SidebarData = {
           icon: Server,
         },
         {
-          title: 'Installations',
+          title: 'Automated Installs',
           url: '/installations',
           icon: ListTodo,
         },
@@ -22,13 +22,13 @@ export const sidebarData: SidebarData = {
       title: 'Resources',
       items: [
         {
-          title: 'Images',
-          url: '/resources/images',
+          title: 'Disks',
+          url: '/resources/disks',
           icon: HardDrive,
         },
         {
-          title: 'Media',
-          url: '/resources/media',
+          title: 'ISOs',
+          url: '/resources/isos',
           icon: Disc3,
         },
       ],

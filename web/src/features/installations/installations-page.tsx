@@ -4,9 +4,9 @@ import { Link, useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Plus } from 'lucide-react'
 import {
   createInstallJob,
-  getImages,
+  getDisks,
   getInstallJobs,
-  getMedia,
+  getIsos,
   type FedoraInstallRequest,
 } from '@/lib/api'
 import { formatDuration, formatTimestamp } from '@/lib/format'
@@ -64,12 +64,12 @@ export function InstallationsPage({
       <Main>
         <PageHeading
           eyebrow='Fedora deployment'
-          title='Installations'
-          description='Persistent, cancellable installation work executed sequentially on this host.'
+          title='Automated installations'
+          description='Unattended, persistent Fedora installation jobs executed sequentially on this host.'
           actions={
             <Button onClick={() => setCreateOpen(true)}>
               <Plus className='size-4' />
-              Install Fedora
+              New Automated Install
             </Button>
           }
         />
@@ -84,11 +84,11 @@ export function InstallationsPage({
             <span />
           </div>
           {jobs.isPending ? (
-            <ListMessage>Loading installation history…</ListMessage>
+            <ListMessage>Loading automated install history…</ListMessage>
           ) : jobs.isError ? (
-            <ListMessage>Installation history is unavailable.</ListMessage>
+            <ListMessage>Automated install history is unavailable.</ListMessage>
           ) : jobs.data.length === 0 ? (
-            <ListMessage>No installation jobs yet.</ListMessage>
+            <ListMessage>No automated install jobs yet.</ListMessage>
           ) : (
             jobs.data.map((job) => (
               <Link
@@ -135,14 +135,14 @@ function InstallFedoraDialog({
 }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const media = useQuery({
-    queryKey: ['resources', 'media'],
-    queryFn: getMedia,
+  const isos = useQuery({
+    queryKey: ['resources', 'isos'],
+    queryFn: getIsos,
     enabled: open,
   })
-  const images = useQuery({
-    queryKey: ['resources', 'images'],
-    queryFn: getImages,
+  const disks = useQuery({
+    queryKey: ['resources', 'disks'],
+    queryFn: getDisks,
     enabled: open,
   })
   const [name, setName] = useState('')
@@ -177,8 +177,8 @@ function InstallFedoraDialog({
       setError('Complete all required fields.')
       return
     }
-    if (images.data?.some((image) => image.id === imageId)) {
-      setError('This image ID already exists.')
+    if (disks.data?.some((disk) => disk.id === imageId)) {
+      setError('This disk ID already exists.')
       return
     }
     const request: FedoraInstallRequest = {
@@ -203,9 +203,9 @@ function InstallFedoraDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='max-h-[90svh] overflow-y-auto sm:max-w-2xl'>
         <DialogHeader>
-          <DialogTitle>Install Fedora</DialogTitle>
+          <DialogTitle>Automated Fedora install</DialogTitle>
           <DialogDescription>
-            Create a persistent installation job.
+            Create an unattended, persistent installation job.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className='grid gap-6'>
@@ -217,7 +217,7 @@ function InstallFedoraDialog({
                 onChange={(event) => updateName(event.target.value)}
               />
             </Field>
-            <Field label='Output image ID' htmlFor='install-image'>
+            <Field label='Output disk ID' htmlFor='install-image'>
               <Input
                 id='install-image'
                 className='font-mono'
@@ -226,17 +226,15 @@ function InstallFedoraDialog({
               />
             </Field>
           </div>
-          <Field label='Installation media' htmlFor='install-media'>
+          <Field label='Installation ISO' htmlFor='install-media'>
             <Select value={mediaId} onValueChange={setMediaId}>
               <SelectTrigger id='install-media'>
                 <SelectValue
-                  placeholder={
-                    media.isPending ? 'Loading media…' : 'Select media'
-                  }
+                  placeholder={isos.isPending ? 'Loading ISOs…' : 'Select ISO'}
                 />
               </SelectTrigger>
               <SelectContent>
-                {media.data?.map((resource) => (
+                {isos.data?.map((resource) => (
                   <SelectItem key={resource.id} value={resource.id}>
                     {resource.id}
                   </SelectItem>
@@ -298,7 +296,7 @@ function InstallFedoraDialog({
           </div>
           {(error || create.isError) && (
             <p className='text-sm text-destructive'>
-              {error ?? 'The installation job could not be created.'}
+              {error ?? 'The automated install job could not be created.'}
             </p>
           )}
           <DialogFooter>
@@ -311,7 +309,7 @@ function InstallFedoraDialog({
             </Button>
             <Button
               type='submit'
-              disabled={create.isPending || !media.data?.length}
+              disabled={create.isPending || !isos.data?.length}
             >
               {create.isPending ? 'Creating' : 'Create Job'}
             </Button>

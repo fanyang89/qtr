@@ -16,8 +16,8 @@ import {
 } from 'lucide-react'
 import {
   createVm,
-  getImages,
-  getMedia,
+  getDisks,
+  getIsos,
   getNetworks,
   type VmCreateInput,
 } from '@/lib/api'
@@ -60,16 +60,16 @@ const createVmSchema = z.object({
   disks: z
     .array(
       z.object({
-        imageId: z.string().min(1, 'Select an image'),
+        imageId: z.string().min(1, 'Select a disk'),
         format: z.enum(['qcow2', 'raw']),
         bus: z.enum(['virtio-blk', 'virtio-scsi']),
       })
     )
-    .min(1, 'At least one image is required')
+    .min(1, 'At least one disk is required')
     .refine(
       (disks) =>
         new Set(disks.map((disk) => disk.imageId)).size === disks.length,
-      'Each image can only be attached once'
+      'Each disk can only be attached once'
     ),
   networkId: z.string().min(1, 'Select a network'),
   mediaId: z.string().nullable(),
@@ -100,7 +100,7 @@ const sections = [
 ] as const
 
 export function CreateVmPage() {
-  const [source, setSource] = useState<'choose' | 'image'>('choose')
+  const [source, setSource] = useState<'choose' | 'disk'>('choose')
 
   return (
     <>
@@ -118,16 +118,16 @@ export function CreateVmPage() {
           </Link>
         </Button>
         {source === 'choose' ? (
-          <SourceChoice onUseImage={() => setSource('image')} />
+          <SourceChoice onUseDisk={() => setSource('disk')} />
         ) : (
-          <ManagedImageForm onBack={() => setSource('choose')} />
+          <ManagedDiskForm onBack={() => setSource('choose')} />
         )}
       </Main>
     </>
   )
 }
 
-function SourceChoice({ onUseImage }: { onUseImage: () => void }) {
+function SourceChoice({ onUseDisk }: { onUseDisk: () => void }) {
   return (
     <div className='mx-auto max-w-5xl'>
       <div className='mb-10 border-b border-border pb-8'>
@@ -139,23 +139,23 @@ function SourceChoice({ onUseImage }: { onUseImage: () => void }) {
         </h1>
         <p className='mt-3 max-w-xl text-sm leading-6 text-muted-foreground'>
           Install a fresh Fedora system or define a domain around an existing
-          managed image.
+          managed disk.
         </p>
       </div>
       <div className='grid gap-4 md:grid-cols-2'>
         <SourceButton
           icon={Disc3}
           index='01'
-          title='Install Fedora'
-          description='Create a new image and track installation as a persistent job.'
+          title='Automated Fedora install'
+          description='Create a new disk with an unattended, persistent installation job.'
           install
         />
         <SourceButton
           icon={HardDrive}
           index='02'
-          title='Use existing image'
-          description='Attach managed storage and define a powered-off libvirt domain.'
-          onClick={onUseImage}
+          title='Use existing disk'
+          description='Attach a managed virtual disk and define a powered-off libvirt domain.'
+          onClick={onUseDisk}
         />
       </div>
     </div>
@@ -216,7 +216,7 @@ function SourceButton({
   )
 }
 
-function ManagedImageForm({ onBack }: { onBack: () => void }) {
+function ManagedDiskForm({ onBack }: { onBack: () => void }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [serverError, setServerError] = useState<string | null>(null)
@@ -226,13 +226,13 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
   })
   const disks = useFieldArray({ control: form.control, name: 'disks' })
   const values = useWatch({ control: form.control })
-  const images = useQuery({
-    queryKey: ['resources', 'images'],
-    queryFn: getImages,
+  const managedDisks = useQuery({
+    queryKey: ['resources', 'disks'],
+    queryFn: getDisks,
   })
-  const media = useQuery({
-    queryKey: ['resources', 'media'],
-    queryFn: getMedia,
+  const isos = useQuery({
+    queryKey: ['resources', 'isos'],
+    queryFn: getIsos,
   })
   const networks = useQuery({ queryKey: ['networks'], queryFn: getNetworks })
   const create = useMutation({
@@ -265,7 +265,7 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
     create.mutate(input)
   }
 
-  const selectedImageIds = new Set(
+  const selectedDiskIds = new Set(
     values.disks?.map((disk) => disk?.imageId).filter(Boolean)
   )
 
@@ -279,13 +279,13 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
               onClick={onBack}
               className='mb-3 font-mono text-[0.625rem] tracking-[0.17em] text-muted-foreground uppercase hover:text-foreground'
             >
-              Existing managed image · Change source
+              Existing managed disk · Change source
             </button>
             <h1 className='text-3xl font-medium tracking-[-0.04em] sm:text-4xl'>
               Define virtual machine
             </h1>
             <p className='mt-2 max-w-xl text-sm text-muted-foreground'>
-              The image stays in place. The new domain is created powered off.
+              The disk stays in place. The new domain is created powered off.
             </p>
           </div>
         </div>
@@ -379,7 +379,7 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
               id='storage'
               index='03'
               title='Storage'
-              description='Attach existing writable images from the managed root.'
+              description='Attach existing writable virtual disks from the managed root.'
             >
               <div className='grid gap-4'>
                 {disks.fields.map((disk, index) => (
@@ -408,7 +408,7 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
                       name={`disks.${index}.imageId`}
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Managed image</FormLabel>
+                          <FormLabel>Managed disk</FormLabel>
                           <Select
                             value={field.value}
                             onValueChange={(value) => {
@@ -423,24 +423,24 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
                               <SelectTrigger>
                                 <SelectValue
                                   placeholder={
-                                    images.isPending
-                                      ? 'Loading images…'
-                                      : 'Select image'
+                                    managedDisks.isPending
+                                      ? 'Loading disks…'
+                                      : 'Select disk'
                                   }
                                 />
                               </SelectTrigger>
                             </FormControl>
                             <SelectContent>
-                              {images.data?.map((image) => (
+                              {managedDisks.data?.map((disk) => (
                                 <SelectItem
-                                  key={image.id}
-                                  value={image.id}
+                                  key={disk.id}
+                                  value={disk.id}
                                   disabled={
-                                    selectedImageIds.has(image.id) &&
-                                    image.id !== field.value
+                                    selectedDiskIds.has(disk.id) &&
+                                    disk.id !== field.value
                                   }
                                 >
-                                  {image.id} · {formatBytes(image.sizeBytes)}
+                                  {disk.id} · {formatBytes(disk.sizeBytes)}
                                 </SelectItem>
                               ))}
                             </SelectContent>
@@ -517,15 +517,15 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
                     })
                   }
                 >
-                  <Plus className='size-4' /> Add Image
+                  <Plus className='size-4' /> Add Disk
                 </Button>
-                {!images.isPending && !images.data?.length && (
+                {!managedDisks.isPending && !managedDisks.data?.length && (
                   <Alert>
                     <HardDrive className='size-4' />
-                    <AlertTitle>No managed images</AlertTitle>
+                    <AlertTitle>No managed disks</AlertTitle>
                     <AlertDescription>
-                      Add an image to the configured image root or install
-                      Fedora first.
+                      Add a disk to the configured disk root or run an automated
+                      Fedora install first.
                     </AlertDescription>
                   </Alert>
                 )}
@@ -580,7 +580,7 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
               id='access'
               index='05'
               title='Access'
-              description='Configure browser console and optional installation media.'
+              description='Configure browser console and an optional installation ISO.'
             >
               <div className='grid gap-5'>
                 <FormField
@@ -617,7 +617,7 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
                   name='mediaId'
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Installation media</FormLabel>
+                      <FormLabel>Installation ISO</FormLabel>
                       <Select
                         value={field.value ?? 'none'}
                         onValueChange={(value) =>
@@ -630,8 +630,8 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          <SelectItem value='none'>No media</SelectItem>
-                          {media.data?.map((resource) => (
+                          <SelectItem value='none'>No ISO</SelectItem>
+                          {isos.data?.map((resource) => (
                             <SelectItem key={resource.id} value={resource.id}>
                               {resource.id}
                             </SelectItem>
@@ -639,7 +639,7 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
                         </SelectContent>
                       </Select>
                       <FormDescription>
-                        Attached media changes boot order to CD-ROM, then disk.
+                        An attached ISO changes boot order to CD-ROM, then disk.
                       </FormDescription>
                       <FormMessage />
                     </FormItem>
@@ -691,7 +691,7 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
                 label='Storage'
                 value={
                   values.disks?.filter((disk) => disk?.imageId).length
-                    ? `${values.disks.filter((disk) => disk?.imageId).length} image(s)`
+                    ? `${values.disks.filter((disk) => disk?.imageId).length} disk(s)`
                     : 'Not set'
                 }
               />
@@ -704,15 +704,11 @@ function ManagedImageForm({ onBack }: { onBack: () => void }) {
                 label='Graphics'
                 value={values.graphics === 'vnc' ? 'Browser console' : 'None'}
               />
-              <ReviewValue
-                label='Media'
-                value={values.mediaId || 'None'}
-                mono
-              />
+              <ReviewValue label='ISO' value={values.mediaId || 'None'} mono />
               <div className='grid gap-2 border-t border-border p-4'>
                 <Button
                   type='submit'
-                  disabled={create.isPending || !images.data?.length}
+                  disabled={create.isPending || !managedDisks.data?.length}
                 >
                   {create.isPending ? 'Defining…' : 'Define VM'}
                   {!create.isPending && <Check className='size-4' />}

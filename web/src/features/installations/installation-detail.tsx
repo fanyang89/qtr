@@ -62,13 +62,13 @@ export function InstallationDetail({ id }: { id: string }) {
         <Button variant='ghost' size='sm' asChild className='-ms-2 mb-5'>
           <Link to='/installations'>
             <ArrowLeft className='size-4' />
-            Installations
+            Automated installs
           </Link>
         </Button>
         <div className='mb-9 flex flex-col gap-5 border-b border-border pb-7 sm:flex-row sm:items-end sm:justify-between'>
           <div>
             <p className='mb-3 font-mono text-[0.625rem] tracking-[0.17em] text-muted-foreground uppercase'>
-              Fedora installation
+              Automated Fedora installation
             </p>
             <div className='flex flex-wrap items-center gap-4'>
               <h1 className='text-3xl font-medium tracking-[-0.04em] sm:text-4xl'>
@@ -136,8 +136,8 @@ export function InstallationDetail({ id }: { id: string }) {
           <section>
             <h2 className='mb-4 text-sm font-medium'>Request</h2>
             <dl className='border border-border bg-card'>
-              <Value label='Media' value={value.request.mediaId} mono />
-              <Value label='Image' value={value.request.imageId} mono />
+              <Value label='ISO' value={value.request.mediaId} mono />
+              <Value label='Disk' value={value.request.imageId} mono />
               <Value label='Disk size' value={value.request.diskSize} />
               <Value label='Memory' value={`${value.request.memoryMib} MiB`} />
               <Value label='vCPUs' value={String(value.request.vcpus)} />

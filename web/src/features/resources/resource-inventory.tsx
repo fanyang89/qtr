@@ -2,7 +2,7 @@ import { useDeferredValue, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Disc3, HardDrive, Search as SearchIcon } from 'lucide-react'
-import { getImages, getMedia } from '@/lib/api'
+import { getDisks, getIsos } from '@/lib/api'
 import { formatBytes, formatTimestamp } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,18 +12,19 @@ import { PageHeading } from '@/components/page-heading'
 import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
 
-export function ResourceInventory({ kind }: { kind: 'images' | 'media' }) {
+export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
   const [search, setSearch] = useState('')
   const deferredSearch = useDeferredValue(search.trim().toLowerCase())
   const query = useQuery({
     queryKey: ['resources', kind],
-    queryFn: kind === 'images' ? getImages : getMedia,
+    queryFn: kind === 'disks' ? getDisks : getIsos,
   })
   const resources = (query.data ?? []).filter((resource) =>
     resource.id.toLowerCase().includes(deferredSearch)
   )
-  const Icon = kind === 'images' ? HardDrive : Disc3
-  const title = kind === 'images' ? 'Images' : 'Installation media'
+  const Icon = kind === 'disks' ? HardDrive : Disc3
+  const title = kind === 'disks' ? 'Disks' : 'ISOs'
+  const singular = kind === 'disks' ? 'Disk' : 'ISO'
 
   return (
     <>
@@ -38,27 +39,27 @@ export function ResourceInventory({ kind }: { kind: 'images' | 'media' }) {
           eyebrow='Managed resources'
           title={title}
           description={
-            kind === 'images'
-              ? 'Disk images available to virtual machines on this host.'
-              : 'Read-only installation sources available to deployment jobs.'
+            kind === 'disks'
+              ? 'Managed virtual disks available to machines on this host.'
+              : 'Read-only ISO installation media available to deployment jobs.'
           }
         />
 
         <div className='mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
           <div className='flex gap-1 border border-border bg-card p-1'>
             <Button
-              variant={kind === 'images' ? 'secondary' : 'ghost'}
+              variant={kind === 'disks' ? 'secondary' : 'ghost'}
               size='sm'
               asChild
             >
-              <Link to='/resources/images'>Images</Link>
+              <Link to='/resources/disks'>Disks</Link>
             </Button>
             <Button
-              variant={kind === 'media' ? 'secondary' : 'ghost'}
+              variant={kind === 'isos' ? 'secondary' : 'ghost'}
               size='sm'
               asChild
             >
-              <Link to='/resources/media'>Media</Link>
+              <Link to='/resources/isos'>ISOs</Link>
             </Button>
           </div>
           <div className='relative w-full sm:w-72'>
@@ -66,7 +67,7 @@ export function ResourceInventory({ kind }: { kind: 'images' | 'media' }) {
             <Input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder={`Filter ${kind}`}
+              placeholder={`Filter ${title}`}
               className='ps-9'
             />
           </div>
@@ -74,7 +75,7 @@ export function ResourceInventory({ kind }: { kind: 'images' | 'media' }) {
 
         <section className='overflow-hidden border border-border bg-card'>
           <div className='grid grid-cols-[1fr_auto] gap-4 border-b border-border px-4 py-3 font-mono text-[0.625rem] tracking-[0.14em] text-muted-foreground uppercase sm:grid-cols-[1fr_8rem_13rem]'>
-            <span>Resource ID</span>
+            <span>{singular} ID</span>
             <span>Size</span>
             <span className='hidden sm:block'>Modified</span>
           </div>
@@ -84,7 +85,9 @@ export function ResourceInventory({ kind }: { kind: 'images' | 'media' }) {
             <ResourceMessage>Resource root is unavailable.</ResourceMessage>
           ) : resources.length === 0 ? (
             <ResourceMessage>
-              {search ? 'No resources match this filter.' : `No ${kind} found.`}
+              {search
+                ? 'No resources match this filter.'
+                : `No ${title} found.`}
             </ResourceMessage>
           ) : (
             resources.map((resource) => (

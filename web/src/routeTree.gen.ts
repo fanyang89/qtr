@@ -20,8 +20,8 @@ import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
 import { Route as AuthenticatedInstallationsIndexRouteImport } from './routes/_authenticated/installations/index'
 import { Route as AuthenticatedInstallationsIdRouteImport } from './routes/_authenticated/installations/$id'
-import { Route as AuthenticatedResourcesImagesRouteImport } from './routes/_authenticated/resources/images'
-import { Route as AuthenticatedResourcesMediaRouteImport } from './routes/_authenticated/resources/media'
+import { Route as AuthenticatedResourcesDisksRouteImport } from './routes/_authenticated/resources/disks'
+import { Route as AuthenticatedResourcesIsosRouteImport } from './routes/_authenticated/resources/isos'
 import { Route as AuthenticatedVmsIndexRouteImport } from './routes/_authenticated/vms/index'
 import { Route as AuthenticatedVmsNameRouteRouteImport } from './routes/_authenticated/vms/$name/route'
 import { Route as AuthenticatedVmsNewRouteImport } from './routes/_authenticated/vms/new'
@@ -84,16 +84,16 @@ const AuthenticatedInstallationsIdRoute =
     path: '/installations/$id',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
-const AuthenticatedResourcesImagesRoute =
-  AuthenticatedResourcesImagesRouteImport.update({
-    id: '/resources/images',
-    path: '/resources/images',
+const AuthenticatedResourcesDisksRoute =
+  AuthenticatedResourcesDisksRouteImport.update({
+    id: '/resources/disks',
+    path: '/resources/disks',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
-const AuthenticatedResourcesMediaRoute =
-  AuthenticatedResourcesMediaRouteImport.update({
-    id: '/resources/media',
-    path: '/resources/media',
+const AuthenticatedResourcesIsosRoute =
+  AuthenticatedResourcesIsosRouteImport.update({
+    id: '/resources/isos',
+    path: '/resources/isos',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedVmsIndexRoute = AuthenticatedVmsIndexRouteImport.update({
@@ -136,8 +136,8 @@ export interface FileRoutesByFullPath {
   '/settings': typeof AuthenticatedSettingsRoute
   '/vms/$name': typeof AuthenticatedVmsNameRouteRouteWithChildren
   '/installations/$id': typeof AuthenticatedInstallationsIdRoute
-  '/resources/images': typeof AuthenticatedResourcesImagesRoute
-  '/resources/media': typeof AuthenticatedResourcesMediaRoute
+  '/resources/disks': typeof AuthenticatedResourcesDisksRoute
+  '/resources/isos': typeof AuthenticatedResourcesIsosRoute
   '/vms/new': typeof AuthenticatedVmsNewRoute
   '/installations/': typeof AuthenticatedInstallationsIndexRoute
   '/vms/': typeof AuthenticatedVmsIndexRoute
@@ -154,8 +154,8 @@ export interface FileRoutesByTo {
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
   '/installations/$id': typeof AuthenticatedInstallationsIdRoute
-  '/resources/images': typeof AuthenticatedResourcesImagesRoute
-  '/resources/media': typeof AuthenticatedResourcesMediaRoute
+  '/resources/disks': typeof AuthenticatedResourcesDisksRoute
+  '/resources/isos': typeof AuthenticatedResourcesIsosRoute
   '/vms/new': typeof AuthenticatedVmsNewRoute
   '/installations': typeof AuthenticatedInstallationsIndexRoute
   '/vms': typeof AuthenticatedVmsIndexRoute
@@ -175,8 +175,8 @@ export interface FileRoutesById {
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/vms/$name': typeof AuthenticatedVmsNameRouteRouteWithChildren
   '/_authenticated/installations/$id': typeof AuthenticatedInstallationsIdRoute
-  '/_authenticated/resources/images': typeof AuthenticatedResourcesImagesRoute
-  '/_authenticated/resources/media': typeof AuthenticatedResourcesMediaRoute
+  '/_authenticated/resources/disks': typeof AuthenticatedResourcesDisksRoute
+  '/_authenticated/resources/isos': typeof AuthenticatedResourcesIsosRoute
   '/_authenticated/vms/new': typeof AuthenticatedVmsNewRoute
   '/_authenticated/installations/': typeof AuthenticatedInstallationsIndexRoute
   '/_authenticated/vms/': typeof AuthenticatedVmsIndexRoute
@@ -196,8 +196,8 @@ export interface FileRouteTypes {
     | '/settings'
     | '/vms/$name'
     | '/installations/$id'
-    | '/resources/images'
-    | '/resources/media'
+    | '/resources/disks'
+    | '/resources/isos'
     | '/vms/new'
     | '/installations/'
     | '/vms/'
@@ -214,8 +214,8 @@ export interface FileRouteTypes {
     | '/settings'
     | '/'
     | '/installations/$id'
-    | '/resources/images'
-    | '/resources/media'
+    | '/resources/disks'
+    | '/resources/isos'
     | '/vms/new'
     | '/installations'
     | '/vms'
@@ -234,8 +234,8 @@ export interface FileRouteTypes {
     | '/_authenticated/'
     | '/_authenticated/vms/$name'
     | '/_authenticated/installations/$id'
-    | '/_authenticated/resources/images'
-    | '/_authenticated/resources/media'
+    | '/_authenticated/resources/disks'
+    | '/_authenticated/resources/isos'
     | '/_authenticated/vms/new'
     | '/_authenticated/installations/'
     | '/_authenticated/vms/'
@@ -332,18 +332,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedInstallationsIdRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/_authenticated/resources/images': {
-      id: '/_authenticated/resources/images'
-      path: '/resources/images'
-      fullPath: '/resources/images'
-      preLoaderRoute: typeof AuthenticatedResourcesImagesRouteImport
+    '/_authenticated/resources/disks': {
+      id: '/_authenticated/resources/disks'
+      path: '/resources/disks'
+      fullPath: '/resources/disks'
+      preLoaderRoute: typeof AuthenticatedResourcesDisksRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/_authenticated/resources/media': {
-      id: '/_authenticated/resources/media'
-      path: '/resources/media'
-      fullPath: '/resources/media'
-      preLoaderRoute: typeof AuthenticatedResourcesMediaRouteImport
+    '/_authenticated/resources/isos': {
+      id: '/_authenticated/resources/isos'
+      path: '/resources/isos'
+      fullPath: '/resources/isos'
+      preLoaderRoute: typeof AuthenticatedResourcesIsosRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/vms/': {
@@ -405,8 +405,8 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedVmsNameRouteRoute: typeof AuthenticatedVmsNameRouteRouteWithChildren
   AuthenticatedInstallationsIdRoute: typeof AuthenticatedInstallationsIdRoute
-  AuthenticatedResourcesImagesRoute: typeof AuthenticatedResourcesImagesRoute
-  AuthenticatedResourcesMediaRoute: typeof AuthenticatedResourcesMediaRoute
+  AuthenticatedResourcesDisksRoute: typeof AuthenticatedResourcesDisksRoute
+  AuthenticatedResourcesIsosRoute: typeof AuthenticatedResourcesIsosRoute
   AuthenticatedVmsNewRoute: typeof AuthenticatedVmsNewRoute
   AuthenticatedInstallationsIndexRoute: typeof AuthenticatedInstallationsIndexRoute
   AuthenticatedVmsIndexRoute: typeof AuthenticatedVmsIndexRoute
@@ -417,8 +417,8 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedVmsNameRouteRoute: AuthenticatedVmsNameRouteRouteWithChildren,
   AuthenticatedInstallationsIdRoute: AuthenticatedInstallationsIdRoute,
-  AuthenticatedResourcesImagesRoute: AuthenticatedResourcesImagesRoute,
-  AuthenticatedResourcesMediaRoute: AuthenticatedResourcesMediaRoute,
+  AuthenticatedResourcesDisksRoute: AuthenticatedResourcesDisksRoute,
+  AuthenticatedResourcesIsosRoute: AuthenticatedResourcesIsosRoute,
   AuthenticatedVmsNewRoute: AuthenticatedVmsNewRoute,
   AuthenticatedInstallationsIndexRoute: AuthenticatedInstallationsIndexRoute,
   AuthenticatedVmsIndexRoute: AuthenticatedVmsIndexRoute,
