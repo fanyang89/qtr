@@ -64,6 +64,10 @@ pub struct WebArgs {
     /// Directory containing installation and serial logs.
     #[arg(long, default_value = ".tmp/logs")]
     pub log_root: PathBuf,
+
+    /// Maximum size of one ISO upload in bytes.
+    #[arg(long, default_value_t = 34_359_738_368)]
+    pub max_iso_upload_bytes: u64,
 }
 
 #[derive(Debug, Args)]

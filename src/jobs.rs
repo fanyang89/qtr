@@ -122,6 +122,17 @@ pub struct ManagedResource {
     pub modified_at_ms: Option<i64>,
 }
 
+pub enum IsoDeleteOutcome {
+    Deleted,
+    NotFound,
+    InUse(String),
+}
+
+pub enum IsoPublishOutcome {
+    Created(ManagedResource),
+    Exists,
+}
+
 #[derive(Clone)]
 struct JobStore {
     path: Arc<PathBuf>,
@@ -214,6 +225,20 @@ impl JobStore {
             .map_err(Into::into)
     }
 
+    fn active_media_user(&self, media_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|job| {
+                job.request.media_id == media_id
+                    && matches!(
+                        job.status,
+                        JobStatus::Queued | JobStatus::Running | JobStatus::Interrupted
+                    )
+            })
+            .map(|job| job.id))
+    }
+
     fn claim(&self, id: &str) -> Result<Option<FedoraInstallRequest>> {
         let connection = self.connect()?;
         let changed = connection.execute(
@@ -301,6 +326,7 @@ pub struct JobService {
     sender: Sender<String>,
     controls: Arc<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
     roots: Arc<JobRoots>,
+    resource_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -335,6 +361,7 @@ impl JobService {
             sender,
             controls,
             roots,
+            resource_lock: Arc::new(Mutex::new(())),
         };
         for id in service.store.queued_ids()? {
             service.sender.send(id)?;
@@ -343,7 +370,9 @@ impl JobService {
     }
 
     pub fn create(&self, request: FedoraInstallRequest) -> Result<InstallJob> {
+        let _guard = self.lock_resources()?;
         request.validate()?;
+        self.resolve_media(&request.media_id)?;
         let job = self.store.create(&request)?;
         self.sender.send(job.id.clone())?;
         Ok(job)
@@ -383,9 +412,85 @@ impl JobService {
         resolve_resource(&self.roots.media, id, "media")
     }
 
+    pub fn create_iso_staging_path(&self) -> Result<PathBuf> {
+        let directory = self.roots.media.join(".uploads");
+        std::fs::create_dir_all(&directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+        Ok(directory.join(format!("{}.partial", Uuid::new_v4())))
+    }
+
+    pub fn validate_iso_id(&self, id: &str) -> Result<()> {
+        validate_iso_id(id)
+    }
+
+    pub fn publish_iso(&self, id: &str, staging: &Path) -> Result<IsoPublishOutcome> {
+        let _guard = self.lock_resources()?;
+        validate_iso_id(id)?;
+        let destination = self.roots.media.join(id);
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => return Ok(IsoPublishOutcome::Exists),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        match std::fs::hard_link(staging, &destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(IsoPublishOutcome::Exists);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        std::fs::remove_file(staging)?;
+        Ok(IsoPublishOutcome::Created(resource_from_path(
+            id,
+            &destination,
+        )?))
+    }
+
+    pub fn delete_iso<F>(&self, id: &str, vm_users: F) -> Result<IsoDeleteOutcome>
+    where
+        F: FnOnce(&Path) -> Result<Vec<String>>,
+    {
+        let _guard = self.lock_resources()?;
+        validate_iso_id(id)?;
+        let path = self.roots.media.join(id);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(IsoDeleteOutcome::NotFound);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.file_type().is_file() {
+            bail!("ISO {id:?} is not a regular file");
+        }
+        if let Some(job_id) = self.store.active_media_user(id)? {
+            return Ok(IsoDeleteOutcome::InUse(format!(
+                "ISO is referenced by automated install job {job_id}"
+            )));
+        }
+        if let Some(vm_name) = vm_users(&path)?.into_iter().next() {
+            return Ok(IsoDeleteOutcome::InUse(format!(
+                "ISO is attached to VM {vm_name}"
+            )));
+        }
+        std::fs::remove_file(path)?;
+        Ok(IsoDeleteOutcome::Deleted)
+    }
+
+    pub fn with_resource_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _guard = self.lock_resources()?;
+        operation()
+    }
+
     pub fn serial_log_path(&self, vm_name: &str) -> Result<PathBuf> {
         validate_id(vm_name, "VM name")?;
         Ok(self.roots.logs.join(format!("{vm_name}.serial.log")))
+    }
+
+    fn lock_resources(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.resource_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resource operation lock poisoned"))
     }
 }
 
@@ -447,7 +552,7 @@ fn resolve_request(
     std::fs::write(&ssh_key, format!("{}\n", request.ssh_authorized_key.trim()))?;
     Ok(VmInstallFedoraArgs {
         name: request.name.clone(),
-        iso: roots.media.join(&request.media_id),
+        iso: resolve_resource(&roots.media, &request.media_id, "ISO")?,
         disk: roots.images.join(&request.image_id),
         disk_size: request.disk_size.clone(),
         output: roots
@@ -481,10 +586,12 @@ fn prepare_roots(roots: &JobRoots) -> Result<()> {
         roots.media.as_path(),
         roots.state.join("jobs").as_path(),
         roots.state.join("vms").as_path(),
+        roots.media.join(".uploads").as_path(),
     ] {
         std::fs::create_dir_all(path)
             .with_context(|| format!("failed to create {}", path.display()))?;
     }
+    cleanup_staging(&roots.media.join(".uploads"))?;
     Ok(())
 }
 
@@ -494,10 +601,11 @@ fn list_resources(root: &Path) -> Result<Vec<ManagedResource>> {
         .with_context(|| format!("failed to read resource root {}", root.display()))?
     {
         let entry = entry?;
-        let metadata = entry.metadata()?;
-        if !metadata.is_file() {
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
             continue;
         }
+        let metadata = entry.metadata()?;
         let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -520,12 +628,57 @@ fn resolve_resource(root: &Path, id: &str, kind: &str) -> Result<PathBuf> {
     validate_id(id, &format!("{kind} ID"))?;
     let path = root.join(id);
     let metadata = path
-        .metadata()
+        .symlink_metadata()
         .with_context(|| format!("{kind} {id:?} does not exist"))?;
-    if !metadata.is_file() {
+    if !metadata.file_type().is_file() {
         bail!("{kind} {id:?} is not a regular file");
     }
     Ok(path)
+}
+
+fn validate_iso_id(id: &str) -> Result<()> {
+    validate_id(id, "ISO ID")?;
+    if id.len() > 255 {
+        bail!("ISO ID must not exceed 255 bytes");
+    }
+    if id.starts_with('.') {
+        bail!("ISO ID must not start with a dot");
+    }
+    if !id.to_ascii_lowercase().ends_with(".iso") {
+        bail!("ISO ID must end with .iso");
+    }
+    Ok(())
+}
+
+fn resource_from_path(id: &str, path: &Path) -> Result<ManagedResource> {
+    let metadata = path.symlink_metadata()?;
+    if !metadata.file_type().is_file() {
+        bail!("resource {id:?} is not a regular file");
+    }
+    let modified_at_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .and_then(|value| value.as_millis().try_into().ok());
+    Ok(ManagedResource {
+        id: id.to_string(),
+        size_bytes: metadata.len(),
+        modified_at_ms,
+    })
+}
+
+fn cleanup_staging(directory: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.ends_with(".partial") && entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_id(value: &str, label: &str) -> Result<()> {
@@ -604,11 +757,19 @@ mod tests {
         let job = store.create(&request()).unwrap();
         assert_eq!(job.status, JobStatus::Queued);
         assert_eq!(store.list().unwrap().len(), 1);
+        assert_eq!(
+            store.active_media_user("Fedora-Server.iso").unwrap(),
+            Some(job.id.clone())
+        );
 
         let cancelled = store.request_cancel(&job.id).unwrap().unwrap();
         assert_eq!(cancelled.status, JobStatus::Cancelled);
         assert!(cancelled.cancel_requested);
         assert!(cancelled.finished_at_ms.is_some());
+        assert!(store
+            .active_media_user("Fedora-Server.iso")
+            .unwrap()
+            .is_none());
         assert!(store.claim(&job.id).unwrap().is_none());
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -647,12 +808,24 @@ mod tests {
         std::fs::write(directory.join("b.iso"), b"bb").unwrap();
         std::fs::write(directory.join("a.iso"), b"a").unwrap();
         std::fs::create_dir(directory.join("ignored")).unwrap();
+        std::os::unix::fs::symlink(directory.join("a.iso"), directory.join("linked.iso")).unwrap();
 
         let resources = list_resources(&directory).unwrap();
         assert_eq!(resources.len(), 2);
         assert_eq!(resources[0].id, "a.iso");
         assert_eq!(resources[0].size_bytes, 1);
         assert_eq!(resources[1].id, "b.iso");
+        assert!(resolve_resource(&directory, "linked.iso", "ISO").is_err());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn validates_public_iso_ids() {
+        assert!(validate_iso_id("Fedora-Server.iso").is_ok());
+        assert!(validate_iso_id("Fedora-Server.ISO").is_ok());
+        assert!(validate_iso_id("Fedora-Server.img").is_err());
+        assert!(validate_iso_id(".hidden.iso").is_err());
+        assert!(validate_iso_id("../escape.iso").is_err());
+        assert!(validate_iso_id(&format!("{}.iso", "a".repeat(252))).is_err());
     }
 }

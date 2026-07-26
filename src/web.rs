@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
         Path, Query, Request, State,
         rejection::{JsonRejection, QueryRejection},
@@ -22,8 +23,10 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    fs::OpenOptions,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
 };
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -39,7 +42,10 @@ use virt::error::clear_error_callback;
 use crate::config::GraphicsMode;
 use crate::{
     config::WebArgs,
-    jobs::{FedoraInstallRequest, InstallJob, JobRoots, JobService, ManagedResource},
+    jobs::{
+        FedoraInstallRequest, InstallJob, IsoDeleteOutcome, IsoPublishOutcome, JobRoots,
+        JobService, ManagedResource,
+    },
     network, vm,
 };
 
@@ -49,6 +55,8 @@ struct AppState {
     api_token: Arc<str>,
     vnc_tickets: Arc<Mutex<HashMap<String, VncTicket>>>,
     jobs: Option<JobService>,
+    max_iso_upload_bytes: u64,
+    iso_uploads: Arc<Semaphore>,
 }
 
 #[derive(utoipa::OpenApi)]
@@ -113,6 +121,9 @@ enum AppError {
     Vm(vm::VmApiError),
     BadRequest(anyhow::Error),
     NotFound,
+    Conflict(String),
+    PayloadTooLarge,
+    UnsupportedMediaType,
     Internal(anyhow::Error),
 }
 
@@ -126,6 +137,9 @@ impl AppError {
             Self::Vm(vm::VmApiError::Conflict(_)) => StatusCode::CONFLICT,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Vm(vm::VmApiError::Internal(_)) | Self::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -137,6 +151,9 @@ impl AppError {
             Self::Vm(error) => error,
             Self::BadRequest(error) => error,
             Self::NotFound => &"resource not found",
+            Self::Conflict(error) => error,
+            Self::PayloadTooLarge => &"payload too large",
+            Self::UnsupportedMediaType => &"unsupported media type",
             Self::Internal(error) => error,
         }
     }
@@ -165,6 +182,15 @@ impl IntoResponse for AppError {
                 ("Not Found", "The VM was not found.".to_string())
             }
             Self::NotFound => ("Not Found", "The resource was not found.".to_string()),
+            Self::Conflict(detail) => ("Conflict", detail.clone()),
+            Self::PayloadTooLarge => (
+                "Payload Too Large",
+                "The ISO exceeds the configured upload limit.".to_string(),
+            ),
+            Self::UnsupportedMediaType => (
+                "Unsupported Media Type",
+                "ISO uploads require application/octet-stream.".to_string(),
+            ),
             Self::Vm(vm::VmApiError::Conflict(error)) => ("Conflict", error.to_string()),
             Self::Vm(vm::VmApiError::Internal(_)) | Self::Internal(_) => (
                 "Internal Server Error",
@@ -391,7 +417,13 @@ async fn run_async(args: WebArgs) -> Result<()> {
         logs: args.log_root,
         connect_uri: args.connect_uri.clone(),
     })?;
-    let app = app(args.connect_uri, args.web_dir, args.api_token, Some(jobs));
+    let app = app_with_iso_limit(
+        args.connect_uri,
+        args.web_dir,
+        args.api_token,
+        Some(jobs),
+        args.max_iso_upload_bytes,
+    );
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind web server at {listen}"))?;
@@ -403,17 +435,30 @@ async fn run_async(args: WebArgs) -> Result<()> {
         .context("web server failed")
 }
 
+#[cfg(test)]
 fn app(
     connect_uri: String,
     web_dir: PathBuf,
     api_token: String,
     jobs: Option<JobService>,
 ) -> Router {
+    app_with_iso_limit(connect_uri, web_dir, api_token, jobs, 34_359_738_368)
+}
+
+fn app_with_iso_limit(
+    connect_uri: String,
+    web_dir: PathBuf,
+    api_token: String,
+    jobs: Option<JobService>,
+    max_iso_upload_bytes: u64,
+) -> Router {
     let state = AppState {
         connect_uri,
         api_token: api_token.into(),
         vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
         jobs,
+        max_iso_upload_bytes,
+        iso_uploads: Arc::new(Semaphore::new(1)),
     };
     let index_html = web_dir.join("index.html");
     let (api_router, openapi) = documented_api(&state);
@@ -446,6 +491,7 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(cancel_install_job))
         .routes(routes!(list_images))
         .routes(routes!(list_media))
+        .routes(routes!(upload_iso, delete_iso))
         .routes(routes!(list_networks))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -473,6 +519,8 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         api_token: Arc::from("unused"),
         vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
         jobs: None,
+        max_iso_upload_bytes: 34_359_738_368,
+        iso_uploads: Arc::new(Semaphore::new(1)),
     };
     documented_api(&state).1
 }
@@ -848,6 +896,153 @@ async fn list_media(State(state): State<AppState>) -> AppResult<Json<Vec<Managed
     Ok(Json(run_job_store(move || jobs.list_media()).await?))
 }
 
+struct PartialUpload(PathBuf);
+
+impl Drop for PartialUpload {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/media/{id}",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ISO ID")),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    responses(
+        (status = CREATED, body = ManagedResource),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = PAYLOAD_TOO_LARGE, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNSUPPORTED_MEDIA_TYPE, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn upload_iso(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> AppResult<(StatusCode, Json<ManagedResource>)> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if content_type != "application/octet-stream" {
+        return Err(AppError::UnsupportedMediaType);
+    }
+    if headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > state.max_iso_upload_bytes)
+    {
+        return Err(AppError::PayloadTooLarge);
+    }
+
+    let jobs = job_service(&state)?;
+    jobs.validate_iso_id(&id).map_err(AppError::BadRequest)?;
+    let _permit = state
+        .iso_uploads
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    let staging = jobs.create_iso_staging_path().map_err(AppError::Internal)?;
+    let partial = PartialUpload(staging.clone());
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .read(true)
+        .open(&staging)
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    let mut stream = body.into_data_stream();
+    let mut written = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| AppError::BadRequest(error.into()))?;
+        written = written
+            .checked_add(chunk.len() as u64)
+            .ok_or(AppError::PayloadTooLarge)?;
+        if written > state.max_iso_upload_bytes {
+            return Err(AppError::PayloadTooLarge);
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| AppError::Internal(error.into()))?;
+    }
+    if written == 0 {
+        return Err(AppError::BadRequest(anyhow::anyhow!(
+            "ISO upload must not be empty"
+        )));
+    }
+    file.flush()
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    file.sync_all()
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    file.seek(std::io::SeekFrom::Start(32_769))
+        .await
+        .map_err(|error| AppError::BadRequest(error.into()))?;
+    let mut signature = [0_u8; 5];
+    file.read_exact(&mut signature)
+        .await
+        .map_err(|_| AppError::BadRequest(anyhow::anyhow!("file is not a valid ISO9660 image")))?;
+    if &signature != b"CD001" {
+        return Err(AppError::BadRequest(anyhow::anyhow!(
+            "file is not a valid ISO9660 image"
+        )));
+    }
+    drop(file);
+
+    let publish_jobs = jobs.clone();
+    let publish_id = id.clone();
+    let outcome = run_job_store(move || publish_jobs.publish_iso(&publish_id, &staging)).await?;
+    let resource = match outcome {
+        IsoPublishOutcome::Created(resource) => resource,
+        IsoPublishOutcome::Exists => {
+            return Err(AppError::Conflict(format!("ISO {id:?} already exists")));
+        }
+    };
+    drop(partial);
+    Ok((StatusCode::CREATED, Json(resource)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/media/{id}",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ISO ID")),
+    responses(
+        (status = NO_CONTENT),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn delete_iso(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
+    let jobs = job_service(&state)?;
+    let connect_uri = state.connect_uri;
+    let delete_jobs = jobs.clone();
+    let outcome = run_job_store(move || {
+        delete_jobs.delete_iso(&id, |path| vm::domains_using_media(&connect_uri, path))
+    })
+    .await?;
+    match outcome {
+        IsoDeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        IsoDeleteOutcome::NotFound => Err(AppError::NotFound),
+        IsoDeleteOutcome::InUse(detail) => Err(AppError::Conflict(detail)),
+    }
+}
+
 fn job_service(state: &AppState) -> AppResult<JobService> {
     state
         .jobs
@@ -1199,6 +1394,8 @@ mod tests {
             api_token: Arc::from("test-token"),
             vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
             jobs: None,
+            max_iso_upload_bytes: 1024,
+            iso_uploads: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -1475,6 +1672,86 @@ mod tests {
         );
 
         drop(app);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn iso_upload_is_atomic_limited_and_deletable() {
+        let directory = std::env::temp_dir().join(format!("qtr-web-iso-test-{}", Uuid::new_v4()));
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("isos"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        let router = app_with_iso_limit(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+            40_000,
+        );
+        let mut iso = vec![0_u8; 32_774];
+        iso[32_769..32_774].copy_from_slice(b"CD001");
+
+        let upload = || {
+            Request::put("/api/v1/media/test.iso")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(iso.clone()))
+                .unwrap()
+        };
+        let response = router.clone().oneshot(upload()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert!(directory.join("isos/test.iso").is_file());
+
+        let response = router.clone().oneshot(upload()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/media/not-an-iso.iso")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(Body::from(vec![0_u8; 32_774]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!directory.join("isos/not-an-iso.iso").exists());
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/media/large.iso")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(header::CONTENT_LENGTH, "40001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete("/api/v1/media/test.iso")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!directory.join("isos/test.iso").exists());
+
+        drop(router);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

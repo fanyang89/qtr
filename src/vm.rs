@@ -4663,6 +4663,58 @@ pub fn vnc_endpoint_by_name(connect_uri: &str, name: &str) -> Result<VncEndpoint
         .with_context(|| format!("domain {name} does not expose an active VNC endpoint"))
 }
 
+pub fn domains_using_media(connect_uri: &str, media: &Path) -> Result<Vec<String>> {
+    let connection = connect_read_only(connect_uri)?;
+    let canonical_media = media
+        .canonicalize()
+        .with_context(|| format!("failed to resolve ISO {}", media.display()))?;
+    let mut users = BTreeSet::new();
+    for domain in connection
+        .list_all_domains(0)
+        .context("failed to list domains while checking ISO references")?
+    {
+        let name = domain.get_name().context("failed to read domain name")?;
+        let active = domain
+            .is_active()
+            .with_context(|| format!("failed to query domain {name} state"))?;
+        let mut flags = vec![sys::VIR_DOMAIN_XML_INACTIVE];
+        if active {
+            flags.push(0);
+        }
+        for flag in flags {
+            let xml = domain
+                .get_xml_desc(flag)
+                .with_context(|| format!("failed to read domain {name} XML"))?;
+            let referenced = domain_xml_uses_media(&xml, &canonical_media)
+                .with_context(|| format!("failed to parse domain {name} XML"))?;
+            if referenced {
+                users.insert(name.clone());
+                break;
+            }
+        }
+    }
+    Ok(users.into_iter().collect())
+}
+
+fn domain_xml_uses_media(xml: &str, canonical_media: &Path) -> Result<bool> {
+    let document = Document::parse(xml)?;
+    Ok(document.descendants().any(|node| {
+        node.has_tag_name("disk")
+            && node.attribute("device") == Some("cdrom")
+            && node.children().any(|child| {
+                child.has_tag_name("source")
+                    && ["file", "dev"]
+                        .into_iter()
+                        .filter_map(|attribute| child.attribute(attribute))
+                        .any(|source| {
+                            Path::new(source)
+                                .canonicalize()
+                                .is_ok_and(|path| path == canonical_media)
+                        })
+            })
+    }))
+}
+
 pub fn vnc_endpoint_by_name_api(connect_uri: &str, name: &str) -> VmApiResult<VncEndpoint> {
     let conn = connect_read_only(connect_uri).map_err(VmApiError::Internal)?;
     let domain = lookup_domain_api(&conn, name)?;
@@ -7092,5 +7144,19 @@ disks:
         manifest.cdrom = Some(PathBuf::from("/nonexistent/qtr-missing.iso"));
         let err = validate_manifest(&manifest).unwrap_err();
         assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn media_reference_scan_checks_every_cdrom_tray() {
+        let dir = TestDiskDir::new();
+        let iso = dir.create_disk("installer.iso");
+        let xml = format!(
+            "<domain><devices>
+               <disk device='cdrom'><target dev='sda'/></disk>
+               <disk device='cdrom'><source file='{}'/><target dev='sdb'/></disk>
+             </devices></domain>",
+            iso.display()
+        );
+        assert!(domain_xml_uses_media(&xml, &iso.canonicalize().unwrap()).unwrap());
     }
 }
