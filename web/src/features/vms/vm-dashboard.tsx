@@ -24,7 +24,6 @@ import {
   type VmSummary,
   type VmUpdateInput,
 } from '@/lib/api'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -44,6 +43,8 @@ import {
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
+import { PageHeading } from '@/components/page-heading'
+import { StatusDot } from '@/components/status-dot'
 import { ThemeSwitch } from '@/components/theme-switch'
 import {
   vmMetricsByName,
@@ -164,33 +165,28 @@ export function VmDashboard() {
         </div>
       </Header>
       <Main>
-        <div className='mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between'>
-          <div>
-            <h1 className='text-2xl font-bold tracking-tight'>
-              Virtual Machines
-            </h1>
-            <p className='text-muted-foreground'>Manage qtr libvirt domains.</p>
-          </div>
-          <Button onClick={openCreate}>
-            <Plus className='size-4' />
-            Create VM
-          </Button>
-        </div>
+        <PageHeading
+          eyebrow='Libvirt inventory'
+          title='Virtual machines'
+          description='Compute, storage, and console access for domains on this host.'
+          actions={
+            <Button onClick={openCreate}>
+              <Plus className='size-4' />
+              Define VM
+            </Button>
+          }
+        />
 
-        <div className='rounded-lg border bg-card'>
+        <div className='overflow-x-auto border border-border bg-card'>
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
                 <TableHead>State</TableHead>
-                <TableHead>vCPUs</TableHead>
-                <TableHead>Memory</TableHead>
-                <TableHead>CPU</TableHead>
-                <TableHead>Mem %</TableHead>
-                <TableHead>TX</TableHead>
-                <TableHead>RX</TableHead>
+                <TableHead>Resources</TableHead>
+                <TableHead>Utilization</TableHead>
                 <TableHead>Network</TableHead>
-                <TableHead>VNC</TableHead>
+                <TableHead>Console</TableHead>
                 <TableHead className='w-12' />
               </TableRow>
             </TableHeader>
@@ -198,7 +194,7 @@ export function VmDashboard() {
               {isLoading ? (
                 <TableRow>
                   <TableCell
-                    colSpan={11}
+                    colSpan={7}
                     className='h-24 text-center text-muted-foreground'
                   >
                     Loading VMs...
@@ -207,7 +203,7 @@ export function VmDashboard() {
               ) : filteredVms.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={11}
+                    colSpan={7}
                     className='h-24 text-center text-muted-foreground'
                   >
                     No virtual machines found.
@@ -224,6 +220,10 @@ export function VmDashboard() {
                     }
                     onEdit={openEdit}
                     onDelete={setDeleteTarget}
+                    actionPending={
+                      actionMutation.isPending &&
+                      actionMutation.variables?.name === vm.name
+                    }
                   />
                 ))
               )}
@@ -267,12 +267,14 @@ function VmRow({
   onAction,
   onEdit,
   onDelete,
+  actionPending,
 }: {
   vm: VmSummary
   previousMetrics?: VmMetricSnapshot
   onAction: (name: string, action: string) => void
   onEdit: (vm: VmSummary) => void
   onDelete: (vm: VmSummary) => void
+  actionPending: boolean
 }) {
   const metrics = vmRuntimeMetrics(vm, previousMetrics)
   const consoleReady = vm.vnc && vm.state === 'running'
@@ -290,18 +292,19 @@ function VmRow({
         </Link>
       </TableCell>
       <TableCell>
-        <Badge variant={vm.state === 'running' ? 'default' : 'secondary'}>
-          {vm.state}
-        </Badge>
+        <StatusDot status={vm.state} />
       </TableCell>
-      <TableCell>{vm.vcpus ?? '-'}</TableCell>
       <TableCell>
-        {vm.memoryMib ? `${Math.round(vm.memoryMib / 1024)} GiB` : '-'}
+        <span className='font-mono text-xs tabular-nums'>
+          {vm.vcpus ?? '—'} CPU ·{' '}
+          {vm.memoryMib ? `${Math.round(vm.memoryMib / 1024)} GiB` : '—'}
+        </span>
       </TableCell>
-      <TableCell>{metrics.cpu}</TableCell>
-      <TableCell>{metrics.memory}</TableCell>
-      <TableCell>{metrics.tx}</TableCell>
-      <TableCell>{metrics.rx}</TableCell>
+      <TableCell>
+        <span className='font-mono text-xs tabular-nums'>
+          {metrics.cpu} · {metrics.memory}
+        </span>
+      </TableCell>
       <TableCell>{vm.network ?? '-'}</TableCell>
       <TableCell>
         {consoleReady ? (
@@ -326,7 +329,12 @@ function VmRow({
       <TableCell>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant='ghost' size='icon'>
+            <Button
+              variant='ghost'
+              size='icon'
+              aria-label={`Actions for ${vm.name}`}
+              disabled={actionPending}
+            >
               <MoreHorizontal className='size-4' />
             </Button>
           </DropdownMenuTrigger>
@@ -337,16 +345,23 @@ function VmRow({
                 Console
               </Link>
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onAction(vm.name, 'start')}>
+            <DropdownMenuItem
+              disabled={vm.state === 'running'}
+              onClick={() => onAction(vm.name, 'start')}
+            >
               <Play className='size-4' />
               Start
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onAction(vm.name, 'shutdown')}>
+            <DropdownMenuItem
+              disabled={vm.state !== 'running'}
+              onClick={() => onAction(vm.name, 'shutdown')}
+            >
               <Power className='size-4' />
               Shutdown
             </DropdownMenuItem>
             <DropdownMenuItem
               variant='destructive'
+              disabled={vm.state !== 'running'}
               onClick={() => onAction(vm.name, 'destroy')}
             >
               <Square className='size-4' />

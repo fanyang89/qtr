@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import RFB from '@novnc/novnc'
 import { createVncTicket } from '@/lib/api'
 import { buildVncWebSocketUrl } from '@/lib/vnc'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
+import { StatusDot } from '@/components/status-dot'
 
 type ConnectionState =
   | 'idle'
@@ -116,14 +116,16 @@ export function NoVncConsole({ name }: { name: string }) {
   }, [name])
 
   return (
-    <div className='flex h-full min-h-[calc(100svh-4rem)] flex-col bg-muted/30'>
+    <div className='flex h-full min-h-[calc(100svh-3.5rem)] flex-col bg-[#11120f]'>
       <div className='flex flex-wrap items-center gap-3 border-b bg-background px-4 py-3'>
-        <Badge
-          variant={connectionState === 'connected' ? 'default' : 'secondary'}
-        >
-          {connectionState}
-        </Badge>
-        {desktopName && <Badge variant='outline'>{desktopName}</Badge>}
+        <StatusDot
+          status={connectionState === 'connected' ? 'running' : connectionState}
+        />
+        {desktopName && (
+          <span className='font-mono text-xs text-muted-foreground'>
+            {desktopName}
+          </span>
+        )}
         <Separator orientation='vertical' className='h-6' />
         <Button
           size='sm'
@@ -166,9 +168,8 @@ export function NoVncConsole({ name }: { name: string }) {
           onCheckedChange={setResizeSession}
         />
       </div>
-      <div className='border-b bg-background px-4 py-2 text-xs text-muted-foreground'>
-        <span className='font-medium'>WebSocket:</span> /api/v1/vms/
-        {encodeURIComponent(name)}/vnc
+      <div className='border-b bg-background px-4 py-2 font-mono text-[0.6875rem] text-muted-foreground'>
+        Console session · {name}
         {errorMessage && (
           <span className='ms-3 text-destructive'>{errorMessage}</span>
         )}
