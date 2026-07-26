@@ -126,8 +126,16 @@ export const managedResourceSchema = z.object({
   modifiedAtMs: z.number().nullish(),
 })
 
+export const networkSummarySchema = z.object({
+  id: z.string(),
+  active: z.boolean(),
+  autostart: z.boolean(),
+  bridge: z.string().nullish(),
+})
+
 const installJobArraySchema = z.array(installJobSchema)
 const managedResourceArraySchema = z.array(managedResourceSchema)
+const networkSummaryArraySchema = z.array(networkSummarySchema)
 
 export type VmState = z.infer<typeof vmStateSchema>
 export type VmMetrics = z.infer<typeof vmMetricsSchema>
@@ -139,23 +147,26 @@ export type JobStatus = z.infer<typeof jobStatusSchema>
 export type FedoraInstallRequest = z.infer<typeof fedoraInstallRequestSchema>
 export type InstallJob = z.infer<typeof installJobSchema>
 export type ManagedResource = z.infer<typeof managedResourceSchema>
+export type NetworkSummary = z.infer<typeof networkSummarySchema>
 
 export type VmCreateInput = {
   name: string
-  disks: VmDisk[]
-  ioThreads?: z.infer<typeof vmIoThreadsSchema>
-  cdrom?: string
-  boot?: string[]
-  memoryGiB: number
-  vcpus: number
-  network: string
-  graphics: 'vnc' | 'none'
-  vncListen: string
-  vncPort?: number
-  serialLog?: string
+  resources: {
+    vcpus: number
+    memoryMib: number
+  }
+  disks: Array<{
+    imageId: string
+    format: 'raw' | 'qcow2'
+    bus: 'virtio-blk' | 'virtio-scsi'
+  }>
+  networkId: string
+  mediaId: string | null
+  console: {
+    graphics: 'vnc' | 'none'
+    serialLog: boolean
+  }
 }
-
-export type VmUpdateInput = VmCreateInput
 
 export const API_TOKEN_STORAGE_KEY = 'qtr.apiToken'
 
@@ -234,16 +245,6 @@ export async function createVm(input: VmCreateInput): Promise<VmSummary> {
   return parseResponse(apiClient.post('/vms', input), vmSummarySchema)
 }
 
-export async function updateVm(
-  name: string,
-  input: VmUpdateInput
-): Promise<VmSummary> {
-  return parseResponse(
-    apiClient.put(`/vms/${encodeURIComponent(name)}`, input),
-    vmSummarySchema
-  )
-}
-
 export async function deleteVm(name: string): Promise<void> {
   await apiClient.delete(`/vms/${encodeURIComponent(name)}`)
 }
@@ -288,4 +289,8 @@ export async function getImages(): Promise<ManagedResource[]> {
 
 export async function getMedia(): Promise<ManagedResource[]> {
   return parseResponse(apiClient.get('/media'), managedResourceArraySchema)
+}
+
+export async function getNetworks(): Promise<NetworkSummary[]> {
+  return parseResponse(apiClient.get('/networks'), networkSummaryArraySchema)
 }

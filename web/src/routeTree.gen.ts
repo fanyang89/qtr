@@ -24,6 +24,7 @@ import { Route as AuthenticatedResourcesImagesRouteImport } from './routes/_auth
 import { Route as AuthenticatedResourcesMediaRouteImport } from './routes/_authenticated/resources/media'
 import { Route as AuthenticatedVmsIndexRouteImport } from './routes/_authenticated/vms/index'
 import { Route as AuthenticatedVmsNameRouteRouteImport } from './routes/_authenticated/vms/$name/route'
+import { Route as AuthenticatedVmsNewRouteImport } from './routes/_authenticated/vms/new'
 import { Route as AuthenticatedVmsNameIndexRouteImport } from './routes/_authenticated/vms/$name/index'
 import { Route as AuthenticatedVmsNameConsoleRouteImport } from './routes/_authenticated/vms/$name/console'
 
@@ -106,6 +107,11 @@ const AuthenticatedVmsNameRouteRoute =
     path: '/vms/$name',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedVmsNewRoute = AuthenticatedVmsNewRouteImport.update({
+  id: '/vms/new',
+  path: '/vms/new',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 const AuthenticatedVmsNameIndexRoute =
   AuthenticatedVmsNameIndexRouteImport.update({
     id: '/',
@@ -132,6 +138,7 @@ export interface FileRoutesByFullPath {
   '/installations/$id': typeof AuthenticatedInstallationsIdRoute
   '/resources/images': typeof AuthenticatedResourcesImagesRoute
   '/resources/media': typeof AuthenticatedResourcesMediaRoute
+  '/vms/new': typeof AuthenticatedVmsNewRoute
   '/installations/': typeof AuthenticatedInstallationsIndexRoute
   '/vms/': typeof AuthenticatedVmsIndexRoute
   '/vms/$name/console': typeof AuthenticatedVmsNameConsoleRoute
@@ -149,6 +156,7 @@ export interface FileRoutesByTo {
   '/installations/$id': typeof AuthenticatedInstallationsIdRoute
   '/resources/images': typeof AuthenticatedResourcesImagesRoute
   '/resources/media': typeof AuthenticatedResourcesMediaRoute
+  '/vms/new': typeof AuthenticatedVmsNewRoute
   '/installations': typeof AuthenticatedInstallationsIndexRoute
   '/vms': typeof AuthenticatedVmsIndexRoute
   '/vms/$name/console': typeof AuthenticatedVmsNameConsoleRoute
@@ -169,6 +177,7 @@ export interface FileRoutesById {
   '/_authenticated/installations/$id': typeof AuthenticatedInstallationsIdRoute
   '/_authenticated/resources/images': typeof AuthenticatedResourcesImagesRoute
   '/_authenticated/resources/media': typeof AuthenticatedResourcesMediaRoute
+  '/_authenticated/vms/new': typeof AuthenticatedVmsNewRoute
   '/_authenticated/installations/': typeof AuthenticatedInstallationsIndexRoute
   '/_authenticated/vms/': typeof AuthenticatedVmsIndexRoute
   '/_authenticated/vms/$name/console': typeof AuthenticatedVmsNameConsoleRoute
@@ -189,6 +198,7 @@ export interface FileRouteTypes {
     | '/installations/$id'
     | '/resources/images'
     | '/resources/media'
+    | '/vms/new'
     | '/installations/'
     | '/vms/'
     | '/vms/$name/console'
@@ -206,6 +216,7 @@ export interface FileRouteTypes {
     | '/installations/$id'
     | '/resources/images'
     | '/resources/media'
+    | '/vms/new'
     | '/installations'
     | '/vms'
     | '/vms/$name/console'
@@ -225,6 +236,7 @@ export interface FileRouteTypes {
     | '/_authenticated/installations/$id'
     | '/_authenticated/resources/images'
     | '/_authenticated/resources/media'
+    | '/_authenticated/vms/new'
     | '/_authenticated/installations/'
     | '/_authenticated/vms/'
     | '/_authenticated/vms/$name/console'
@@ -348,6 +360,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedVmsNameRouteRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/vms/new': {
+      id: '/_authenticated/vms/new'
+      path: '/vms/new'
+      fullPath: '/vms/new'
+      preLoaderRoute: typeof AuthenticatedVmsNewRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/vms/$name/': {
       id: '/_authenticated/vms/$name/'
       path: '/'
@@ -388,6 +407,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedInstallationsIdRoute: typeof AuthenticatedInstallationsIdRoute
   AuthenticatedResourcesImagesRoute: typeof AuthenticatedResourcesImagesRoute
   AuthenticatedResourcesMediaRoute: typeof AuthenticatedResourcesMediaRoute
+  AuthenticatedVmsNewRoute: typeof AuthenticatedVmsNewRoute
   AuthenticatedInstallationsIndexRoute: typeof AuthenticatedInstallationsIndexRoute
   AuthenticatedVmsIndexRoute: typeof AuthenticatedVmsIndexRoute
 }
@@ -399,6 +419,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedInstallationsIdRoute: AuthenticatedInstallationsIdRoute,
   AuthenticatedResourcesImagesRoute: AuthenticatedResourcesImagesRoute,
   AuthenticatedResourcesMediaRoute: AuthenticatedResourcesMediaRoute,
+  AuthenticatedVmsNewRoute: AuthenticatedVmsNewRoute,
   AuthenticatedInstallationsIndexRoute: AuthenticatedInstallationsIndexRoute,
   AuthenticatedVmsIndexRoute: AuthenticatedVmsIndexRoute,
 }

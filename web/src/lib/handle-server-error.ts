@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 
 const serverErrorSchema = z.object({
   title: z.string().min(1).optional(),
+  detail: z.string().min(1).optional(),
   error: z.string().min(1).optional(),
   message: z.string().min(1).optional(),
 })
@@ -32,7 +33,10 @@ export function handleServerError(error: unknown) {
     } else {
       const parsed = serverErrorSchema.safeParse(data)
       const message = parsed.success
-        ? (parsed.data.title ?? parsed.data.error ?? parsed.data.message)
+        ? (parsed.data.detail ??
+          parsed.data.title ??
+          parsed.data.error ??
+          parsed.data.message)
         : undefined
       if (message) {
         errMsg = message

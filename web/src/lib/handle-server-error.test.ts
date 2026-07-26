@@ -51,6 +51,23 @@ describe('handleServerError', () => {
     expect(toastError).toHaveBeenCalledWith('VM is already running')
   })
 
+  it('prefers actionable Problem Details detail over its generic title', () => {
+    const error = new AxiosError('Bad request')
+    error.response = {
+      status: 400,
+      data: {
+        title: 'Bad Request',
+        detail: 'image "missing.qcow2" does not exist',
+      },
+    } as AxiosError['response']
+
+    handleServerError(error)
+
+    expect(toastError).toHaveBeenCalledWith(
+      'image "missing.qcow2" does not exist'
+    )
+  })
+
   it('falls back to the generic message when Axios response has no data.title', () => {
     const error = new AxiosError('Request failed')
     error.response = {

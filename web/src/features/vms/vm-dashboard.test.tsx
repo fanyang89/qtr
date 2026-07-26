@@ -11,6 +11,12 @@ vi.mock('@/lib/api', () => ({
   updateVm: vi.fn(),
 }))
 
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({ children }: { children: React.ReactNode }) => (
+    <a href='/'>{children}</a>
+  ),
+}))
+
 vi.mock('@/components/layout/header', () => ({
   Header: ({ children }: { children: React.ReactNode }) => (
     <header>{children}</header>
@@ -23,7 +29,6 @@ vi.mock('@/components/layout/main', () => ({
 }))
 vi.mock('@/components/search', () => ({ Search: () => null }))
 vi.mock('@/components/theme-switch', () => ({ ThemeSwitch: () => null }))
-vi.mock('./vm-form-dialog', () => ({ VmFormDialog: () => null }))
 
 describe('VmDashboard', () => {
   test('does not loop while the initial VM query is pending', async () => {

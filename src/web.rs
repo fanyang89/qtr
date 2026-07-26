@@ -592,6 +592,25 @@ async fn create_vm(
     let vm = run_libvirt(move || {
         network::ensure_active(&connect_uri, &network_id)
             .map_err(vm::VmApiError::InvalidRequest)?;
+        let requested_paths = manifest
+            .disks
+            .iter()
+            .filter_map(vm::VmDiskEntry::as_present)
+            .map(|disk| disk.path.as_path())
+            .collect::<Vec<_>>();
+        for existing in vm::list_summaries(&connect_uri).map_err(vm::VmApiError::Internal)? {
+            if let Some(disk) = existing.disks.iter().flatten().find(|disk| {
+                requested_paths
+                    .iter()
+                    .any(|requested| *requested == std::path::Path::new(&disk.path))
+            }) {
+                return Err(vm::VmApiError::InvalidRequest(anyhow::anyhow!(
+                    "image {} is already attached to VM {}",
+                    disk.path,
+                    existing.name
+                )));
+            }
+        }
         vm::create_by_manifest(&connect_uri, manifest)
     })
     .await?;

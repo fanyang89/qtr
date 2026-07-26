@@ -5,6 +5,7 @@ import {
   getApiToken,
   installJobSchema,
   managedResourceSchema,
+  networkSummarySchema,
   setApiToken,
   vmSummarySchema,
   vmStateSchema,
@@ -97,5 +98,16 @@ describe('VM API contract', () => {
         modifiedAtMs: null,
       }).modifiedAtMs
     ).toBeNull()
+  })
+
+  test('parses network inventory records', () => {
+    expect(
+      networkSummarySchema.parse({
+        id: 'default',
+        active: true,
+        autostart: true,
+        bridge: 'virbr0',
+      }).bridge
+    ).toBe('virbr0')
   })
 })

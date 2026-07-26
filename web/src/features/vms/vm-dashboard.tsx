@@ -4,7 +4,6 @@ import { Link } from '@tanstack/react-router'
 import {
   MonitorPlay,
   MoreHorizontal,
-  Pencil,
   Play,
   Plus,
   Power,
@@ -14,16 +13,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import {
-  createVm,
-  deleteVm,
-  getVms,
-  postVmAction,
-  updateVm,
-  type VmCreateInput,
-  type VmSummary,
-  type VmUpdateInput,
-} from '@/lib/api'
+import { deleteVm, getVms, postVmAction, type VmSummary } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -51,7 +41,6 @@ import {
   vmRuntimeMetrics,
   type VmMetricSnapshot,
 } from './metrics'
-import { VmFormDialog } from './vm-form-dialog'
 
 const EMPTY_VMS: VmSummary[] = []
 
@@ -72,8 +61,6 @@ export function VmDashboard() {
     latestMetricsRef.current = vmMetricsByName(vms)
   }, [vms])
   const [search, setSearch] = useState('')
-  const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null)
-  const [selectedVm, setSelectedVm] = useState<VmSummary | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<VmSummary | null>(null)
 
   const filteredVms = useMemo(() => {
@@ -96,27 +83,6 @@ export function VmDashboard() {
     },
   })
 
-  const createMutation = useMutation({
-    mutationFn: createVm,
-    onSuccess: async (vm) => {
-      await queryClient.invalidateQueries({ queryKey: ['vms'] })
-      toast.success(`VM ${vm.name} created`)
-      setFormMode(null)
-    },
-  })
-
-  const updateMutation = useMutation({
-    mutationFn: ({ name, input }: { name: string; input: VmUpdateInput }) =>
-      updateVm(name, input),
-    onSuccess: async (vm) => {
-      await queryClient.invalidateQueries({ queryKey: ['vms'] })
-      await queryClient.invalidateQueries({ queryKey: ['vms', vm.name] })
-      toast.success(`VM ${vm.name} updated`)
-      setFormMode(null)
-      setSelectedVm(null)
-    },
-  })
-
   const deleteMutation = useMutation({
     mutationFn: (name: string) => deleteVm(name),
     onSuccess: async (_, name) => {
@@ -125,31 +91,6 @@ export function VmDashboard() {
       setDeleteTarget(null)
     },
   })
-
-  async function handleFormSubmit(input: VmCreateInput | VmUpdateInput) {
-    if (formMode === 'create') {
-      await createMutation.mutateAsync(input as VmCreateInput)
-      return
-    }
-    if (formMode === 'edit' && selectedVm) {
-      await updateMutation.mutateAsync({
-        name: selectedVm.name,
-        input: input as VmUpdateInput,
-      })
-      return
-    }
-    throw new Error('Invalid form mode')
-  }
-
-  function openCreate() {
-    setSelectedVm(null)
-    setFormMode('create')
-  }
-
-  function openEdit(vm: VmSummary) {
-    setSelectedVm(vm)
-    setFormMode('edit')
-  }
 
   return (
     <>
@@ -173,9 +114,11 @@ export function VmDashboard() {
           title='Virtual machines'
           description='Compute, storage, and console access for domains on this host.'
           actions={
-            <Button onClick={openCreate}>
-              <Plus className='size-4' />
-              Define VM
+            <Button asChild>
+              <Link to='/vms/new'>
+                <Plus className='size-4' />
+                New VM
+              </Link>
             </Button>
           }
         />
@@ -221,7 +164,6 @@ export function VmDashboard() {
                     onAction={(name, action) =>
                       actionMutation.mutate({ name, action })
                     }
-                    onEdit={openEdit}
                     onDelete={setDeleteTarget}
                     actionPending={
                       actionMutation.isPending &&
@@ -234,20 +176,6 @@ export function VmDashboard() {
           </Table>
         </div>
       </Main>
-
-      <VmFormDialog
-        open={formMode !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setFormMode(null)
-            setSelectedVm(null)
-          }
-        }}
-        mode={formMode ?? 'create'}
-        vm={selectedVm}
-        onSubmit={handleFormSubmit}
-        isLoading={createMutation.isPending || updateMutation.isPending}
-      />
 
       <ConfirmDialog
         open={deleteTarget !== null}
@@ -268,14 +196,12 @@ function VmRow({
   vm,
   previousMetrics,
   onAction,
-  onEdit,
   onDelete,
   actionPending,
 }: {
   vm: VmSummary
   previousMetrics?: VmMetricSnapshot
   onAction: (name: string, action: string) => void
-  onEdit: (vm: VmSummary) => void
   onDelete: (vm: VmSummary) => void
   actionPending: boolean
 }) {
@@ -369,10 +295,6 @@ function VmRow({
             >
               <Square className='size-4' />
               Destroy
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onEdit(vm)}>
-              <Pencil className='size-4' />
-              Edit
             </DropdownMenuItem>
             <DropdownMenuItem
               variant='destructive'

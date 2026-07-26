@@ -38,8 +38,12 @@ import { ThemeSwitch } from '@/components/theme-switch'
 
 const activeStatuses = new Set(['queued', 'running'])
 
-export function InstallationsPage() {
-  const [createOpen, setCreateOpen] = useState(false)
+export function InstallationsPage({
+  initialCreateOpen = false,
+}: {
+  initialCreateOpen?: boolean
+}) {
+  const [createOpen, setCreateOpen] = useState(initialCreateOpen)
   const jobs = useQuery({
     queryKey: ['install-jobs'],
     queryFn: getInstallJobs,
