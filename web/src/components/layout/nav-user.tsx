@@ -1,33 +1,34 @@
-import { Server } from 'lucide-react'
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
+import { useQuery } from '@tanstack/react-query'
+import { getHealth } from '@/lib/api'
 import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
 } from '@/components/ui/sidebar'
 
-type NavUserProps = {
-  user: {
-    name: string
-    email: string
-    avatar: string
-  }
-}
-
-export function NavUser({ user }: NavUserProps) {
+export function NavUser() {
+  const health = useQuery({
+    queryKey: ['health'],
+    queryFn: getHealth,
+    refetchInterval: 30_000,
+  })
+  const online = health.data?.ok === true
   return (
     <SidebarMenu>
       <SidebarMenuItem>
-        <SidebarMenuButton size='lg' tooltip={user.name}>
-          <Avatar className='h-8 w-8 rounded-lg'>
-            <AvatarImage src={user.avatar} alt={user.name} />
-            <AvatarFallback className='rounded-lg'>
-              <Server className='size-4' />
-            </AvatarFallback>
-          </Avatar>
-          <div className='grid flex-1 text-start text-sm leading-tight'>
-            <span className='truncate font-semibold'>{user.name}</span>
-            <span className='truncate text-xs'>{user.email}</span>
+        <SidebarMenuButton size='lg' tooltip='Host status'>
+          <span
+            className={`ms-1 size-2 rounded-full ${online ? 'bg-status-success' : 'bg-status-warning'}`}
+          />
+          <div className='grid flex-1 text-start leading-tight'>
+            <span className='truncate text-xs font-medium'>Local host</span>
+            <span className='truncate font-mono text-[0.625rem] text-muted-foreground uppercase'>
+              {health.isPending
+                ? 'checking'
+                : online
+                  ? 'available'
+                  : 'degraded'}
+            </span>
           </div>
         </SidebarMenuButton>
       </SidebarMenuItem>

@@ -21,12 +21,16 @@ export function AppTitle() {
         >
           <div>
             <Link
-              to='/'
+              to='/vms'
               onClick={() => setOpenMobile(false)}
-              className='grid flex-1 text-start text-sm leading-tight'
+              className='grid flex-1 text-start leading-tight'
             >
-              <span className='truncate font-bold'>qtr</span>
-              <span className='truncate text-xs'>QEMU VM manager</span>
+              <span className='truncate font-mono text-xs font-semibold tracking-[0.18em] uppercase'>
+                qtr
+              </span>
+              <span className='truncate text-[0.6875rem] text-muted-foreground'>
+                host control
+              </span>
             </Link>
             <ToggleSidebar />
           </div>

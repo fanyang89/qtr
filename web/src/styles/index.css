@@ -14,7 +14,11 @@
     @apply overflow-x-hidden;
   }
   body {
-    @apply min-h-svh w-full bg-background text-foreground has-[div[data-variant='inset']]:bg-sidebar;
+    @apply min-h-svh w-full bg-background font-sans text-foreground antialiased;
+    letter-spacing: -0.01em;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--ring) 28%, transparent);
   }
 
   /* Override Radix scroll locking for sticky headers */

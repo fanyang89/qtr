@@ -1,4 +1,3 @@
-import { useLayout } from '@/context/layout-provider'
 import {
   Sidebar,
   SidebarContent,
@@ -12,9 +11,12 @@ import { NavGroup } from './nav-group'
 import { NavUser } from './nav-user'
 
 export function AppSidebar() {
-  const { collapsible, variant } = useLayout()
   return (
-    <Sidebar collapsible={collapsible} variant={variant}>
+    <Sidebar
+      collapsible='icon'
+      variant='sidebar'
+      className='border-r border-sidebar-border'
+    >
       <SidebarHeader>
         <AppTitle />
       </SidebarHeader>
@@ -24,7 +26,7 @@ export function AppSidebar() {
         ))}
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={sidebarData.user} />
+        <NavUser />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

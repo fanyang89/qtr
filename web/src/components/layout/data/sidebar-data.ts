@@ -1,34 +1,20 @@
-import {
-  Activity,
-  Boxes,
-  HardDrive,
-  Settings,
-  Server,
-  TerminalSquare,
-} from 'lucide-react'
+import { Disc3, HardDrive, ListTodo, Server, Settings } from 'lucide-react'
 import { type SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
-  user: {
-    name: 'qtr host',
-    email: 'qemu:///system',
-    avatar: '',
-  },
-  teams: [
-    {
-      name: 'qtr',
-      logo: TerminalSquare,
-      plan: 'QEMU VM manager',
-    },
-  ],
   navGroups: [
     {
-      title: 'Control Plane',
+      title: 'Workspace',
       items: [
         {
           title: 'Virtual Machines',
-          url: '/',
+          url: '/vms',
           icon: Server,
+        },
+        {
+          title: 'Installations',
+          url: '/installations',
+          icon: ListTodo,
         },
       ],
     },
@@ -37,9 +23,13 @@ export const sidebarData: SidebarData = {
       items: [
         {
           title: 'Images',
-          url: '/settings',
+          url: '/resources/images',
           icon: HardDrive,
-          badge: 'soon',
+        },
+        {
+          title: 'Media',
+          url: '/resources/media',
+          icon: Disc3,
         },
       ],
     },
@@ -50,17 +40,6 @@ export const sidebarData: SidebarData = {
           title: 'Settings',
           url: '/settings',
           icon: Settings,
-        },
-        {
-          title: 'Host Status',
-          url: '/settings',
-          icon: Activity,
-        },
-        {
-          title: 'Networks',
-          url: '/settings',
-          icon: Boxes,
-          badge: 'soon',
         },
       ],
     },

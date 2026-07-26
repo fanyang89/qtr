@@ -10,7 +10,6 @@ import {
 } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { ConfigDrawer } from '@/components/config-drawer'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { Search } from '@/components/search'
@@ -27,10 +26,9 @@ export function SettingsPage() {
   return (
     <>
       <Header fixed>
-        <Search placeholder='Search settings' />
+        <Search placeholder='Go to...' />
         <div className='ms-auto flex items-center gap-2'>
           <ThemeSwitch />
-          <ConfigDrawer />
         </div>
       </Header>
       <Main>

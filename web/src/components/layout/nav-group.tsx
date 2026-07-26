@@ -37,8 +37,10 @@ export function NavGroup({ title, items }: NavGroupProps) {
   const { state, isMobile } = useSidebar()
   const href = useLocation({ select: (location) => location.href })
   return (
-    <SidebarGroup>
-      <SidebarGroupLabel>{title}</SidebarGroupLabel>
+    <SidebarGroup className='px-2 py-3'>
+      <SidebarGroupLabel className='px-2 font-mono text-[0.625rem] tracking-[0.16em] uppercase'>
+        {title}
+      </SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => {
           const key = `${item.title}-${item.url}`
@@ -70,6 +72,7 @@ function SidebarMenuLink({ item, href }: { item: NavLink; href: string }) {
         asChild
         isActive={checkIsActive(href, item)}
         tooltip={item.title}
+        className='rounded-md text-[0.8125rem] data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium'
       >
         <Link to={item.url} onClick={() => setOpenMobile(false)}>
           {item.icon && <item.icon />}

@@ -13,7 +13,6 @@ import { getVm } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ConfigDrawer } from '@/components/config-drawer'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { Search } from '@/components/search'
@@ -43,10 +42,9 @@ export function VmDetail({ name }: { name: string }) {
   return (
     <>
       <Header fixed>
-        <Search placeholder='Search VMs' />
+        <Search placeholder='Go to...' />
         <div className='ms-auto flex items-center gap-2'>
           <ThemeSwitch />
-          <ConfigDrawer />
         </div>
       </Header>
       <Main>
