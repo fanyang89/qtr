@@ -1,9 +1,57 @@
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use virt::{connect::Connect, error::clear_error_callback, network::Network};
 
 use crate::config::{NetArgs, NetCommand, NetCreateArgs, NetNameArgs};
+
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSummary {
+    pub id: String,
+    pub active: bool,
+    pub autostart: bool,
+    pub bridge: Option<String>,
+}
+
+pub fn list_summaries(connect_uri: &str) -> Result<Vec<NetworkSummary>> {
+    let connection = Connect::open_read_only(Some(connect_uri))
+        .with_context(|| format!("failed to connect to libvirt at {connect_uri}"))?;
+    let mut summaries = connection
+        .list_all_networks(0)
+        .context("failed to list libvirt networks")?
+        .into_iter()
+        .map(|network| {
+            Ok(NetworkSummary {
+                id: network.get_name().context("failed to read network name")?,
+                active: network
+                    .is_active()
+                    .context("failed to query network state")?,
+                autostart: network
+                    .get_autostart()
+                    .context("failed to query network autostart")?,
+                bridge: network.get_bridge_name().ok(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    summaries.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(summaries)
+}
+
+pub fn ensure_active(connect_uri: &str, id: &str) -> Result<()> {
+    let connection = Connect::open_read_only(Some(connect_uri))
+        .with_context(|| format!("failed to connect to libvirt at {connect_uri}"))?;
+    let network = Network::lookup_by_name(&connection, id)
+        .with_context(|| format!("network {id:?} does not exist"))?;
+    if !network
+        .is_active()
+        .with_context(|| format!("failed to query network {id:?} state"))?
+    {
+        bail!("network {id:?} is not active");
+    }
+    Ok(())
+}
 
 pub fn run(args: NetArgs) -> Result<()> {
     clear_error_callback();
@@ -215,6 +263,12 @@ mod tests {
         }
         let err = validate_ipv4("dhcp-start", "abc").unwrap_err();
         assert!(err.to_string().contains("dhcp-start"));
+    }
+
+    #[test]
+    fn lists_test_driver_networks() {
+        let networks = list_summaries("test:///default").unwrap();
+        assert!(networks.iter().any(|network| network.id == "default"));
     }
 
     #[test]

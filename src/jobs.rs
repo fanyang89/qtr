@@ -374,6 +374,19 @@ impl JobService {
     pub fn list_media(&self) -> Result<Vec<ManagedResource>> {
         list_resources(&self.roots.media)
     }
+
+    pub fn resolve_image(&self, id: &str) -> Result<PathBuf> {
+        resolve_resource(&self.roots.images, id, "image")
+    }
+
+    pub fn resolve_media(&self, id: &str) -> Result<PathBuf> {
+        resolve_resource(&self.roots.media, id, "media")
+    }
+
+    pub fn serial_log_path(&self, vm_name: &str) -> Result<PathBuf> {
+        validate_id(vm_name, "VM name")?;
+        Ok(self.roots.logs.join(format!("{vm_name}.serial.log")))
+    }
 }
 
 fn run_job(
@@ -501,6 +514,18 @@ fn list_resources(root: &Path) -> Result<Vec<ManagedResource>> {
     }
     resources.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(resources)
+}
+
+fn resolve_resource(root: &Path, id: &str, kind: &str) -> Result<PathBuf> {
+    validate_id(id, &format!("{kind} ID"))?;
+    let path = root.join(id);
+    let metadata = path
+        .metadata()
+        .with_context(|| format!("{kind} {id:?} does not exist"))?;
+    if !metadata.is_file() {
+        bail!("{kind} {id:?} is not a regular file");
+    }
+    Ok(path)
 }
 
 fn validate_id(value: &str, label: &str) -> Result<()> {

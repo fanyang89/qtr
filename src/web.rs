@@ -40,7 +40,7 @@ use crate::config::GraphicsMode;
 use crate::{
     config::WebArgs,
     jobs::{FedoraInstallRequest, InstallJob, JobRoots, JobService, ManagedResource},
-    vm,
+    network, vm,
 };
 
 #[derive(Clone)]
@@ -68,18 +68,18 @@ struct ProblemDetails {
     problem_type: &'static str,
     title: &'static str,
     status: u16,
-    detail: &'static str,
+    detail: String,
 }
 
 impl ProblemDetails {
-    fn response(status: StatusCode, title: &'static str, detail: &'static str) -> Response {
+    fn response(status: StatusCode, title: &'static str, detail: impl Into<String>) -> Response {
         let mut response = (
             status,
             Json(Self {
                 problem_type: "about:blank",
                 title,
                 status: status.as_u16(),
-                detail,
+                detail: detail.into(),
             }),
         )
             .into_response();
@@ -159,17 +159,16 @@ impl IntoResponse for AppError {
         let status = self.status();
         tracing::error!(error = ?self.error(), %status, "request failed");
         let (title, detail) = match &self {
-            Self::Vm(vm::VmApiError::InvalidRequest(_)) | Self::BadRequest(_) => {
-                ("Bad Request", "The request is invalid.")
+            Self::Vm(vm::VmApiError::InvalidRequest(error)) => ("Bad Request", error.to_string()),
+            Self::BadRequest(error) => ("Bad Request", error.to_string()),
+            Self::Vm(vm::VmApiError::NotFound(_)) => {
+                ("Not Found", "The VM was not found.".to_string())
             }
-            Self::Vm(vm::VmApiError::NotFound(_)) => ("Not Found", "The VM was not found."),
-            Self::NotFound => ("Not Found", "The resource was not found."),
-            Self::Vm(vm::VmApiError::Conflict(_)) => {
-                ("Conflict", "The VM state conflicts with the request.")
-            }
+            Self::NotFound => ("Not Found", "The resource was not found.".to_string()),
+            Self::Vm(vm::VmApiError::Conflict(error)) => ("Conflict", error.to_string()),
             Self::Vm(vm::VmApiError::Internal(_)) | Self::Internal(_) => (
                 "Internal Server Error",
-                "The server could not complete the request.",
+                "The server could not complete the request.".to_string(),
             ),
         };
         ProblemDetails::response(status, title, detail)
@@ -180,21 +179,36 @@ impl IntoResponse for AppError {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmRequest {
     name: String,
-    io_threads: Option<vm::VmIoThreads>,
-    #[schema(value_type = Vec<Object>)]
-    disks: Vec<vm::VmDisk>,
-    #[schema(value_type = Option<String>)]
-    cdrom: Option<PathBuf>,
-    boot: Option<Vec<String>>,
-    #[serde(rename = "memoryGiB")]
-    memory_gib: u64,
+    resources: CreateVmResources,
+    disks: Vec<CreateVmDisk>,
+    network_id: String,
+    media_id: Option<String>,
+    console: CreateVmConsole,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateVmResources {
     vcpus: u32,
-    network: String,
+    #[serde(rename = "memoryMib")]
+    memory_mib: u64,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateVmDisk {
+    image_id: String,
+    format: crate::config::DiskFormat,
+    #[serde(default)]
+    bus: vm::VmDiskBus,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateVmConsole {
     graphics: GraphicsMode,
-    vnc_listen: String,
-    vnc_port: Option<u16>,
-    #[schema(value_type = Option<String>)]
-    serial_log: Option<PathBuf>,
+    #[serde(default)]
+    serial_log: bool,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -277,30 +291,75 @@ fn default_vnc_listen() -> String {
 }
 
 impl CreateVmRequest {
-    fn into_manifest(self) -> vm::VmManifest {
-        vm::VmManifest {
+    fn into_manifest(self, jobs: &JobService) -> Result<vm::VmManifest> {
+        if self.disks.is_empty() {
+            anyhow::bail!("at least one managed image is required");
+        }
+        if self.resources.memory_mib == 0 {
+            anyhow::bail!("memoryMib must be greater than zero");
+        }
+        if self.resources.vcpus == 0 {
+            anyhow::bail!("vcpus must be greater than zero");
+        }
+        let disks = self
+            .disks
+            .into_iter()
+            .map(|disk| {
+                let path = jobs.resolve_image(&disk.image_id)?;
+                Ok(vm::VmDiskEntry::present(vm::VmDisk {
+                    id: Some(disk.image_id),
+                    disk_type: vm::VmDiskType::File,
+                    path,
+                    format: disk.format,
+                    target: None,
+                    bus: disk.bus,
+                    cache: None,
+                    io: None,
+                    discard: None,
+                    detect_zeroes: None,
+                    readonly: None,
+                    serial: Default::default(),
+                    io_tune: Default::default(),
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let cdrom = self
+            .media_id
+            .as_deref()
+            .map(|id| jobs.resolve_media(id))
+            .transpose()?;
+        let serial_log = self
+            .console
+            .serial_log
+            .then(|| jobs.serial_log_path(&self.name))
+            .transpose()?;
+        let has_cdrom = cdrom.is_some();
+        Ok(vm::VmManifest {
             name: self.name,
             machine: None,
             cpu: None,
-            memory: None,
-            io_threads: self.io_threads,
-            disks: self
-                .disks
-                .into_iter()
-                .map(vm::VmDiskEntry::present)
-                .collect(),
-            cdrom: self.cdrom,
+            memory: Some(vm::VmMemory {
+                size_mib: self.resources.memory_mib,
+                max_mib: None,
+            }),
+            io_threads: None,
+            disks,
+            cdrom,
             cdroms: None,
-            boot: self.boot,
-            memory_gib: self.memory_gib,
-            vcpus: self.vcpus,
-            network: Some(self.network),
+            boot: Some(if has_cdrom {
+                vec!["cdrom".to_string(), "hd".to_string()]
+            } else {
+                vec!["hd".to_string()]
+            }),
+            memory_gib: self.resources.memory_mib.div_ceil(1024),
+            vcpus: self.resources.vcpus,
+            network: Some(self.network_id),
             interfaces: None,
-            graphics: self.graphics,
-            vnc_listen: self.vnc_listen,
-            vnc_port: self.vnc_port,
-            serial_log: self.serial_log,
-        }
+            graphics: self.console.graphics,
+            vnc_listen: "127.0.0.1".to_string(),
+            vnc_port: None,
+            serial_log,
+        })
     }
 }
 
@@ -387,6 +446,7 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(cancel_install_job))
         .routes(routes!(list_images))
         .routes(routes!(list_media))
+        .routes(routes!(list_networks))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer_token,
@@ -469,6 +529,25 @@ async fn list_vms(State(state): State<AppState>) -> AppResult<Json<Vec<vm::VmSum
 
 #[utoipa::path(
     get,
+    path = "/networks",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = OK, body = [network::NetworkSummary]),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn list_networks(
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<network::NetworkSummary>>> {
+    let connect_uri = state.connect_uri;
+    let networks = run_libvirt(move || network::list_summaries(&connect_uri)).await?;
+    Ok(Json(networks))
+}
+
+#[utoipa::path(
+    get,
     path = "/vms/{name}",
     tag = "vms",
     security(("bearerAuth" = [])),
@@ -506,9 +585,16 @@ async fn create_vm(
     request: std::result::Result<Json<CreateVmRequest>, JsonRejection>,
 ) -> AppResult<(StatusCode, Json<vm::VmSummary>)> {
     let request = api_json(request)?;
-    let manifest = request.into_manifest();
+    let jobs = job_service(&state)?;
+    let manifest = request.into_manifest(&jobs).map_err(AppError::BadRequest)?;
+    let network_id = manifest.network.clone().unwrap_or_default();
     let connect_uri = state.connect_uri;
-    let vm = run_libvirt(move || vm::create_by_manifest(&connect_uri, manifest)).await?;
+    let vm = run_libvirt(move || {
+        network::ensure_active(&connect_uri, &network_id)
+            .map_err(vm::VmApiError::InvalidRequest)?;
+        vm::create_by_manifest(&connect_uri, manifest)
+    })
+    .await?;
     Ok((StatusCode::CREATED, Json(vm)))
 }
 
@@ -1250,7 +1336,13 @@ mod tests {
         assert!(document["paths"]["/api/v1/install-jobs"].is_object());
         assert!(document["paths"]["/api/v1/images"].is_object());
         assert!(document["paths"]["/api/v1/media"].is_object());
+        assert!(document["paths"]["/api/v1/networks"].is_object());
         assert!(document["paths"]["/api/v1/session"].is_object());
+        let create_properties = &document["components"]["schemas"]["CreateVmRequest"]["properties"];
+        assert!(create_properties["resources"].is_object());
+        assert!(create_properties["networkId"].is_object());
+        assert!(create_properties["mediaId"].is_object());
+        assert!(create_properties["memoryGiB"].is_null());
         let install_properties =
             &document["components"]["schemas"]["FedoraInstallRequest"]["properties"];
         assert!(install_properties["mediaId"].is_object());
@@ -1390,6 +1482,53 @@ mod tests {
         assert!(!consume_vnc_ticket(&state, "vm-two", "ticket"));
         assert!(consume_vnc_ticket(&state, "vm-one", "ticket"));
         assert!(!consume_vnc_ticket(&state, "vm-one", "ticket"));
+    }
+
+    #[test]
+    fn create_vm_request_resolves_only_managed_resources() {
+        let directory = std::env::temp_dir().join(format!("qtr-create-vm-test-{}", Uuid::new_v4()));
+        let media = directory.join("media");
+        let images = directory.join("images");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(media.join("installer.iso"), b"iso").unwrap();
+        std::fs::write(images.join("system.qcow2"), b"disk").unwrap();
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: images.clone(),
+            media: media.clone(),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        let request: CreateVmRequest = serde_json::from_value(serde_json::json!({
+            "name": "managed-vm",
+            "resources": { "vcpus": 2, "memoryMib": 1536 },
+            "disks": [{
+                "imageId": "system.qcow2",
+                "format": "qcow2",
+                "bus": "virtio-blk"
+            }],
+            "networkId": "default",
+            "mediaId": "installer.iso",
+            "console": { "graphics": "vnc", "serialLog": true }
+        }))
+        .unwrap();
+        let manifest = request.into_manifest(&jobs).unwrap();
+        assert_eq!(manifest.memory.unwrap().size_mib, 1536);
+        assert_eq!(manifest.boot.unwrap(), ["cdrom", "hd"]);
+        assert_eq!(manifest.cdrom.unwrap(), media.join("installer.iso"));
+        assert_eq!(
+            manifest.disks[0].as_present().unwrap().path,
+            images.join("system.qcow2")
+        );
+        assert_eq!(
+            manifest.serial_log.unwrap(),
+            directory.join("logs/managed-vm.serial.log")
+        );
+
+        drop(jobs);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

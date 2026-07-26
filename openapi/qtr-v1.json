@@ -328,6 +328,54 @@
         ]
       }
     },
+    "/api/v1/networks": {
+      "get": {
+        "tags": [
+          "resources"
+        ],
+        "operationId": "list_networks",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NetworkSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/session": {
       "get": {
         "tags": [
@@ -953,82 +1001,91 @@
   },
   "components": {
     "schemas": {
+      "CreateVmConsole": {
+        "type": "object",
+        "required": [
+          "graphics"
+        ],
+        "properties": {
+          "graphics": {
+            "$ref": "#/components/schemas/GraphicsMode"
+          },
+          "serialLog": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateVmDisk": {
+        "type": "object",
+        "required": [
+          "imageId",
+          "format"
+        ],
+        "properties": {
+          "bus": {
+            "$ref": "#/components/schemas/VmDiskBus"
+          },
+          "format": {
+            "$ref": "#/components/schemas/DiskFormat"
+          },
+          "imageId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateVmRequest": {
         "type": "object",
         "required": [
           "name",
+          "resources",
           "disks",
-          "memoryGiB",
-          "vcpus",
-          "network",
-          "graphics",
-          "vncListen"
+          "networkId",
+          "console"
         ],
         "properties": {
-          "boot": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string"
-            }
-          },
-          "cdrom": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "console": {
+            "$ref": "#/components/schemas/CreateVmConsole"
           },
           "disks": {
             "type": "array",
             "items": {
-              "type": "object"
+              "$ref": "#/components/schemas/CreateVmDisk"
             }
           },
-          "graphics": {
-            "$ref": "#/components/schemas/GraphicsMode"
-          },
-          "ioThreads": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/VmIoThreads"
-              }
-            ]
-          },
-          "memoryGiB": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "name": {
-            "type": "string"
-          },
-          "network": {
-            "type": "string"
-          },
-          "serialLog": {
+          "mediaId": {
             "type": [
               "string",
               "null"
             ]
           },
-          "vcpus": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "vncListen": {
+          "name": {
             "type": "string"
           },
-          "vncPort": {
-            "type": [
-              "integer",
-              "null"
-            ],
+          "networkId": {
+            "type": "string"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/CreateVmResources"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateVmResources": {
+        "type": "object",
+        "required": [
+          "vcpus",
+          "memoryMib"
+        ],
+        "properties": {
+          "memoryMib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "vcpus": {
+            "type": "integer",
             "format": "int32",
             "minimum": 0
           }
@@ -1221,6 +1278,31 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "NetworkSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "active",
+          "autostart"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "autostart": {
+            "type": "boolean"
+          },
+          "bridge": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
           }
         }
       },
