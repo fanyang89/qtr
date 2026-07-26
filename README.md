@@ -221,12 +221,15 @@ cargo run -- vm save install-os
 cargo run -- vm saved-state install-os
 cargo run -- vm restore install-os
 cargo run -- vm saved-state install-os --remove
+cargo run -- vm disk-resize install-os root 64GiB
 cargo run -- vm rm install-os
 cargo run -- vm apply -f vm.yaml --dry-run
 cargo run -- vm apply -f vm.yaml --dry-run --color always
 ```
 
 `reboot` requests an orderly guest reboot through libvirt. `reset` is an immediate virtual hardware reset and can cause data loss. `suspend` and `resume` are idempotent for already paused/running VMs. `autostart` without a flag prints the current state. `save` stores the running state as a libvirt managed save image and stops the VM. `restore` starts an inactive VM from that image. `saved-state` prints `present` or `absent`; pass `--remove` to discard the image without starting the VM.
+
+`disk-resize` accepts a stable disk ID or target such as `vda` and an absolute capacity in bytes or binary units. It only permits expansion. Running VMs use libvirt block resize; inactive file-backed disks use `qemu-img`. Inactive block-backed disks must be expanded through their storage backend first. The command changes virtual disk capacity only; grow guest partitions and filesystems separately.
 
 Dump an existing VM definition:
 

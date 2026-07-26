@@ -25,9 +25,11 @@ use virt::{
 use crate::{
     config::{
         ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmAutostartArgs,
-        VmCapabilitiesArgs, VmCommand, VmCpArgs, VmDumpArgs, VmExecArgs, VmInitArgs, VmListArgs,
-        VmNameArgs, VmRemoveArgs, VmSavedStateArgs, VmStartArgs, VmStopArgs,
+        VmCapabilitiesArgs, VmCommand, VmCpArgs, VmDiskResizeArgs, VmDumpArgs, VmExecArgs,
+        VmInitArgs, VmListArgs, VmNameArgs, VmRemoveArgs, VmSavedStateArgs, VmStartArgs,
+        VmStopArgs,
     },
+    disk,
     domain_xml::{
         self, BootDevice, GraphicsSpec, VmLaunchCpuSpec, VmLaunchDiskSource, VmLaunchDiskSpec,
         VmLaunchDomainSpec, VmLaunchIoThreadsSpec, build_vm_launch_domain_xml, parse_boot_devices,
@@ -60,6 +62,7 @@ pub fn run(args: VmArgs) -> Result<()> {
         VmCommand::Save(args) => managed_save(args),
         VmCommand::Restore(args) => restore_managed_save(args),
         VmCommand::SavedState(args) => managed_save_state(args),
+        VmCommand::DiskResize(args) => disk_resize(args),
         VmCommand::Rm(args) => remove(args),
         VmCommand::Vnc(args) => vnc(args),
         VmCommand::Exec(args) => exec(args),
@@ -122,6 +125,17 @@ pub struct VmSummaryDisk {
     pub bus: VmDiskBus,
     pub cache: Option<VmDiskCache>,
     pub io: Option<VmDiskIoConfig>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmDiskResizeResult {
+    pub disk_id: String,
+    pub target: String,
+    pub previous_bytes: u64,
+    pub current_bytes: u64,
+    pub changed: bool,
+    pub online: bool,
 }
 
 #[derive(Debug)]
@@ -3279,6 +3293,24 @@ fn managed_save_state(args: VmSavedStateArgs) -> Result<()> {
     Ok(())
 }
 
+fn disk_resize(args: VmDiskResizeArgs) -> Result<()> {
+    let size_bytes = parse_disk_size_bytes(&args.size)?;
+    let result = resize_disk_by_name(&args.connect_uri, &args.name, &args.disk, size_bytes)
+        .map_err(anyhow::Error::new)?;
+    if result.changed {
+        eprintln!(
+            "[qtr] expanded disk {} ({}) from {} to {} bytes",
+            result.disk_id, result.target, result.previous_bytes, result.current_bytes
+        );
+    } else {
+        eprintln!(
+            "[qtr] disk {} ({}) is already {} bytes",
+            result.disk_id, result.target, result.current_bytes
+        );
+    }
+    Ok(())
+}
+
 fn remove(args: VmRemoveArgs) -> Result<()> {
     let conn = connect(&args.connect_uri)?;
     let domain = lookup_domain(&conn, &args.name)?;
@@ -3768,6 +3800,162 @@ pub fn autostart_by_name(
         .get_autostart()
         .with_context(|| format!("failed to query autostart for domain {name}"))
         .map_err(VmApiError::Internal)
+}
+
+pub fn resize_disk_by_name(
+    connect_uri: &str,
+    name: &str,
+    disk_selector: &str,
+    new_size_bytes: u64,
+) -> VmApiResult<VmDiskResizeResult> {
+    if new_size_bytes == 0 {
+        return Err(VmApiError::InvalidRequest(anyhow::anyhow!(
+            "disk size must be greater than zero"
+        )));
+    }
+
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    let online = domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?;
+    let xml_flags = if online {
+        0
+    } else {
+        sys::VIR_DOMAIN_XML_INACTIVE
+    };
+    let xml = domain
+        .get_xml_desc(xml_flags)
+        .with_context(|| format!("failed to read domain {name} XML"))
+        .map_err(VmApiError::Internal)?;
+    let disk = find_disk_for_resize(&xml, disk_selector)?;
+    let target = disk
+        .target
+        .clone()
+        .expect("parsed domain disk should have a target");
+    let disk_id = disk.id.clone().unwrap_or_else(|| format!("disk-{target}"));
+    let previous_bytes = if online {
+        domain
+            .get_block_info(&target, 0)
+            .with_context(|| format!("failed to query capacity for domain {name} disk {target}"))
+            .map_err(VmApiError::Internal)?
+            .capacity
+    } else {
+        if disk.disk_type == VmDiskType::Block {
+            return Err(VmApiError::Conflict(anyhow::anyhow!(
+                "inactive block-backed disk {disk_id} cannot be resized by qtr; expand the backing device first and resize while the VM is running"
+            )));
+        }
+        disk::image_virtual_size(&disk.path).map_err(VmApiError::Internal)?
+    };
+
+    if !disk_resize_required(&disk_id, previous_bytes, new_size_bytes)? {
+        return Ok(VmDiskResizeResult {
+            disk_id,
+            target,
+            previous_bytes,
+            current_bytes: previous_bytes,
+            changed: false,
+            online,
+        });
+    }
+
+    if online {
+        domain
+            .block_resize(&target, new_size_bytes, sys::VIR_DOMAIN_BLOCK_RESIZE_BYTES)
+            .with_context(|| format!("failed to resize domain {name} disk {target}"))
+            .map_err(VmApiError::Internal)?;
+    } else {
+        disk::resize_image(&disk.path, disk.format, new_size_bytes)
+            .map_err(VmApiError::Internal)?;
+    }
+
+    Ok(VmDiskResizeResult {
+        disk_id,
+        target,
+        previous_bytes,
+        current_bytes: new_size_bytes,
+        changed: true,
+        online,
+    })
+}
+
+fn disk_resize_required(disk_id: &str, current_bytes: u64, new_bytes: u64) -> VmApiResult<bool> {
+    if new_bytes < current_bytes {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "refusing to shrink disk {disk_id} from {current_bytes} to {new_bytes} bytes"
+        )));
+    }
+    Ok(new_bytes > current_bytes)
+}
+
+fn find_disk_for_resize(xml: &str, selector: &str) -> VmApiResult<VmDisk> {
+    if selector.is_empty() {
+        return Err(VmApiError::InvalidRequest(anyhow::anyhow!(
+            "disk selector must not be empty"
+        )));
+    }
+    let doc = Document::parse(xml)
+        .context("failed to parse domain XML")
+        .map_err(VmApiError::Internal)?;
+    let devices = required_child(doc.root_element(), "devices").map_err(VmApiError::Internal)?;
+    let disks = disks_from_domain_xml(devices).map_err(VmApiError::Internal)?;
+    disks
+        .iter()
+        .find(|disk| disk.id.as_deref() == Some(selector))
+        .or_else(|| {
+            disks
+                .iter()
+                .find(|disk| disk.target.as_deref() == Some(selector))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            VmApiError::InvalidRequest(anyhow::anyhow!("domain disk {selector:?} not found"))
+        })
+}
+
+fn parse_disk_size_bytes(input: &str) -> Result<u64> {
+    let input = input.trim();
+    if input.is_empty() {
+        bail!("disk size must not be empty");
+    }
+    if input.starts_with(['+', '-']) {
+        bail!("disk size must be an absolute capacity");
+    }
+    let lower = input.to_ascii_lowercase();
+    let (number, multiplier) = [
+        ("eib", 1_u64 << 60),
+        ("pib", 1_u64 << 50),
+        ("tib", 1_u64 << 40),
+        ("gib", 1_u64 << 30),
+        ("mib", 1_u64 << 20),
+        ("kib", 1_u64 << 10),
+        ("e", 1_u64 << 60),
+        ("p", 1_u64 << 50),
+        ("t", 1_u64 << 40),
+        ("g", 1_u64 << 30),
+        ("m", 1_u64 << 20),
+        ("k", 1_u64 << 10),
+        ("b", 1),
+    ]
+    .into_iter()
+    .find_map(|(suffix, multiplier)| {
+        lower
+            .strip_suffix(suffix)
+            .map(|number| (number, multiplier))
+    })
+    .unwrap_or((lower.as_str(), 1));
+    let number = number
+        .parse::<u64>()
+        .with_context(|| format!("invalid disk size {input:?}"))?;
+    let bytes = number
+        .checked_mul(multiplier)
+        .with_context(|| format!("disk size {input:?} is too large"))?;
+    if bytes == 0 {
+        bail!("disk size must be greater than zero");
+    }
+    Ok(bytes)
 }
 
 pub fn managed_save_by_name(connect_uri: &str, name: &str) -> VmApiResult<()> {
@@ -5991,6 +6179,52 @@ disks:
         .map(domain_state_name);
 
         assert_eq!(states.as_slice(), expected);
+    }
+
+    #[test]
+    fn parses_absolute_disk_resize_sizes() {
+        assert_eq!(parse_disk_size_bytes("4096").unwrap(), 4096);
+        assert_eq!(parse_disk_size_bytes("4KiB").unwrap(), 4 * 1024);
+        assert_eq!(parse_disk_size_bytes("64G").unwrap(), 64 * (1_u64 << 30));
+        assert_eq!(parse_disk_size_bytes("2tib").unwrap(), 2 * (1_u64 << 40));
+
+        for invalid in ["", "0", "+1G", "1.5G", "1GB", "16 bananas"] {
+            assert!(
+                parse_disk_size_bytes(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn finds_resize_disk_by_stable_id_or_target() {
+        let xml = test_domain_xml().replace(
+            "      <address type='pci'",
+            "      <alias name='ua-qtr-disk-root'/>\n      <address type='pci'",
+        );
+
+        assert_eq!(
+            find_disk_for_resize(&xml, "root")
+                .unwrap()
+                .target
+                .as_deref(),
+            Some("vda")
+        );
+        assert_eq!(
+            find_disk_for_resize(&xml, "vda").unwrap().id.as_deref(),
+            Some("root")
+        );
+        assert!(find_disk_for_resize(&xml, "missing").is_err());
+    }
+
+    #[test]
+    fn disk_resize_capacity_check_is_idempotent_and_rejects_shrink() {
+        assert!(disk_resize_required("root", 1024, 2048).unwrap());
+        assert!(!disk_resize_required("root", 1024, 1024).unwrap());
+        let error =
+            disk_resize_required("root", 1024, 512).expect_err("disk shrink should be rejected");
+        assert!(matches!(error, VmApiError::Conflict(_)));
+        assert!(error.to_string().contains("refusing to shrink"));
     }
 
     #[test]

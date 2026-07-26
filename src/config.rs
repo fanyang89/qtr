@@ -368,6 +368,9 @@ pub enum VmCommand {
     #[command(about = "Query or remove a managed save image")]
     SavedState(VmSavedStateArgs),
 
+    #[command(about = "Expand a VM disk without allowing shrink")]
+    DiskResize(VmDiskResizeArgs),
+
     #[command(about = "Remove an inactive VM definition")]
     Rm(VmRemoveArgs),
 
@@ -550,6 +553,22 @@ pub struct VmSavedStateArgs {
     /// Remove the managed save image.
     #[arg(long)]
     pub remove: bool,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+}
+
+#[derive(Debug, Args)]
+pub struct VmDiskResizeArgs {
+    /// Libvirt domain name.
+    pub name: String,
+
+    /// Stable qtr disk ID or target device such as vda.
+    pub disk: String,
+
+    /// New absolute capacity, for example 64GiB or 68719476736.
+    pub size: String,
 
     /// Libvirt connection URI.
     #[arg(long, default_value = "qemu:///system")]

@@ -26,18 +26,7 @@ fn info(path: &Path) -> Result<()> {
         bail!("disk {} does not exist", path.display());
     }
 
-    let output = duct::cmd(
-        "qemu-img",
-        [
-            OsString::from("info"),
-            OsString::from("--output=json"),
-            path.as_os_str().to_os_string(),
-        ],
-    )
-    .read()
-    .with_context(|| format!("failed to run qemu-img info for {}", path.display()))?;
-    let info = parse_qemu_img_info(&output)
-        .with_context(|| format!("failed to parse qemu-img info for {}", path.display()))?;
+    let info = qemu_img_info(path)?;
 
     println!("path: {}", path.display());
     println!("format: {}", info.format.as_deref().unwrap_or("-"));
@@ -52,6 +41,46 @@ fn info(path: &Path) -> Result<()> {
         info.backing_filename_format.as_deref().unwrap_or("-")
     );
 
+    Ok(())
+}
+
+fn qemu_img_info(path: &Path) -> Result<QemuImgInfo> {
+    let output = duct::cmd(
+        "qemu-img",
+        [
+            OsString::from("info"),
+            OsString::from("--output=json"),
+            path.as_os_str().to_os_string(),
+        ],
+    )
+    .read()
+    .with_context(|| format!("failed to run qemu-img info for {}", path.display()))?;
+    parse_qemu_img_info(&output)
+        .with_context(|| format!("failed to parse qemu-img info for {}", path.display()))
+}
+
+pub(crate) fn image_virtual_size(path: &Path) -> Result<u64> {
+    qemu_img_info(path)?.virtual_size.with_context(|| {
+        format!(
+            "qemu-img did not report virtual size for {}",
+            path.display()
+        )
+    })
+}
+
+pub(crate) fn resize_image(path: &Path, format: DiskFormat, size_bytes: u64) -> Result<()> {
+    duct::cmd(
+        "qemu-img",
+        [
+            OsString::from("resize"),
+            OsString::from("-f"),
+            OsString::from(format.as_qemu_arg()),
+            path.as_os_str().to_os_string(),
+            OsString::from(size_bytes.to_string()),
+        ],
+    )
+    .run()
+    .with_context(|| format!("failed to resize disk image {}", path.display()))?;
     Ok(())
 }
 
