@@ -83,12 +83,62 @@ const vncTicketSchema = z.object({
   expiresInSeconds: z.number().int().positive(),
 })
 
+export const jobStatusSchema = z.enum([
+  'queued',
+  'running',
+  'succeeded',
+  'failed',
+  'cancelled',
+  'interrupted',
+])
+
+export const fedoraInstallRequestSchema = z.object({
+  name: z.string(),
+  mediaId: z.string(),
+  imageId: z.string(),
+  sshAuthorizedKey: z.string(),
+  diskSize: z.string(),
+  memoryMib: z.number(),
+  vcpus: z.number(),
+  network: z.string(),
+  hostname: z.string().nullish(),
+  mirror: z.enum(['official', 'tuna']),
+  timeoutSecs: z.number(),
+  verifyTimeoutSecs: z.number(),
+  keepFailed: z.boolean(),
+})
+
+export const installJobSchema = z.object({
+  id: z.string(),
+  status: jobStatusSchema,
+  phase: z.string(),
+  cancelRequested: z.boolean(),
+  request: fedoraInstallRequestSchema,
+  error: z.string().nullish(),
+  createdAtMs: z.number(),
+  startedAtMs: z.number().nullish(),
+  finishedAtMs: z.number().nullish(),
+})
+
+export const managedResourceSchema = z.object({
+  id: z.string(),
+  sizeBytes: z.number(),
+  modifiedAtMs: z.number().nullish(),
+})
+
+const installJobArraySchema = z.array(installJobSchema)
+const managedResourceArraySchema = z.array(managedResourceSchema)
+
 export type VmState = z.infer<typeof vmStateSchema>
 export type VmMetrics = z.infer<typeof vmMetricsSchema>
 export type VmDisk = z.infer<typeof vmDiskSchema>
 export type VmSummary = z.infer<typeof vmSummarySchema>
 export type HealthStatus = z.infer<typeof healthStatusSchema>
 export type VncTicket = z.infer<typeof vncTicketSchema>
+export type JobStatus = z.infer<typeof jobStatusSchema>
+export type FedoraInstallRequest = z.infer<typeof fedoraInstallRequestSchema>
+export type InstallJob = z.infer<typeof installJobSchema>
+export type ManagedResource = z.infer<typeof managedResourceSchema>
 
 export type VmCreateInput = {
   name: string
@@ -198,4 +248,39 @@ export async function createVncTicket(name: string): Promise<VncTicket> {
     apiClient.post(`/vms/${encodeURIComponent(name)}/vnc-ticket`),
     vncTicketSchema
   )
+}
+
+export async function getInstallJobs(): Promise<InstallJob[]> {
+  return parseResponse(apiClient.get('/install-jobs'), installJobArraySchema)
+}
+
+export async function getInstallJob(id: string): Promise<InstallJob> {
+  return parseResponse(
+    apiClient.get(`/install-jobs/${encodeURIComponent(id)}`),
+    installJobSchema
+  )
+}
+
+export async function createInstallJob(
+  request: FedoraInstallRequest
+): Promise<InstallJob> {
+  return parseResponse(
+    apiClient.post('/install-jobs', request),
+    installJobSchema
+  )
+}
+
+export async function cancelInstallJob(id: string): Promise<InstallJob> {
+  return parseResponse(
+    apiClient.post(`/install-jobs/${encodeURIComponent(id)}/cancel`),
+    installJobSchema
+  )
+}
+
+export async function getImages(): Promise<ManagedResource[]> {
+  return parseResponse(apiClient.get('/images'), managedResourceArraySchema)
+}
+
+export async function getMedia(): Promise<ManagedResource[]> {
+  return parseResponse(apiClient.get('/media'), managedResourceArraySchema)
 }

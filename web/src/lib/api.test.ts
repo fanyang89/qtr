@@ -3,6 +3,8 @@ import vmStatesJson from '../../../fixtures/vm-states.json?raw'
 import {
   API_TOKEN_STORAGE_KEY,
   getApiToken,
+  installJobSchema,
+  managedResourceSchema,
   setApiToken,
   vmSummarySchema,
   vmStateSchema,
@@ -57,5 +59,43 @@ describe('VM API contract', () => {
 
     expect(vm.memoryMib).toBe(4096)
     expect(vm.metrics?.memoryUsedMib).toBe(1024)
+  })
+
+  test('parses install jobs and managed resources', () => {
+    const request = {
+      name: 'fedora',
+      mediaId: 'Fedora.iso',
+      imageId: 'fedora.qcow2',
+      sshAuthorizedKey: 'ssh-ed25519 AAAA',
+      diskSize: '40GiB',
+      memoryMib: 4096,
+      vcpus: 2,
+      network: 'default',
+      hostname: null,
+      mirror: 'official',
+      timeoutSecs: 7200,
+      verifyTimeoutSecs: 300,
+      keepFailed: false,
+    }
+    expect(
+      installJobSchema.parse({
+        id: 'job-id',
+        status: 'running',
+        phase: 'installing',
+        cancelRequested: false,
+        request,
+        error: null,
+        createdAtMs: 1,
+        startedAtMs: 2,
+        finishedAtMs: null,
+      }).request.imageId
+    ).toBe('fedora.qcow2')
+    expect(
+      managedResourceSchema.parse({
+        id: 'Fedora.iso',
+        sizeBytes: 42,
+        modifiedAtMs: null,
+      }).modifiedAtMs
+    ).toBeNull()
   })
 })
