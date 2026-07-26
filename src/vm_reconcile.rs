@@ -5,18 +5,27 @@ pub(crate) fn merge_interface_xml(
     current: Node<'_, '_>,
     desired_xml: &str,
     manage_mac: bool,
+    manage_vlan: bool,
+    manage_mtu: bool,
+    manage_link: bool,
 ) -> String {
     let desired_doc = Document::parse(desired_xml).expect("generated interface XML should parse");
     let desired = desired_doc.root_element();
     let desired_mac = desired.children().find(|child| child.has_tag_name("mac"));
     let desired_source = desired_child(desired, "source");
     let desired_model = desired_child(desired, "model");
+    let desired_vlan = desired.children().find(|child| child.has_tag_name("vlan"));
+    let desired_mtu = desired.children().find(|child| child.has_tag_name("mtu"));
+    let desired_link = desired.children().find(|child| child.has_tag_name("link"));
     let desired_alias = desired.children().find(|child| child.has_tag_name("alias"));
     let mut output = render_element_start("    ", desired, Some(current), &["type"]);
     output.push_str(">\n");
     let mut emitted_mac = false;
     let mut emitted_source = false;
     let mut emitted_model = false;
+    let mut emitted_vlan = false;
+    let mut emitted_mtu = false;
+    let mut emitted_link = false;
     let mut emitted_alias = false;
 
     for child in current.children().filter(Node::is_element) {
@@ -54,7 +63,56 @@ pub(crate) fn merge_interface_xml(
                 ));
                 emitted_model = true;
             }
+            "vlan" if !emitted_vlan => {
+                emit_managed_interface_child(
+                    &mut output,
+                    current_xml,
+                    desired_xml,
+                    child,
+                    desired_vlan,
+                    manage_vlan,
+                    &[],
+                );
+                emitted_vlan = true;
+            }
+            "mtu" if !emitted_mtu => {
+                emit_managed_interface_child(
+                    &mut output,
+                    current_xml,
+                    desired_xml,
+                    child,
+                    desired_mtu,
+                    manage_mtu,
+                    &["size"],
+                );
+                emitted_mtu = true;
+            }
+            "link" if !emitted_link => {
+                emit_managed_interface_child(
+                    &mut output,
+                    current_xml,
+                    desired_xml,
+                    child,
+                    desired_link,
+                    manage_link,
+                    &["state"],
+                );
+                emitted_link = true;
+            }
             "alias" if !emitted_alias => {
+                emit_new_interface_optionals(
+                    &mut output,
+                    desired_xml,
+                    desired_vlan,
+                    desired_mtu,
+                    desired_link,
+                    manage_vlan,
+                    manage_mtu,
+                    manage_link,
+                    &mut emitted_vlan,
+                    &mut emitted_mtu,
+                    &mut emitted_link,
+                );
                 emit_missing_interface_children(
                     &mut output,
                     desired_xml,
@@ -76,6 +134,19 @@ pub(crate) fn merge_interface_xml(
                 emitted_alias = true;
             }
             "address" if !emitted_alias => {
+                emit_new_interface_optionals(
+                    &mut output,
+                    desired_xml,
+                    desired_vlan,
+                    desired_mtu,
+                    desired_link,
+                    manage_vlan,
+                    manage_mtu,
+                    manage_link,
+                    &mut emitted_vlan,
+                    &mut emitted_mtu,
+                    &mut emitted_link,
+                );
                 emit_missing_interface_children(
                     &mut output,
                     desired_xml,
@@ -93,7 +164,7 @@ pub(crate) fn merge_interface_xml(
                 emitted_alias = true;
                 output.push_str(&render_raw_node(current_xml, child, "      "));
             }
-            "mac" | "source" | "model" | "alias" => {}
+            "mac" | "source" | "model" | "vlan" | "mtu" | "link" | "alias" => {}
             _ => output.push_str(&render_raw_node(current_xml, child, "      ")),
         }
     }
@@ -108,11 +179,79 @@ pub(crate) fn merge_interface_xml(
         &mut emitted_source,
         &mut emitted_model,
     );
+    emit_new_interface_optionals(
+        &mut output,
+        desired_xml,
+        desired_vlan,
+        desired_mtu,
+        desired_link,
+        manage_vlan,
+        manage_mtu,
+        manage_link,
+        &mut emitted_vlan,
+        &mut emitted_mtu,
+        &mut emitted_link,
+    );
     if !emitted_alias && let Some(alias) = desired_alias {
         output.push_str(&render_raw_node(desired_xml, alias, "      "));
     }
     output.push_str("    </interface>\n");
     output
+}
+
+fn emit_managed_interface_child(
+    output: &mut String,
+    current_xml: &str,
+    desired_xml: &str,
+    current: Node<'_, '_>,
+    desired: Option<Node<'_, '_>>,
+    manage: bool,
+    managed_attributes: &[&str],
+) {
+    if manage {
+        if let Some(desired) = desired {
+            if managed_attributes.is_empty() {
+                output.push_str(&render_raw_node(desired_xml, desired, "      "));
+            } else {
+                output.push_str(&render_interface_child(
+                    current_xml,
+                    desired,
+                    Some(current),
+                    managed_attributes,
+                ));
+            }
+        }
+    } else {
+        output.push_str(&render_raw_node(current_xml, current, "      "));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_new_interface_optionals(
+    output: &mut String,
+    desired_xml: &str,
+    vlan: Option<Node<'_, '_>>,
+    mtu: Option<Node<'_, '_>>,
+    link: Option<Node<'_, '_>>,
+    manage_vlan: bool,
+    manage_mtu: bool,
+    manage_link: bool,
+    emitted_vlan: &mut bool,
+    emitted_mtu: &mut bool,
+    emitted_link: &mut bool,
+) {
+    for (desired, manage, emitted) in [
+        (vlan, manage_vlan, emitted_vlan),
+        (link, manage_link, emitted_link),
+        (mtu, manage_mtu, emitted_mtu),
+    ] {
+        if manage && !*emitted {
+            if let Some(desired) = desired {
+                output.push_str(&render_raw_node(desired_xml, desired, "      "));
+            }
+            *emitted = true;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

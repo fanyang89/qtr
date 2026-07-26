@@ -58,6 +58,12 @@ pub struct VmInterface {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
+    #[serde(default, skip_serializing_if = "VmOptionalValue::is_preserve")]
+    pub vlan: VmOptionalValue<u16>,
+    #[serde(default, skip_serializing_if = "VmOptionalValue::is_preserve")]
+    pub mtu: VmOptionalValue<u32>,
+    #[serde(default, skip_serializing_if = "VmOptionalValue::is_preserve")]
+    pub link: VmOptionalValue<VmInterfaceLinkState>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -65,6 +71,22 @@ pub struct VmInterface {
 pub enum VmInterfaceType {
     Network,
     Bridge,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmInterfaceLinkState {
+    Up,
+    Down,
+}
+
+impl VmInterfaceLinkState {
+    pub(crate) fn as_xml(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
 }
 
 impl VmInterfaceType {
@@ -106,6 +128,13 @@ impl VmInterfaceEntry {
     }
 
     pub fn as_present(&self) -> Option<&VmInterface> {
+        match self {
+            Self::Present(interface) => Some(interface),
+            Self::Absent { .. } => None,
+        }
+    }
+
+    pub fn as_present_mut(&mut self) -> Option<&mut VmInterface> {
         match self {
             Self::Present(interface) => Some(interface),
             Self::Absent { .. } => None,

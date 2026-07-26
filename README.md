@@ -210,6 +210,8 @@ Multiple CD-ROM trays are supported. Set `media: null` to keep an empty tray, ch
 
 Version 3 supports multiple `interfaces`. Each NIC has a stable ID, `network` or `bridge` type, source, model, and optional MAC. IDs are written as `ua-qtr-nic-*` aliases. Use `state: absent` to remove a NIC from the persistent definition. Legacy `network: default` definitions remain supported and only update the first libvirt network interface, leaving additional NICs untouched.
 
+Interfaces also support a single `vlan` tag, `mtu`, and `link: up|down`. VLAN configuration requires `type: bridge` and a VLAN ID from 1 through 4094. Omit these fields to preserve existing XML or set any field to `null` to remove its element.
+
 Apply it:
 
 ```bash

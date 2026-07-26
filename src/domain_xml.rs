@@ -27,6 +27,9 @@ pub struct VmLaunchInterfaceSpec<'a> {
     pub source: &'a str,
     pub model: &'a str,
     pub mac: Option<&'a str>,
+    pub vlan: Option<u16>,
+    pub mtu: Option<u32>,
+    pub link: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -209,8 +212,20 @@ pub fn build_interface_xml(spec: &VmLaunchInterfaceSpec<'_>) -> String {
         .id
         .map(|id| format!("      <alias name='ua-qtr-nic-{}'/>\n", escape_xml(id)))
         .unwrap_or_default();
+    let vlan = spec
+        .vlan
+        .map(|vlan| format!("      <vlan>\n        <tag id='{vlan}'/>\n      </vlan>\n"))
+        .unwrap_or_default();
+    let mtu = spec
+        .mtu
+        .map(|mtu| format!("      <mtu size='{mtu}'/>\n"))
+        .unwrap_or_default();
+    let link = spec
+        .link
+        .map(|link| format!("      <link state='{}'/>\n", escape_xml(link)))
+        .unwrap_or_default();
     format!(
-        "    <interface type='{interface_type}'>\n{mac}      <source {source_attribute}='{source}'/>\n      <model type='{model}'/>\n{alias}    </interface>\n",
+        "    <interface type='{interface_type}'>\n{mac}      <source {source_attribute}='{source}'/>\n{vlan}      <model type='{model}'/>\n{link}{mtu}{alias}    </interface>\n",
         interface_type = escape_xml(spec.interface_type),
         source_attribute = escape_xml(spec.source_attribute),
         source = escape_xml(spec.source),
@@ -648,6 +663,9 @@ mod tests {
             source: "default",
             model: "virtio",
             mac: Some("52:54:00:12:34:56"),
+            vlan: None,
+            mtu: None,
+            link: None,
         });
         let bridge = build_interface_xml(&VmLaunchInterfaceSpec {
             id: Some("storage"),
@@ -656,6 +674,9 @@ mod tests {
             source: "br-storage",
             model: "e1000e",
             mac: None,
+            vlan: Some(100),
+            mtu: Some(9000),
+            link: Some("down"),
         });
 
         assert!(network.contains("<mac address='52:54:00:12:34:56'/>"));
@@ -664,6 +685,9 @@ mod tests {
         assert!(bridge.contains("<interface type='bridge'>"));
         assert!(bridge.contains("<source bridge='br-storage'/>"));
         assert!(bridge.contains("<model type='e1000e'/>"));
+        assert!(bridge.contains("<tag id='100'/>"));
+        assert!(bridge.contains("<mtu size='9000'/>"));
+        assert!(bridge.contains("<link state='down'/>"));
     }
 
     #[test]

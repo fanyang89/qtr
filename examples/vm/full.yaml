@@ -55,6 +55,9 @@ interfaces:
   type: bridge
   source: br-storage
   model: virtio
+  vlan: 100
+  mtu: 9000
+  link: up
 graphics: vnc
 vncListen: 127.0.0.1
 serialLog: .tmp/logs/install-os.serial.log
