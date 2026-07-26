@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      web-development-dependencies:
+        dependency-type: development
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
