@@ -5,7 +5,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::{
     config::{DiskFormat, GraphicsMode},
-    domain_xml::{VmLaunchCpuTopology, VmLaunchIoThreadsSpec, VmLaunchMemorySpec},
+    domain_xml::{
+        VmLaunchCpuTopology, VmLaunchDiskIoTuneSpec, VmLaunchIoThreadsSpec, VmLaunchMemorySpec,
+    },
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -150,6 +152,8 @@ pub struct VmDisk {
     pub readonly: Option<bool>,
     #[serde(default, skip_serializing_if = "VmDiskSerial::is_preserve")]
     pub serial: VmDiskSerial,
+    #[serde(default, skip_serializing_if = "VmDiskIoTuneConfig::is_preserve")]
+    pub io_tune: VmDiskIoTuneConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -237,6 +241,7 @@ impl<'de> Deserialize<'de> for VmDiskEntry {
                     detect_zeroes: wire.detect_zeroes,
                     readonly: wire.readonly,
                     serial: wire.serial,
+                    io_tune: wire.io_tune,
                 }))
             }
             VmDeviceState::Absent => {
@@ -252,6 +257,7 @@ impl<'de> Deserialize<'de> for VmDiskEntry {
                     || wire.detect_zeroes.is_some()
                     || wire.readonly.is_some()
                     || !wire.serial.is_preserve()
+                    || !wire.io_tune.is_preserve()
                 {
                     return Err(D::Error::custom("absent disk only accepts id and state"));
                 }
@@ -295,6 +301,8 @@ struct VmDiskWire {
     readonly: Option<bool>,
     #[serde(default)]
     serial: VmDiskSerial,
+    #[serde(default)]
+    io_tune: VmDiskIoTuneConfig,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -484,20 +492,23 @@ impl VmDiskDetectZeroes {
     }
 }
 
+pub type VmDiskSerial = VmOptionalValue<String>;
+pub type VmDiskIoTuneConfig = VmOptionalValue<VmDiskIoTune>;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub enum VmDiskSerial {
+pub enum VmOptionalValue<T> {
     #[default]
     Preserve,
     Remove,
-    Value(String),
+    Value(T),
 }
 
-impl VmDiskSerial {
-    pub fn value(value: impl Into<String>) -> Self {
-        Self::Value(value.into())
+impl<T> VmOptionalValue<T> {
+    pub fn configured(value: T) -> Self {
+        Self::Value(value)
     }
 
-    pub fn as_deref(&self) -> Option<&str> {
+    pub fn as_ref(&self) -> Option<&T> {
         match self {
             Self::Value(value) => Some(value),
             Self::Preserve | Self::Remove => None,
@@ -509,27 +520,70 @@ impl VmDiskSerial {
     }
 }
 
-impl Serialize for VmDiskSerial {
+impl VmOptionalValue<String> {
+    pub fn value(value: impl Into<String>) -> Self {
+        Self::Value(value.into())
+    }
+
+    pub fn as_deref(&self) -> Option<&str> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Preserve | Self::Remove => None,
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for VmOptionalValue<T> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match self {
             Self::Preserve | Self::Remove => serializer.serialize_none(),
-            Self::Value(value) => serializer.serialize_str(value),
+            Self::Value(value) => value.serialize(serializer),
         }
     }
 }
 
-impl<'de> Deserialize<'de> for VmDiskSerial {
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for VmOptionalValue<T> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Ok(match Option::<String>::deserialize(deserializer)? {
+        Ok(match Option::<T>::deserialize(deserializer)? {
             Some(value) => Self::Value(value),
             None => Self::Remove,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmDiskIoTune {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes_per_sec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_bytes_per_sec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_bytes_per_sec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_iops: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_iops: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_iops: Option<u64>,
+}
+
+impl VmDiskIoTune {
+    pub(crate) fn launch(self) -> VmLaunchDiskIoTuneSpec {
+        VmLaunchDiskIoTuneSpec {
+            total_bytes_per_sec: self.total_bytes_per_sec,
+            read_bytes_per_sec: self.read_bytes_per_sec,
+            write_bytes_per_sec: self.write_bytes_per_sec,
+            total_iops: self.total_iops,
+            read_iops: self.read_iops,
+            write_iops: self.write_iops,
+        }
     }
 }
 

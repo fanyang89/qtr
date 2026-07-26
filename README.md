@@ -187,6 +187,8 @@ vncListen: 127.0.0.1
 
 Disks support `discard: ignore|unmap`, `detectZeroes: off|on|unmap`, `readonly`, and a guest-visible `serial`. Omitted advanced fields preserve existing libvirt XML during updates. Set `readonly: false` to make an existing disk writable and `serial: null` to remove its serial. `discard: unmap` only releases storage when the complete backing chain supports it; disk `serial` is separate from the VM console `serialLog`.
 
+Per-disk `ioTune` supports `totalBytesPerSec`, `readBytesPerSec`, `writeBytesPerSec`, `totalIops`, `readIops`, and `writeIops`. A non-zero total limit cannot be combined with non-zero read/write limits in the same category. Zero disables an individual limit. Omit `ioTune` to preserve existing XML or set `ioTune: null` to remove all limits.
+
 Persistently detach a disk by keeping its ID as an absent tombstone:
 
 ```yaml

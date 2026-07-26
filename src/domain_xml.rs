@@ -59,7 +59,18 @@ pub struct VmLaunchDiskSpec<'a> {
     pub detect_zeroes: Option<&'a str>,
     pub readonly: Option<bool>,
     pub serial: Option<&'a str>,
+    pub io_tune: Option<VmLaunchDiskIoTuneSpec>,
     pub io_threads: Option<VmLaunchIoThreadsSpec>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmLaunchDiskIoTuneSpec {
+    pub total_bytes_per_sec: Option<u64>,
+    pub read_bytes_per_sec: Option<u64>,
+    pub write_bytes_per_sec: Option<u64>,
+    pub total_iops: Option<u64>,
+    pub read_iops: Option<u64>,
+    pub write_iops: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -300,12 +311,13 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         .serial
         .map(|serial| format!("      <serial>{}</serial>\n", escape_xml(serial)))
         .unwrap_or_default();
+    let io_tune = disk.io_tune.map(build_disk_iotune_xml).unwrap_or_default();
 
     format!(
         r#"    <disk type='{disk_type}' device='disk'>
 {driver}      <source {source_attr}='{path}'/>
       <target dev='{target}' bus='{bus}'/>
-{readonly}{serial}{alias}    </disk>
+{io_tune}{readonly}{serial}{alias}    </disk>
 "#,
         disk_type = disk_type,
         driver = driver,
@@ -313,10 +325,29 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         path = escape_xml(&disk.path.display().to_string()),
         target = escape_xml(&disk.target),
         bus = escape_xml(&disk.bus),
+        io_tune = io_tune,
         readonly = readonly,
         serial = serial,
         alias = alias,
     )
+}
+
+fn build_disk_iotune_xml(spec: VmLaunchDiskIoTuneSpec) -> String {
+    let mut xml = "      <iotune>\n".to_string();
+    for (name, value) in [
+        ("total_bytes_sec", spec.total_bytes_per_sec),
+        ("read_bytes_sec", spec.read_bytes_per_sec),
+        ("write_bytes_sec", spec.write_bytes_per_sec),
+        ("total_iops_sec", spec.total_iops),
+        ("read_iops_sec", spec.read_iops),
+        ("write_iops_sec", spec.write_iops),
+    ] {
+        if let Some(value) = value {
+            xml.push_str(&format!("        <{name}>{value}</{name}>\n"));
+        }
+    }
+    xml.push_str("      </iotune>\n");
+    xml
 }
 
 fn build_iothreads_mapping_xml(spec: VmLaunchIoThreadsSpec, indent: &str) -> String {
@@ -452,6 +483,7 @@ mod tests {
             detect_zeroes: None,
             readonly: None,
             serial: None,
+            io_tune: None,
             io_threads: None,
         }
     }
@@ -559,12 +591,23 @@ mod tests {
         disk.detect_zeroes = Some("unmap");
         disk.readonly = Some(true);
         disk.serial = Some("root&disk");
+        disk.io_tune = Some(VmLaunchDiskIoTuneSpec {
+            total_bytes_per_sec: Some(10_000_000),
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+            total_iops: None,
+            read_iops: Some(400),
+            write_iops: Some(100),
+        });
 
         let xml = build_disk_xml(&disk);
 
         assert!(xml.contains("discard='unmap' detect_zeroes='unmap'"));
         assert!(xml.contains("<readonly/>"));
         assert!(xml.contains("<serial>root&amp;disk</serial>"));
+        assert!(xml.contains("<total_bytes_sec>10000000</total_bytes_sec>"));
+        assert!(xml.contains("<read_iops_sec>400</read_iops_sec>"));
+        assert!(xml.contains("<write_iops_sec>100</write_iops_sec>"));
     }
 
     #[test]

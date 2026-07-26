@@ -4,6 +4,7 @@ pub(crate) fn merge_disk_xml(
     current_xml: &str,
     current_disk: Node<'_, '_>,
     desired_xml: &str,
+    manage_iotune: bool,
     manage_readonly: bool,
     manage_serial: bool,
 ) -> String {
@@ -12,6 +13,9 @@ pub(crate) fn merge_disk_xml(
     let desired_driver = desired_child(desired_disk, "driver");
     let desired_source = desired_child(desired_disk, "source");
     let desired_target = desired_child(desired_disk, "target");
+    let desired_iotune = desired_disk
+        .children()
+        .find(|child| child.has_tag_name("iotune"));
     let desired_readonly = desired_disk
         .children()
         .find(|child| child.has_tag_name("readonly"));
@@ -43,6 +47,7 @@ pub(crate) fn merge_disk_xml(
     }
     let mut emitted_source = false;
     let mut emitted_target = false;
+    let mut emitted_iotune = false;
     let mut emitted_readonly = false;
     let mut emitted_serial = false;
     let mut emitted_alias = false;
@@ -75,6 +80,21 @@ pub(crate) fn merge_disk_xml(
                 ));
                 emitted_target = true;
             }
+            "iotune" if !emitted_iotune => {
+                if manage_iotune {
+                    if let Some(desired_iotune) = desired_iotune {
+                        output.push_str(&merge_iotune_xml(
+                            current_xml,
+                            child,
+                            desired_xml,
+                            desired_iotune,
+                        ));
+                    }
+                } else {
+                    output.push_str(&render_raw_node(current_xml, child, "      "));
+                }
+                emitted_iotune = true;
+            }
             "readonly" if !emitted_readonly => {
                 if manage_readonly {
                     if let Some(desired_readonly) = desired_readonly {
@@ -96,6 +116,13 @@ pub(crate) fn merge_disk_xml(
                 emitted_serial = true;
             }
             "alias" if !emitted_alias => {
+                emit_optional_disk_child(
+                    &mut output,
+                    desired_xml,
+                    desired_iotune,
+                    manage_iotune,
+                    &mut emitted_iotune,
+                );
                 emit_optional_disk_child(
                     &mut output,
                     desired_xml,
@@ -123,6 +150,13 @@ pub(crate) fn merge_disk_xml(
                 emit_optional_disk_child(
                     &mut output,
                     desired_xml,
+                    desired_iotune,
+                    manage_iotune,
+                    &mut emitted_iotune,
+                );
+                emit_optional_disk_child(
+                    &mut output,
+                    desired_xml,
                     desired_readonly,
                     manage_readonly,
                     &mut emitted_readonly,
@@ -140,7 +174,7 @@ pub(crate) fn merge_disk_xml(
                 emitted_alias = true;
                 output.push_str(&render_raw_node(current_xml, child, "      "));
             }
-            "driver" | "source" | "target" | "readonly" | "serial" => {}
+            "driver" | "source" | "target" | "iotune" | "readonly" | "serial" => {}
             _ => output.push_str(&render_raw_node(current_xml, child, "      ")),
         }
     }
@@ -155,6 +189,13 @@ pub(crate) fn merge_disk_xml(
         }
     }
     if !emitted_alias && let Some(desired_alias) = desired_alias {
+        emit_optional_disk_child(
+            &mut output,
+            desired_xml,
+            desired_iotune,
+            manage_iotune,
+            &mut emitted_iotune,
+        );
         emit_optional_disk_child(
             &mut output,
             desired_xml,
@@ -174,6 +215,13 @@ pub(crate) fn merge_disk_xml(
     emit_optional_disk_child(
         &mut output,
         desired_xml,
+        desired_iotune,
+        manage_iotune,
+        &mut emitted_iotune,
+    );
+    emit_optional_disk_child(
+        &mut output,
+        desired_xml,
         desired_readonly,
         manage_readonly,
         &mut emitted_readonly,
@@ -186,6 +234,37 @@ pub(crate) fn merge_disk_xml(
         &mut emitted_serial,
     );
     output.push_str("    </disk>\n");
+    output
+}
+
+fn merge_iotune_xml(
+    current_xml: &str,
+    current: Node<'_, '_>,
+    desired_xml: &str,
+    desired: Node<'_, '_>,
+) -> String {
+    const MANAGED_CHILDREN: &[&str] = &[
+        "total_bytes_sec",
+        "read_bytes_sec",
+        "write_bytes_sec",
+        "total_iops_sec",
+        "read_iops_sec",
+        "write_iops_sec",
+    ];
+
+    let mut output = render_element_start("      ", desired, Some(current), &[]);
+    output.push_str(">\n");
+    for child in desired.children().filter(Node::is_element) {
+        output.push_str(&render_raw_node(desired_xml, child, "        "));
+    }
+    for child in current
+        .children()
+        .filter(Node::is_element)
+        .filter(|child| !MANAGED_CHILDREN.contains(&child.tag_name().name()))
+    {
+        output.push_str(&render_raw_node(current_xml, child, "        "));
+    }
+    output.push_str("      </iotune>\n");
     output
 }
 

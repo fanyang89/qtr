@@ -37,8 +37,8 @@ use crate::{
 
 pub use crate::vm_model::{
     VmCdrom, VmCdromEntry, VmCpu, VmCpuMode, VmCpuTopology, VmDisk, VmDiskBus, VmDiskCache,
-    VmDiskDetectZeroes, VmDiskDiscard, VmDiskEntry, VmDiskIoConfig, VmDiskIoMode, VmDiskSerial,
-    VmDiskType, VmIoThreads, VmMachine, VmManifest, VmMemory,
+    VmDiskDetectZeroes, VmDiskDiscard, VmDiskEntry, VmDiskIoConfig, VmDiskIoMode, VmDiskIoTune,
+    VmDiskIoTuneConfig, VmDiskSerial, VmDiskType, VmIoThreads, VmMachine, VmManifest, VmMemory,
 };
 
 pub fn run(args: VmArgs) -> Result<()> {
@@ -501,6 +501,7 @@ fn init(args: VmInitArgs) -> Result<()> {
                 detect_zeroes: None,
                 readonly: None,
                 serial: VmDiskSerial::default(),
+                io_tune: VmDiskIoTuneConfig::default(),
             })
         })
         .collect();
@@ -734,6 +735,7 @@ fn launch_disk_spec(
         detect_zeroes: disk.detect_zeroes.map(VmDiskDetectZeroes::as_xml),
         readonly: disk.readonly,
         serial: disk.serial.as_deref(),
+        io_tune: disk.io_tune.as_ref().copied().map(VmDiskIoTune::launch),
         io_threads,
     }
 }
@@ -1497,6 +1499,7 @@ fn build_patched_disk_xml(
         xml,
         domain_disk,
         &desired_xml,
+        !manifest_disk.io_tune.is_preserve(),
         manifest_disk.readonly.is_some(),
         !manifest_disk.serial.is_preserve(),
     )
@@ -2203,6 +2206,7 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 })
                 .transpose()?
                 .unwrap_or_default();
+            let io_tune = disk_iotune_from_domain_xml(disk)?;
 
             Ok(VmDisk {
                 id: Some(disk_id_from_domain_xml(disk, &target_dev)),
@@ -2217,6 +2221,7 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 detect_zeroes,
                 readonly,
                 serial,
+                io_tune,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2390,6 +2395,52 @@ fn parse_disk_detect_zeroes(value: &str) -> Result<VmDiskDetectZeroes> {
         "unmap" => Ok(VmDiskDetectZeroes::Unmap),
         _ => bail!("unsupported disk detect_zeroes mode {value:?}"),
     }
+}
+
+fn disk_iotune_from_domain_xml(disk: Node<'_, '_>) -> Result<VmDiskIoTuneConfig> {
+    let Some(io_tune) = optional_child(disk, "iotune") else {
+        return Ok(VmDiskIoTuneConfig::Preserve);
+    };
+    let config = VmDiskIoTune {
+        total_bytes_per_sec: optional_child_u64(io_tune, "total_bytes_sec")?,
+        read_bytes_per_sec: optional_child_u64(io_tune, "read_bytes_sec")?,
+        write_bytes_per_sec: optional_child_u64(io_tune, "write_bytes_sec")?,
+        total_iops: optional_child_u64(io_tune, "total_iops_sec")?,
+        read_iops: optional_child_u64(io_tune, "read_iops_sec")?,
+        write_iops: optional_child_u64(io_tune, "write_iops_sec")?,
+    };
+    if disk_iotune_is_empty(&config) {
+        Ok(VmDiskIoTuneConfig::Preserve)
+    } else {
+        Ok(VmDiskIoTuneConfig::configured(config))
+    }
+}
+
+fn optional_child_u64(parent: Node<'_, '_>, name: &str) -> Result<Option<u64>> {
+    optional_child(parent, name)
+        .map(|child| {
+            child
+                .text()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .with_context(|| format!("domain XML <{name}> is empty"))?
+                .parse()
+                .with_context(|| format!("failed to parse domain XML <{name}>"))
+        })
+        .transpose()
+}
+
+fn disk_iotune_is_empty(io_tune: &VmDiskIoTune) -> bool {
+    [
+        io_tune.total_bytes_per_sec,
+        io_tune.read_bytes_per_sec,
+        io_tune.write_bytes_per_sec,
+        io_tune.total_iops,
+        io_tune.read_iops,
+        io_tune.write_iops,
+    ]
+    .iter()
+    .all(Option::is_none)
 }
 
 fn parse_disk_queues(value: &str) -> Result<u16> {
@@ -2701,6 +2752,9 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
         {
             bail!("disk serial must not be empty");
         }
+        if let Some(io_tune) = disk.io_tune.as_ref() {
+            validate_disk_iotune(io_tune)?;
+        }
         if !disk.path.exists() {
             bail!("disk {} does not exist", disk.path.display());
         }
@@ -2756,6 +2810,26 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
         bail!("cdrom ISO {} does not exist", cdrom.display());
     }
 
+    Ok(())
+}
+
+fn validate_disk_iotune(io_tune: &VmDiskIoTune) -> Result<()> {
+    if disk_iotune_is_empty(io_tune) {
+        bail!("disk ioTune must contain at least one limit");
+    }
+    if io_tune.total_bytes_per_sec.unwrap_or(0) > 0
+        && (io_tune.read_bytes_per_sec.unwrap_or(0) > 0
+            || io_tune.write_bytes_per_sec.unwrap_or(0) > 0)
+    {
+        bail!(
+            "ioTune.totalBytesPerSec cannot be combined with readBytesPerSec or writeBytesPerSec"
+        );
+    }
+    if io_tune.total_iops.unwrap_or(0) > 0
+        && (io_tune.read_iops.unwrap_or(0) > 0 || io_tune.write_iops.unwrap_or(0) > 0)
+    {
+        bail!("ioTune.totalIops cannot be combined with readIops or writeIops");
+    }
     Ok(())
 }
 
@@ -4207,6 +4281,7 @@ mod tests {
                 detect_zeroes: None,
                 readonly: None,
                 serial: None,
+                io_tune: None,
                 io_threads: None,
             },
             VmLaunchDiskSpec {
@@ -4222,6 +4297,14 @@ mod tests {
                 detect_zeroes: Some("unmap"),
                 readonly: Some(true),
                 serial: Some("data-disk"),
+                io_tune: Some(domain_xml::VmLaunchDiskIoTuneSpec {
+                    total_bytes_per_sec: Some(10_000_000),
+                    read_bytes_per_sec: None,
+                    write_bytes_per_sec: None,
+                    total_iops: None,
+                    read_iops: Some(400),
+                    write_iops: Some(100),
+                }),
                 io_threads: Some(VmLaunchIoThreadsSpec {
                     count: 4,
                     queues: 4,
@@ -4296,6 +4379,17 @@ mod tests {
         assert_eq!(second_disk.detect_zeroes, Some(VmDiskDetectZeroes::Unmap));
         assert_eq!(second_disk.readonly, Some(true));
         assert_eq!(second_disk.serial, VmDiskSerial::value("data-disk"));
+        assert_eq!(
+            second_disk.io_tune,
+            VmDiskIoTuneConfig::configured(VmDiskIoTune {
+                total_bytes_per_sec: Some(10_000_000),
+                read_bytes_per_sec: None,
+                write_bytes_per_sec: None,
+                total_iops: None,
+                read_iops: Some(400),
+                write_iops: Some(100),
+            })
+        );
         assert_eq!(
             manifest.io_threads,
             Some(VmIoThreads {
@@ -4431,6 +4525,7 @@ mod tests {
                 detect_zeroes: None,
                 readonly: None,
                 serial: VmDiskSerial::default(),
+                io_tune: VmDiskIoTuneConfig::default(),
             })],
             cdrom: Some(PathBuf::from(
                 "/fixtures/qtr/iso/CentOS-7-x86_64-DVD-2207-02.iso",
@@ -4540,6 +4635,42 @@ mod tests {
         let added_again = patch_domain_xml(&added, &manifest, &[BootDevice::Hd])
             .expect("advanced disk reconciliation should be idempotent");
         assert_eq!(added_again, added);
+    }
+
+    #[test]
+    fn reconciles_disk_iotune_and_preserves_unknown_limits() {
+        let xml = test_domain_xml().replace(
+            "      <address type='pci'",
+            "      <iotune>\n        <read_bytes_sec>500000</read_bytes_sec>\n        <read_bytes_sec_max>2000000</read_bytes_sec_max>\n      </iotune>\n      <address type='pci'",
+        );
+        let mut disk = test_file_disk("/vm/sys.qcow2", Some("vda"), VmDiskBus::VirtioBlk);
+        disk.io_tune = VmDiskIoTuneConfig::configured(VmDiskIoTune {
+            total_bytes_per_sec: None,
+            read_bytes_per_sec: Some(750_000),
+            write_bytes_per_sec: Some(250_000),
+            total_iops: Some(1_000),
+            read_iops: None,
+            write_iops: None,
+        });
+        let manifest = test_manifest(vec![disk]);
+
+        let patched = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd])
+            .expect("disk IO limits should reconcile");
+        assert!(patched.contains("<read_bytes_sec>750000</read_bytes_sec>"));
+        assert!(patched.contains("<write_bytes_sec>250000</write_bytes_sec>"));
+        assert!(patched.contains("<total_iops_sec>1000</total_iops_sec>"));
+        assert!(patched.contains("<read_bytes_sec_max>2000000</read_bytes_sec_max>"));
+
+        let patched_again = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd])
+            .expect("disk IO limit reconciliation should be idempotent");
+        assert_eq!(patched_again, patched);
+
+        let mut disk = manifest.disks[0].as_present().unwrap().clone();
+        disk.io_tune = VmDiskIoTuneConfig::Remove;
+        let removed = patch_domain_xml(&patched, &test_manifest(vec![disk]), &[BootDevice::Hd])
+            .expect("disk IO limits should be removable");
+        assert!(!removed.contains("<iotune>"));
+        assert!(!removed.contains("read_bytes_sec_max"));
     }
 
     #[test]
@@ -5077,6 +5208,7 @@ disks:
                 detect_zeroes: None,
                 readonly: None,
                 serial: VmDiskSerial::default(),
+                io_tune: VmDiskIoTuneConfig::default(),
             })],
             cdrom: None,
             cdroms: None,
@@ -5181,6 +5313,10 @@ disks:
   detectZeroes: on
   readonly: false
   serial: null
+  ioTune:
+    totalBytesPerSec: 10000000
+    readIops: 400
+    writeIops: 100
 "#;
 
         let manifest = parse_manifest_yaml(yaml).expect("advanced disk options should parse");
@@ -5189,6 +5325,17 @@ disks:
         assert_eq!(disk.detect_zeroes, Some(VmDiskDetectZeroes::On));
         assert_eq!(disk.readonly, Some(false));
         assert_eq!(disk.serial, VmDiskSerial::Remove);
+        assert_eq!(
+            disk.io_tune,
+            VmDiskIoTuneConfig::configured(VmDiskIoTune {
+                total_bytes_per_sec: Some(10_000_000),
+                read_bytes_per_sec: None,
+                write_bytes_per_sec: None,
+                total_iops: None,
+                read_iops: Some(400),
+                write_iops: Some(100),
+            })
+        );
 
         let output =
             serialize_manifest_yaml(&manifest).expect("advanced disk options should serialize");
@@ -5196,6 +5343,17 @@ disks:
         assert!(output.contains("detectZeroes: on"));
         assert!(output.contains("readonly: false"));
         assert!(output.contains("serial: null"));
+        assert!(output.contains("totalBytesPerSec: 10000000"));
+
+        let remove = parse_manifest_yaml(&yaml.replace(
+            "  ioTune:\n    totalBytesPerSec: 10000000\n    readIops: 400\n    writeIops: 100\n",
+            "  ioTune: null\n",
+        ))
+        .expect("null ioTune should parse");
+        assert_eq!(
+            remove.disks[0].as_present().unwrap().io_tune,
+            VmDiskIoTuneConfig::Remove
+        );
     }
 
     #[test]
@@ -5459,6 +5617,7 @@ disks:
             detect_zeroes: None,
             readonly: None,
             serial: VmDiskSerial::default(),
+            io_tune: VmDiskIoTuneConfig::default(),
         }
     }
 
@@ -5584,6 +5743,64 @@ disks:
                 .unwrap_err()
                 .to_string()
                 .contains("disk serial must not be empty")
+        );
+    }
+
+    #[test]
+    fn validate_manifest_rejects_invalid_disk_iotune() {
+        let dir = TestDiskDir::new();
+        let path = dir.create_disk("sys.qcow2");
+        let mut manifest = test_manifest(vec![test_file_disk(
+            path.to_str().unwrap(),
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        let disk = manifest.disks[0].as_present_mut().unwrap();
+        disk.io_tune = VmDiskIoTuneConfig::configured(VmDiskIoTune {
+            total_bytes_per_sec: None,
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+            total_iops: None,
+            read_iops: None,
+            write_iops: None,
+        });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("at least one limit")
+        );
+
+        manifest.disks[0].as_present_mut().unwrap().io_tune =
+            VmDiskIoTuneConfig::configured(VmDiskIoTune {
+                total_bytes_per_sec: Some(1_000_000),
+                read_bytes_per_sec: Some(750_000),
+                write_bytes_per_sec: None,
+                total_iops: Some(0),
+                read_iops: Some(100),
+                write_iops: None,
+            });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("totalBytesPerSec cannot be combined")
+        );
+
+        manifest.disks[0].as_present_mut().unwrap().io_tune =
+            VmDiskIoTuneConfig::configured(VmDiskIoTune {
+                total_bytes_per_sec: None,
+                read_bytes_per_sec: None,
+                write_bytes_per_sec: None,
+                total_iops: Some(1_000),
+                read_iops: Some(100),
+                write_iops: None,
+            });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("totalIops cannot be combined")
         );
     }
 
