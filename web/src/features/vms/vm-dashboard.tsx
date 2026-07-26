@@ -53,13 +53,16 @@ import {
 } from './metrics'
 import { VmFormDialog } from './vm-form-dialog'
 
+const EMPTY_VMS: VmSummary[] = []
+
 export function VmDashboard() {
   const queryClient = useQueryClient()
-  const { data: vms = [], isLoading } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: ['vms'],
     queryFn: getVms,
     refetchInterval: 2000,
   })
+  const vms = data ?? EMPTY_VMS
   const latestMetricsRef = useRef<Map<string, VmMetricSnapshot>>(new Map())
   const [previousMetrics, setPreviousMetrics] = useState<
     Map<string, VmMetricSnapshot>
