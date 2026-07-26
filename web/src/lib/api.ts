@@ -78,11 +78,17 @@ const healthStatusSchema = z.object({
   version: z.string().optional(),
 })
 
+const vncTicketSchema = z.object({
+  ticket: z.string(),
+  expiresInSeconds: z.number().int().positive(),
+})
+
 export type VmState = z.infer<typeof vmStateSchema>
 export type VmMetrics = z.infer<typeof vmMetricsSchema>
 export type VmDisk = z.infer<typeof vmDiskSchema>
 export type VmSummary = z.infer<typeof vmSummarySchema>
 export type HealthStatus = z.infer<typeof healthStatusSchema>
+export type VncTicket = z.infer<typeof vncTicketSchema>
 
 export type VmCreateInput = {
   name: string
@@ -101,7 +107,27 @@ export type VmCreateInput = {
 
 export type VmUpdateInput = VmCreateInput
 
-const apiClient = axios.create({ baseURL: '/api' })
+export const API_TOKEN_STORAGE_KEY = 'qtr.apiToken'
+
+export function getApiToken(): string {
+  return sessionStorage.getItem(API_TOKEN_STORAGE_KEY) ?? ''
+}
+
+export function setApiToken(token: string): void {
+  if (token) {
+    sessionStorage.setItem(API_TOKEN_STORAGE_KEY, token)
+  } else {
+    sessionStorage.removeItem(API_TOKEN_STORAGE_KEY)
+  }
+}
+
+const apiClient = axios.create({ baseURL: '/api/v1' })
+
+apiClient.interceptors.request.use((config) => {
+  const token = getApiToken()
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
 
 async function parseResponse<T>(
   request: Promise<AxiosResponse<unknown>>,
@@ -149,4 +175,11 @@ export async function updateVm(
 
 export async function deleteVm(name: string): Promise<void> {
   await apiClient.delete(`/vms/${encodeURIComponent(name)}`)
+}
+
+export async function createVncTicket(name: string): Promise<VncTicket> {
+  return parseResponse(
+    apiClient.post(`/vms/${encodeURIComponent(name)}/vnc-ticket`),
+    vncTicketSchema
+  )
 }

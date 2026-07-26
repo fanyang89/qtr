@@ -68,6 +68,26 @@ qemu:///system
 
 If `virsh` reports `no connection driver available for qemu:///system`, install `libvirt-daemon-driver-qemu` and restart `libvirtd`.
 
+## Web API
+
+Build the Web UI and start the authenticated server:
+
+```bash
+pnpm -C web build
+export QTR_API_TOKEN="$(openssl rand -hex 32)"
+cargo run -- web
+```
+
+Open `http://127.0.0.1:8080/settings` and store the same token for the current browser tab. Management endpoints are under `/api/v1`; `/api/v1/health`, `/api/v1/openapi.json`, and `/docs` are public. VNC connections use short-lived, single-use tickets issued by the authenticated API.
+
+qtr serves plain HTTP. Keep the default loopback binding or put a TLS reverse proxy in front of qtr on trusted networks. The server logs a warning when plain HTTP listens on a non-loopback address.
+
+Regenerate the committed OpenAPI 3.1 document after changing API handlers:
+
+```bash
+task openapi:generate
+```
+
 ## RPM Packaging
 
 Build the RPM package with nFPM:

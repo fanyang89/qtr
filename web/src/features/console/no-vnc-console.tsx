@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import RFB from '@novnc/novnc'
+import { createVncTicket } from '@/lib/api'
 import { buildVncWebSocketUrl } from '@/lib/vnc'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -25,7 +26,6 @@ export function NoVncConsole({ name }: { name: string }) {
   const [viewOnly, setViewOnly] = useState(false)
   const [scaleViewport, setScaleViewport] = useState(true)
   const [resizeSession, setResizeSession] = useState(true)
-  const webSocketUrl = buildVncWebSocketUrl(name)
 
   useEffect(() => {
     const rfb = rfbRef.current
@@ -35,63 +35,63 @@ export function NoVncConsole({ name }: { name: string }) {
     rfb.resizeSession = resizeSession
   }, [resizeSession, scaleViewport, viewOnly])
 
-  function connect() {
+  async function connect() {
     if (!containerRef.current || rfbRef.current) return
 
     setConnectionState('connecting')
     setErrorMessage(null)
     setDesktopName(null)
 
-    let rfb: RFB
     try {
-      rfb = new RFB(containerRef.current, webSocketUrl, {
+      const { ticket } = await createVncTicket(name)
+      if (!containerRef.current || rfbRef.current) return
+      const url = buildVncWebSocketUrl(name, ticket)
+      const rfb = new RFB(containerRef.current, url, {
         shared: true,
+      })
+      rfbRef.current = rfb
+      setHasClient(true)
+      rfb.viewOnly = viewOnly
+      rfb.scaleViewport = scaleViewport
+      rfb.resizeSession = resizeSession
+      rfb.focusOnClick = true
+      rfb.qualityLevel = 8
+      rfb.compressionLevel = 2
+
+      rfb.addEventListener('connect', () => {
+        setConnectionState('connected')
+        setErrorMessage(null)
+      })
+      rfb.addEventListener('disconnect', (event) => {
+        const clean =
+          'detail' in event &&
+          Boolean((event as CustomEvent<{ clean?: boolean }>).detail.clean)
+        setConnectionState(clean ? 'disconnected' : 'error')
+        setErrorMessage(
+          clean ? null : 'VNC WebSocket closed before the desktop connected'
+        )
+        rfbRef.current = null
+        setHasClient(false)
+      })
+      rfb.addEventListener('desktopname', (event) => {
+        const detail = (event as CustomEvent<{ name?: string }>).detail
+        setDesktopName(detail.name ?? null)
+      })
+      rfb.addEventListener('credentialsrequired', () => {
+        setConnectionState('error')
+        setErrorMessage('VNC requires credentials')
+      })
+      rfb.addEventListener('securityfailure', (event) => {
+        const detail = (event as CustomEvent<{ reason?: string }>).detail
+        setConnectionState('error')
+        setErrorMessage(detail.reason ?? 'VNC security negotiation failed')
       })
     } catch (error) {
       setConnectionState('error')
       setErrorMessage(
         error instanceof Error ? error.message : 'Failed to create noVNC client'
       )
-      return
     }
-
-    rfbRef.current = rfb
-    setHasClient(true)
-    rfb.viewOnly = viewOnly
-    rfb.scaleViewport = scaleViewport
-    rfb.resizeSession = resizeSession
-    rfb.focusOnClick = true
-    rfb.qualityLevel = 8
-    rfb.compressionLevel = 2
-
-    rfb.addEventListener('connect', () => {
-      setConnectionState('connected')
-      setErrorMessage(null)
-    })
-    rfb.addEventListener('disconnect', (event) => {
-      const clean =
-        'detail' in event &&
-        Boolean((event as CustomEvent<{ clean?: boolean }>).detail.clean)
-      setConnectionState(clean ? 'disconnected' : 'error')
-      setErrorMessage(
-        clean ? null : 'VNC WebSocket closed before the desktop connected'
-      )
-      rfbRef.current = null
-      setHasClient(false)
-    })
-    rfb.addEventListener('desktopname', (event) => {
-      const detail = (event as CustomEvent<{ name?: string }>).detail
-      setDesktopName(detail.name ?? null)
-    })
-    rfb.addEventListener('credentialsrequired', () => {
-      setConnectionState('error')
-      setErrorMessage('VNC requires credentials')
-    })
-    rfb.addEventListener('securityfailure', (event) => {
-      const detail = (event as CustomEvent<{ reason?: string }>).detail
-      setConnectionState('error')
-      setErrorMessage(detail.reason ?? 'VNC security negotiation failed')
-    })
   }
 
   function disconnect() {
@@ -105,7 +105,7 @@ export function NoVncConsole({ name }: { name: string }) {
     // noVNC connection inherently needs to start inside the effect and reports
     // state through listeners; the synchronous setState here is intentional.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    connect()
+    void connect()
     return () => {
       rfbRef.current?.disconnect()
       rfbRef.current = null
@@ -167,7 +167,8 @@ export function NoVncConsole({ name }: { name: string }) {
         />
       </div>
       <div className='border-b bg-background px-4 py-2 text-xs text-muted-foreground'>
-        <span className='font-medium'>WebSocket:</span> {webSocketUrl}
+        <span className='font-medium'>WebSocket:</span> /api/v1/vms/
+        {encodeURIComponent(name)}/vnc
         {errorMessage && (
           <span className='ms-3 text-destructive'>{errorMessage}</span>
         )}

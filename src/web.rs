@@ -1,19 +1,26 @@
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::{
-        Path, State,
+        Path, Query, Request, State,
+        rejection::{JsonRejection, QueryRejection},
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::any,
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -22,6 +29,11 @@ use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
+use utoipa::OpenApi as _;
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_swagger_ui::SwaggerUi;
+use uuid::Uuid;
 use virt::error::clear_error_callback;
 
 use crate::config::GraphicsMode;
@@ -30,9 +42,14 @@ use crate::{config::WebArgs, vm};
 #[derive(Clone)]
 struct AppState {
     connect_uri: String,
+    api_token: Arc<str>,
+    vnc_tickets: Arc<Mutex<HashMap<String, VncTicket>>>,
 }
 
-#[derive(Serialize)]
+#[derive(utoipa::OpenApi)]
+struct ApiDoc;
+
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct HealthStatus {
     ok: bool,
@@ -40,9 +57,50 @@ struct HealthStatus {
     version: &'static str,
 }
 
-#[derive(Serialize)]
-struct ErrorBody {
-    error: String,
+#[derive(Serialize, utoipa::ToSchema)]
+struct ProblemDetails {
+    #[serde(rename = "type")]
+    problem_type: &'static str,
+    title: &'static str,
+    status: u16,
+    detail: &'static str,
+}
+
+impl ProblemDetails {
+    fn response(status: StatusCode, title: &'static str, detail: &'static str) -> Response {
+        let mut response = (
+            status,
+            Json(Self {
+                problem_type: "about:blank",
+                title,
+                status: status.as_u16(),
+                detail,
+            }),
+        )
+            .into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/problem+json"),
+        );
+        response
+    }
+}
+
+struct VncTicket {
+    vm_name: String,
+    expires_at: Instant,
+}
+
+#[derive(Deserialize)]
+struct VncTicketQuery {
+    ticket: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct VncTicketResponse {
+    ticket: String,
+    expires_in_seconds: u64,
 }
 
 #[derive(Debug)]
@@ -89,25 +147,27 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
         tracing::error!(error = ?self.error(), %status, "request failed");
-        let message = match status {
-            StatusCode::BAD_REQUEST => "invalid request",
-            StatusCode::NOT_FOUND => "VM not found",
-            StatusCode::CONFLICT => "VM state conflicts with the request",
-            _ => "internal server error",
+        let (title, detail) = match status {
+            StatusCode::BAD_REQUEST => ("Bad Request", "The request is invalid."),
+            StatusCode::NOT_FOUND => ("Not Found", "The VM was not found."),
+            StatusCode::CONFLICT => ("Conflict", "The VM state conflicts with the request."),
+            _ => (
+                "Internal Server Error",
+                "The server could not complete the request.",
+            ),
         };
-        let body = Json(ErrorBody {
-            error: message.to_string(),
-        });
-        (status, body).into_response()
+        ProblemDetails::response(status, title, detail)
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmRequest {
     name: String,
     io_threads: Option<vm::VmIoThreads>,
+    #[schema(value_type = Vec<Object>)]
     disks: Vec<vm::VmDisk>,
+    #[schema(value_type = Option<String>)]
     cdrom: Option<PathBuf>,
     boot: Option<Vec<String>>,
     #[serde(rename = "memoryGiB")]
@@ -117,18 +177,24 @@ struct CreateVmRequest {
     graphics: GraphicsMode,
     vnc_listen: String,
     vnc_port: Option<u16>,
+    #[schema(value_type = Option<String>)]
     serial_log: Option<PathBuf>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateVmRequest {
     name: String,
+    #[schema(value_type = Option<Object>)]
     machine: Option<vm::VmMachine>,
+    #[schema(value_type = Option<Object>)]
     cpu: Option<vm::VmCpu>,
+    #[schema(value_type = Option<Object>)]
     memory: Option<vm::VmMemory>,
     io_threads: Option<vm::VmIoThreads>,
+    #[schema(value_type = Vec<Object>)]
     disks: Vec<vm::VmDisk>,
+    #[schema(value_type = Option<String>)]
     cdrom: Option<PathBuf>,
     boot: Option<Vec<String>>,
     #[serde(default = "default_memory_gib", rename = "memoryGiB")]
@@ -142,6 +208,7 @@ struct UpdateVmRequest {
     #[serde(default = "default_vnc_listen")]
     vnc_listen: String,
     vnc_port: Option<u16>,
+    #[schema(value_type = Option<String>)]
     serial_log: Option<PathBuf>,
 }
 
@@ -237,12 +304,12 @@ async fn run_async(args: WebArgs) -> Result<()> {
     let listen = args.listen;
     if !listen.ip().is_loopback() {
         let warning = format!(
-            "qtr web API has no authentication; binding to {listen} exposes full VM control to the network"
+            "qtr web uses unencrypted HTTP at {listen}; use a trusted network or a TLS reverse proxy"
         );
         eprintln!("[qtr] WARNING: {warning}");
         tracing::warn!(warning);
     }
-    let app = app(args.connect_uri, args.web_dir);
+    let app = app(args.connect_uri, args.web_dir, args.api_token);
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind web server at {listen}"))?;
@@ -254,23 +321,20 @@ async fn run_async(args: WebArgs) -> Result<()> {
         .context("web server failed")
 }
 
-fn app(connect_uri: String, web_dir: PathBuf) -> Router {
-    let state = AppState { connect_uri };
+fn app(connect_uri: String, web_dir: PathBuf, api_token: String) -> Router {
+    let state = AppState {
+        connect_uri,
+        api_token: api_token.into(),
+        vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
+    };
     let index_html = web_dir.join("index.html");
-    let api = Router::new()
-        .route("/health", get(health))
-        .route("/vms", get(list_vms).post(create_vm))
-        .route(
-            "/vms/{name}",
-            get(get_vm).put(update_vm).delete(undefine_vm),
-        )
-        .route("/vms/{name}/start", post(start_vm))
-        .route("/vms/{name}/shutdown", post(shutdown_vm))
-        .route("/vms/{name}/destroy", post(destroy_vm))
-        .route("/vms/{name}/vnc", get(vnc_ws));
+    let (api_router, openapi) = documented_api(&state);
 
     Router::new()
-        .nest("/api", api)
+        .merge(api_router)
+        .merge(SwaggerUi::new("/docs").url("/api/v1/openapi.json", openapi))
+        .route("/api", any(api_not_found))
+        .route("/api/{*path}", any(api_not_found))
         .fallback_service(
             ServeDir::new(web_dir)
                 .append_index_html_on_directories(true)
@@ -280,6 +344,49 @@ fn app(connect_uri: String, web_dir: PathBuf) -> Router {
         .with_state(state)
 }
 
+fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenApi) {
+    let protected_api = OpenApiRouter::new()
+        .routes(routes!(list_vms, create_vm))
+        .routes(routes!(get_vm, update_vm, undefine_vm))
+        .routes(routes!(start_vm))
+        .routes(routes!(shutdown_vm))
+        .routes(routes!(destroy_vm))
+        .routes(routes!(create_vnc_ticket))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer_token,
+        ));
+    let api = OpenApiRouter::new()
+        .routes(routes!(health))
+        .routes(routes!(vnc_ws))
+        .merge(protected_api);
+    let mut documented = OpenApiRouter::with_openapi(ApiDoc::openapi()).nest("/api/v1", api);
+    documented
+        .get_openapi_mut()
+        .components
+        .get_or_insert_default()
+        .add_security_scheme(
+            "bearerAuth",
+            SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
+        );
+    documented.split_for_parts()
+}
+
+pub fn openapi_document() -> utoipa::openapi::OpenApi {
+    let state = AppState {
+        connect_uri: String::new(),
+        api_token: Arc::from("unused"),
+        vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
+    };
+    documented_api(&state).1
+}
+
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "system",
+    responses((status = OK, body = HealthStatus))
+)]
 async fn health(State(state): State<AppState>) -> Json<HealthStatus> {
     let connect_uri = state.connect_uri.clone();
     let ok = run_libvirt(move || vm::list_summaries(&connect_uri))
@@ -293,12 +400,35 @@ async fn health(State(state): State<AppState>) -> Json<HealthStatus> {
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/vms",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = OK, body = [vm::VmSummary]),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
 async fn list_vms(State(state): State<AppState>) -> AppResult<Json<Vec<vm::VmSummary>>> {
     let connect_uri = state.connect_uri;
     let vms = run_libvirt(move || vm::list_summaries(&connect_uri)).await?;
     Ok(Json(vms))
 }
 
+#[utoipa::path(
+    get,
+    path = "/vms/{name}",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = OK, body = vm::VmSummary),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
 async fn get_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -308,21 +438,50 @@ async fn get_vm(
     Ok(Json(vm))
 }
 
+#[utoipa::path(
+    post,
+    path = "/vms",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    request_body = CreateVmRequest,
+    responses(
+        (status = CREATED, body = vm::VmSummary),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
 async fn create_vm(
     State(state): State<AppState>,
-    Json(request): Json<CreateVmRequest>,
+    request: std::result::Result<Json<CreateVmRequest>, JsonRejection>,
 ) -> AppResult<(StatusCode, Json<vm::VmSummary>)> {
+    let request = api_json(request)?;
     let manifest = request.into_manifest();
     let connect_uri = state.connect_uri;
     let vm = run_libvirt(move || vm::create_by_manifest(&connect_uri, manifest)).await?;
     Ok((StatusCode::CREATED, Json(vm)))
 }
 
+#[utoipa::path(
+    put,
+    path = "/vms/{name}",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    request_body = UpdateVmRequest,
+    responses(
+        (status = OK, body = vm::VmSummary),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
 async fn update_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(request): Json<UpdateVmRequest>,
+    request: std::result::Result<Json<UpdateVmRequest>, JsonRejection>,
 ) -> AppResult<Json<vm::VmSummary>> {
+    let request = api_json(request)?;
     let mut manifest = request.into_manifest();
     manifest.name = name;
     let connect_uri = state.connect_uri;
@@ -330,6 +489,19 @@ async fn update_vm(
     Ok(Json(vm))
 }
 
+#[utoipa::path(
+    post,
+    path = "/vms/{name}/start",
+    tag = "vm lifecycle",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = NO_CONTENT),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
 async fn start_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -339,6 +511,19 @@ async fn start_vm(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/vms/{name}/shutdown",
+    tag = "vm lifecycle",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = NO_CONTENT),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
 async fn shutdown_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -348,6 +533,19 @@ async fn shutdown_vm(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/vms/{name}/destroy",
+    tag = "vm lifecycle",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = NO_CONTENT),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
 async fn destroy_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -357,6 +555,19 @@ async fn destroy_vm(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/vms/{name}",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = NO_CONTENT),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
 async fn undefine_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -366,12 +577,80 @@ async fn undefine_vm(
     Ok(StatusCode::NO_CONTENT)
 }
 
+const VNC_TICKET_LIFETIME: Duration = Duration::from_secs(30);
+
+#[utoipa::path(
+    post,
+    path = "/vms/{name}/vnc-ticket",
+    tag = "vm console",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = CREATED, body = VncTicketResponse),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn create_vnc_ticket(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<(StatusCode, Json<VncTicketResponse>)> {
+    let connect_uri = state.connect_uri.clone();
+    let vm_name = name.clone();
+    run_libvirt(move || vm::vnc_endpoint_by_name_api(&connect_uri, &vm_name)).await?;
+
+    let ticket = Uuid::new_v4().to_string();
+    let expires_at = Instant::now() + VNC_TICKET_LIFETIME;
+    let mut tickets = state.vnc_tickets.lock().map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("VNC ticket store lock poisoned: {error}"))
+    })?;
+    tickets.retain(|_, ticket| ticket.expires_at > Instant::now());
+    tickets.insert(
+        ticket.clone(),
+        VncTicket {
+            vm_name: name,
+            expires_at,
+        },
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(VncTicketResponse {
+            ticket,
+            expires_in_seconds: VNC_TICKET_LIFETIME.as_secs(),
+        }),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/vms/{name}/vnc",
+    tag = "vm console",
+    params(
+        ("name" = String, Path, description = "VM name"),
+        ("ticket" = String, Query, description = "One-time VNC ticket")
+    ),
+    responses(
+        (status = 101, description = "WebSocket upgrade"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = FORBIDDEN, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
 async fn vnc_ws(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    query: std::result::Result<Query<VncTicketQuery>, QueryRejection>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let Ok(Query(query)) = query else {
+        return ProblemDetails::response(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "The VNC ticket query parameter is required.",
+        );
+    };
     if let Some(origin) = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
@@ -382,8 +661,19 @@ async fn vnc_ws(
             .unwrap_or_default();
         if !origin_matches_host(origin, host) {
             tracing::warn!(%origin, %host, "rejected cross-origin VNC WebSocket");
-            return StatusCode::FORBIDDEN.into_response();
+            return ProblemDetails::response(
+                StatusCode::FORBIDDEN,
+                "Forbidden",
+                "The WebSocket origin does not match the request host.",
+            );
         }
+    }
+    if !consume_vnc_ticket(&state, &name, &query.ticket) {
+        return ProblemDetails::response(
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized",
+            "A valid one-time VNC ticket is required.",
+        );
     }
 
     let connect_uri = state.connect_uri;
@@ -393,6 +683,64 @@ async fn vnc_ws(
         }
     })
     .into_response()
+}
+
+fn consume_vnc_ticket(state: &AppState, vm_name: &str, token: &str) -> bool {
+    let Ok(mut tickets) = state.vnc_tickets.lock() else {
+        tracing::error!("VNC ticket store lock poisoned");
+        return false;
+    };
+    let Some(ticket) = tickets.get(token) else {
+        return false;
+    };
+    if ticket.expires_at <= Instant::now() {
+        tickets.remove(token);
+        return false;
+    }
+    if ticket.vm_name != vm_name {
+        return false;
+    }
+    tickets.remove(token);
+    true
+}
+
+async fn require_bearer_token(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let supplied_token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty());
+    let authenticated = supplied_token
+        .is_some_and(|token| state.api_token.as_bytes().ct_eq(token.as_bytes()).into());
+
+    if authenticated {
+        next.run(request).await
+    } else {
+        ProblemDetails::response(
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized",
+            "A valid bearer token is required.",
+        )
+    }
+}
+
+fn api_json<T>(request: std::result::Result<Json<T>, JsonRejection>) -> AppResult<T> {
+    request
+        .map(|Json(value)| value)
+        .map_err(|error| vm::VmApiError::InvalidRequest(anyhow::anyhow!(error.body_text())).into())
+}
+
+async fn api_not_found() -> Response {
+    ProblemDetails::response(
+        StatusCode::NOT_FOUND,
+        "Not Found",
+        "The API endpoint was not found.",
+    )
 }
 
 fn origin_matches_host(origin: &str, host: &str) -> bool {
@@ -551,8 +899,16 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{body::Body, http::Request, routing::get};
     use tower::ServiceExt;
+
+    fn test_state() -> AppState {
+        AppState {
+            connect_uri: "test:///default".to_string(),
+            api_token: Arc::from("test-token"),
+            vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 
     #[test]
     fn update_request_keeps_disk_detach_out_of_http_api() {
@@ -609,18 +965,14 @@ mod tests {
                 }),
             );
 
-        for (path, status, message) in [
-            ("/invalid", StatusCode::BAD_REQUEST, "invalid request"),
-            ("/missing", StatusCode::NOT_FOUND, "VM not found"),
-            (
-                "/conflict",
-                StatusCode::CONFLICT,
-                "VM state conflicts with the request",
-            ),
+        for (path, status, title) in [
+            ("/invalid", StatusCode::BAD_REQUEST, "Bad Request"),
+            ("/missing", StatusCode::NOT_FOUND, "Not Found"),
+            ("/conflict", StatusCode::CONFLICT, "Conflict"),
             (
                 "/internal",
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "internal server error",
+                "Internal Server Error",
             ),
         ] {
             let response = app
@@ -629,13 +981,139 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), status);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
 
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body["error"], message);
+            assert_eq!(body["type"], "about:blank");
+            assert_eq!(body["title"], title);
+            assert_eq!(body["status"], status.as_u16());
         }
+    }
+
+    #[tokio::test]
+    async fn bearer_authentication_protects_management_routes() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/", get(|| async { StatusCode::NO_CONTENT }))
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_bearer_token,
+            ))
+            .with_state(state);
+
+        for authorization in [None, Some("Bearer wrong-token")] {
+            let mut request = Request::get("/");
+            if let Some(value) = authorization {
+                request = request.header(header::AUTHORIZATION, value);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+        }
+
+        let response = app
+            .oneshot(
+                Request::get("/")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn openapi_document_describes_versioned_bearer_api() {
+        let app = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+        );
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(document["openapi"], "3.1.0");
+        assert!(document["paths"]["/api/v1/vms"].is_object());
+        assert_eq!(
+            document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
+            "bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_exposes_only_the_versioned_management_api() {
+        let app = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+        );
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/v1/vms").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(Request::get("/api/vms").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+    }
+
+    #[test]
+    fn committed_openapi_document_is_current() {
+        let generated = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&openapi_document()).unwrap()
+        );
+        assert_eq!(generated, include_str!("../openapi/qtr-v1.json"));
+    }
+
+    #[test]
+    fn vnc_tickets_are_scoped_and_single_use() {
+        let state = test_state();
+        state.vnc_tickets.lock().unwrap().insert(
+            "ticket".to_string(),
+            VncTicket {
+                vm_name: "vm-one".to_string(),
+                expires_at: Instant::now() + Duration::from_secs(1),
+            },
+        );
+
+        assert!(!consume_vnc_ticket(&state, "vm-two", "ticket"));
+        assert!(consume_vnc_ticket(&state, "vm-one", "ticket"));
+        assert!(!consume_vnc_ticket(&state, "vm-one", "ticket"));
     }
 
     #[test]

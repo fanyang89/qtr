@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'vitest'
 import vmStatesJson from '../../../fixtures/vm-states.json?raw'
-import { vmStateSchema } from './api'
+import {
+  API_TOKEN_STORAGE_KEY,
+  getApiToken,
+  setApiToken,
+  vmStateSchema,
+} from './api'
 
 describe('VM API contract', () => {
   test('accepts every backend VM state', () => {
@@ -18,5 +23,16 @@ describe('VM API contract', () => {
       'pmsuspended',
       'unknown',
     ])
+  })
+
+  test('stores the API token in session storage', () => {
+    setApiToken('secret')
+
+    expect(getApiToken()).toBe('secret')
+    expect(sessionStorage.getItem(API_TOKEN_STORAGE_KEY)).toBe('secret')
+
+    setApiToken('')
+    expect(getApiToken()).toBe('')
+    expect(sessionStorage.getItem(API_TOKEN_STORAGE_KEY)).toBeNull()
   })
 })

@@ -11,7 +11,7 @@ Admin dashboard UI for qtr, built from `satnaing/shadcn-admin` and trimmed for Q
 - TanStack Query API hooks
 - VM dashboard and list pages
 - noVNC console shell
-- Vite `/api` proxy for the future Rust web server
+- Vite `/api` proxy for the Rust web server
 
 ## Development
 
@@ -34,6 +34,7 @@ pnpm build
 ```
 
 The dev server proxies `/api` and WebSocket traffic to `http://127.0.0.1:8080`.
+Set the Bearer token on `/settings`; it is kept in `sessionStorage` and sent to `/api/v1` endpoints. noVNC obtains a short-lived ticket before opening its WebSocket.
 
 ## Routes
 

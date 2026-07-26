@@ -96,7 +96,7 @@ pub struct VmDeviceCapability {
     pub options: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VmSummary {
     pub name: String,
@@ -118,7 +118,7 @@ pub struct VmSummary {
     pub metrics: Option<VmMetrics>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VmSummaryDisk {
     #[serde(rename = "type")]
@@ -209,7 +209,7 @@ struct GuestOutputStream {
     offset: i64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VmMetrics {
     pub cpu_time_ns: u64,
@@ -4661,6 +4661,28 @@ pub fn vnc_endpoint_by_name(connect_uri: &str, name: &str) -> Result<VncEndpoint
 
     query_vnc_endpoint_spec(&domain, "127.0.0.1")?
         .with_context(|| format!("domain {name} does not expose an active VNC endpoint"))
+}
+
+pub fn vnc_endpoint_by_name_api(connect_uri: &str, name: &str) -> VmApiResult<VncEndpoint> {
+    let conn = connect_read_only(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
+    {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} is not active"
+        )));
+    }
+
+    query_vnc_endpoint_spec(&domain, "127.0.0.1")
+        .map_err(VmApiError::Internal)?
+        .ok_or_else(|| {
+            VmApiError::Conflict(anyhow::anyhow!(
+                "domain {name} does not expose an active VNC endpoint"
+            ))
+        })
 }
 
 fn connect(uri: &str) -> Result<Connect> {

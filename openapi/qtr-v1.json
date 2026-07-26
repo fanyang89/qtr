@@ -1,0 +1,1167 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "qtr",
+    "description": "",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/vms": {
+      "get": {
+        "tags": [
+          "vms"
+        ],
+        "operationId": "list_vms",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VmSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "vms"
+        ],
+        "operationId": "create_vm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateVmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VmSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/vms/{name}": {
+      "get": {
+        "tags": [
+          "vms"
+        ],
+        "operationId": "get_vm",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VM name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VmSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "vms"
+        ],
+        "operationId": "update_vm",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VM name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateVmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VmSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "vms"
+        ],
+        "operationId": "undefine_vm",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VM name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/vms/{name}/destroy": {
+      "post": {
+        "tags": [
+          "vm lifecycle"
+        ],
+        "operationId": "destroy_vm",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VM name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/vms/{name}/shutdown": {
+      "post": {
+        "tags": [
+          "vm lifecycle"
+        ],
+        "operationId": "shutdown_vm",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VM name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/vms/{name}/start": {
+      "post": {
+        "tags": [
+          "vm lifecycle"
+        ],
+        "operationId": "start_vm",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VM name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/vms/{name}/vnc": {
+      "get": {
+        "tags": [
+          "vm console"
+        ],
+        "operationId": "vnc_ws",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VM name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ticket",
+            "in": "query",
+            "description": "One-time VNC ticket",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade"
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/vms/{name}/vnc-ticket": {
+      "post": {
+        "tags": [
+          "vm console"
+        ],
+        "operationId": "create_vnc_ticket",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VM name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VncTicketResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateVmRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "disks",
+          "memoryGiB",
+          "vcpus",
+          "network",
+          "graphics",
+          "vncListen"
+        ],
+        "properties": {
+          "boot": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "cdrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "disks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "graphics": {
+            "$ref": "#/components/schemas/GraphicsMode"
+          },
+          "ioThreads": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmIoThreads"
+              }
+            ]
+          },
+          "memoryGiB": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "serialLog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vcpus": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "vncListen": {
+            "type": "string"
+          },
+          "vncPort": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "DiskFormat": {
+        "type": "string",
+        "enum": [
+          "raw",
+          "qcow2"
+        ]
+      },
+      "GraphicsMode": {
+        "type": "string",
+        "enum": [
+          "none",
+          "vnc"
+        ]
+      },
+      "HealthStatus": {
+        "type": "object",
+        "required": [
+          "ok",
+          "libvirtUri",
+          "version"
+        ],
+        "properties": {
+          "libvirtUri": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateVmRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "disks"
+        ],
+        "properties": {
+          "boot": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "cdrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cpu": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "disks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "graphics": {
+            "$ref": "#/components/schemas/GraphicsMode"
+          },
+          "ioThreads": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmIoThreads"
+              }
+            ]
+          },
+          "machine": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "memory": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "memoryGiB": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "serialLog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vcpus": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "vncListen": {
+            "type": "string"
+          },
+          "vncPort": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "VmDiskBus": {
+        "type": "string",
+        "enum": [
+          "virtio-blk",
+          "virtio-scsi"
+        ]
+      },
+      "VmDiskCache": {
+        "type": "string",
+        "enum": [
+          "default",
+          "none",
+          "writethrough",
+          "writeback",
+          "directsync",
+          "unsafe"
+        ]
+      },
+      "VmDiskIoConfig": {
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/VmDiskIoMode"
+          }
+        },
+        "additionalProperties": false
+      },
+      "VmDiskIoMode": {
+        "type": "string",
+        "enum": [
+          "threads",
+          "native",
+          "io_uring"
+        ]
+      },
+      "VmDiskType": {
+        "type": "string",
+        "enum": [
+          "file",
+          "block"
+        ]
+      },
+      "VmIoThreads": {
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "queues": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "VmMetrics": {
+        "type": "object",
+        "required": [
+          "cpuTimeNs",
+          "memoryUsedMib",
+          "memoryTotalMib",
+          "txBytes",
+          "rxBytes",
+          "sampledAtMs"
+        ],
+        "properties": {
+          "cpuTimeNs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "memoryTotalMib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "memoryUsedMib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "rxBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "sampledAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "txBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "VmSummary": {
+        "type": "object",
+        "required": [
+          "name",
+          "state",
+          "vnc",
+          "graphics"
+        ],
+        "properties": {
+          "boot": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "cdrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "disks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/VmSummaryDisk"
+            }
+          },
+          "graphics": {
+            "type": "string"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ioThreads": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmIoThreads"
+              }
+            ]
+          },
+          "memoryMib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "metrics": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmMetrics"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "network": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serialLog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "vcpus": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "vnc": {
+            "type": "boolean"
+          },
+          "vncEndpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vncListen": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vncPort": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "VmSummaryDisk": {
+        "type": "object",
+        "required": [
+          "type",
+          "path",
+          "format",
+          "target",
+          "bus"
+        ],
+        "properties": {
+          "bus": {
+            "$ref": "#/components/schemas/VmDiskBus"
+          },
+          "cache": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmDiskCache"
+              }
+            ]
+          },
+          "format": {
+            "$ref": "#/components/schemas/DiskFormat"
+          },
+          "io": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmDiskIoConfig"
+              }
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/VmDiskType"
+          }
+        }
+      },
+      "VncTicketResponse": {
+        "type": "object",
+        "required": [
+          "ticket",
+          "expiresInSeconds"
+        ],
+        "properties": {
+          "expiresInSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "ticket": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}

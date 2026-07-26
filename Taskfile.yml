@@ -34,6 +34,11 @@ tasks:
       - cargo build
       - pnpm -C web build
 
+  openapi:generate:
+    desc: Generate the versioned OpenAPI document
+    cmds:
+      - cargo run --quiet --example export-openapi -- openapi/qtr-v1.json
+
   build:
     desc: Build the qtr release binary
     cmds:

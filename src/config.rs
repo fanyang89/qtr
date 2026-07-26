@@ -44,6 +44,10 @@ pub struct WebArgs {
     /// Directory containing the built Web UI assets.
     #[arg(long, default_value = "web/dist")]
     pub web_dir: PathBuf,
+
+    /// Bearer token required by the management API.
+    #[arg(long, env = "QTR_API_TOKEN", hide_env_values = true)]
+    pub api_token: String,
 }
 
 #[derive(Debug, Args)]
@@ -101,7 +105,9 @@ pub struct DiskOverlayArgs {
     pub backing_format: DiskFormat,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum, utoipa::ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DiskFormat {
     Raw,
@@ -756,7 +762,9 @@ pub struct VmCpArgs {
     pub parents: bool,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum, utoipa::ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum GraphicsMode {
     None,
