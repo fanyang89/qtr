@@ -37,13 +37,18 @@ use uuid::Uuid;
 use virt::error::clear_error_callback;
 
 use crate::config::GraphicsMode;
-use crate::{config::WebArgs, vm};
+use crate::{
+    config::WebArgs,
+    jobs::{FedoraInstallRequest, InstallJob, JobRoots, JobService, ManagedResource},
+    vm,
+};
 
 #[derive(Clone)]
 struct AppState {
     connect_uri: String,
     api_token: Arc<str>,
     vnc_tickets: Arc<Mutex<HashMap<String, VncTicket>>>,
+    jobs: Option<JobService>,
 }
 
 #[derive(utoipa::OpenApi)]
@@ -106,6 +111,8 @@ struct VncTicketResponse {
 #[derive(Debug)]
 enum AppError {
     Vm(vm::VmApiError),
+    BadRequest(anyhow::Error),
+    NotFound,
     Internal(anyhow::Error),
 }
 
@@ -117,6 +124,8 @@ impl AppError {
             Self::Vm(vm::VmApiError::InvalidRequest(_)) => StatusCode::BAD_REQUEST,
             Self::Vm(vm::VmApiError::NotFound(_)) => StatusCode::NOT_FOUND,
             Self::Vm(vm::VmApiError::Conflict(_)) => StatusCode::CONFLICT,
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::NotFound => StatusCode::NOT_FOUND,
             Self::Vm(vm::VmApiError::Internal(_)) | Self::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -126,6 +135,8 @@ impl AppError {
     fn error(&self) -> &dyn std::fmt::Debug {
         match self {
             Self::Vm(error) => error,
+            Self::BadRequest(error) => error,
+            Self::NotFound => &"resource not found",
             Self::Internal(error) => error,
         }
     }
@@ -147,11 +158,16 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
         tracing::error!(error = ?self.error(), %status, "request failed");
-        let (title, detail) = match status {
-            StatusCode::BAD_REQUEST => ("Bad Request", "The request is invalid."),
-            StatusCode::NOT_FOUND => ("Not Found", "The VM was not found."),
-            StatusCode::CONFLICT => ("Conflict", "The VM state conflicts with the request."),
-            _ => (
+        let (title, detail) = match &self {
+            Self::Vm(vm::VmApiError::InvalidRequest(_)) | Self::BadRequest(_) => {
+                ("Bad Request", "The request is invalid.")
+            }
+            Self::Vm(vm::VmApiError::NotFound(_)) => ("Not Found", "The VM was not found."),
+            Self::NotFound => ("Not Found", "The resource was not found."),
+            Self::Vm(vm::VmApiError::Conflict(_)) => {
+                ("Conflict", "The VM state conflicts with the request.")
+            }
+            Self::Vm(vm::VmApiError::Internal(_)) | Self::Internal(_) => (
                 "Internal Server Error",
                 "The server could not complete the request.",
             ),
@@ -309,7 +325,14 @@ async fn run_async(args: WebArgs) -> Result<()> {
         eprintln!("[qtr] WARNING: {warning}");
         tracing::warn!(warning);
     }
-    let app = app(args.connect_uri, args.web_dir, args.api_token);
+    let jobs = JobService::start(JobRoots {
+        state: args.state_dir,
+        images: args.image_root,
+        media: args.media_root,
+        logs: args.log_root,
+        connect_uri: args.connect_uri.clone(),
+    })?;
+    let app = app(args.connect_uri, args.web_dir, args.api_token, Some(jobs));
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind web server at {listen}"))?;
@@ -321,11 +344,17 @@ async fn run_async(args: WebArgs) -> Result<()> {
         .context("web server failed")
 }
 
-fn app(connect_uri: String, web_dir: PathBuf, api_token: String) -> Router {
+fn app(
+    connect_uri: String,
+    web_dir: PathBuf,
+    api_token: String,
+    jobs: Option<JobService>,
+) -> Router {
     let state = AppState {
         connect_uri,
         api_token: api_token.into(),
         vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
+        jobs,
     };
     let index_html = web_dir.join("index.html");
     let (api_router, openapi) = documented_api(&state);
@@ -352,6 +381,11 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(shutdown_vm))
         .routes(routes!(destroy_vm))
         .routes(routes!(create_vnc_ticket))
+        .routes(routes!(list_install_jobs, create_install_job))
+        .routes(routes!(get_install_job))
+        .routes(routes!(cancel_install_job))
+        .routes(routes!(list_images))
+        .routes(routes!(list_media))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer_token,
@@ -377,6 +411,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         connect_uri: String::new(),
         api_token: Arc::from("unused"),
         vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
+        jobs: None,
     };
     documented_api(&state).1
 }
@@ -575,6 +610,142 @@ async fn undefine_vm(
     let connect_uri = state.connect_uri;
     run_libvirt(move || vm::undefine_by_name(&connect_uri, &name)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    get,
+    path = "/install-jobs",
+    tag = "install jobs",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = OK, body = [InstallJob]),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn list_install_jobs(State(state): State<AppState>) -> AppResult<Json<Vec<InstallJob>>> {
+    let jobs = job_service(&state)?;
+    Ok(Json(run_job_store(move || jobs.list()).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/install-jobs",
+    tag = "install jobs",
+    security(("bearerAuth" = [])),
+    request_body = FedoraInstallRequest,
+    responses(
+        (status = ACCEPTED, body = InstallJob),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn create_install_job(
+    State(state): State<AppState>,
+    request: std::result::Result<Json<FedoraInstallRequest>, JsonRejection>,
+) -> AppResult<(StatusCode, Json<InstallJob>)> {
+    let request = api_json(request)?;
+    request.validate().map_err(AppError::BadRequest)?;
+    let jobs = job_service(&state)?;
+    let job = run_job_store(move || jobs.create(request)).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/install-jobs/{id}",
+    tag = "install jobs",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Job ID")),
+    responses(
+        (status = OK, body = InstallJob),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn get_install_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<InstallJob>> {
+    let jobs = job_service(&state)?;
+    let job = run_job_store(move || jobs.get(&id))
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(job))
+}
+
+#[utoipa::path(
+    post,
+    path = "/install-jobs/{id}/cancel",
+    tag = "install jobs",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Job ID")),
+    responses(
+        (status = ACCEPTED, body = InstallJob),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn cancel_install_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<(StatusCode, Json<InstallJob>)> {
+    let jobs = job_service(&state)?;
+    let job = run_job_store(move || jobs.cancel(&id))
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/images",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = OK, body = [ManagedResource]),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<ManagedResource>>> {
+    let jobs = job_service(&state)?;
+    Ok(Json(run_job_store(move || jobs.list_images()).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/media",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = OK, body = [ManagedResource]),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn list_media(State(state): State<AppState>) -> AppResult<Json<Vec<ManagedResource>>> {
+    let jobs = job_service(&state)?;
+    Ok(Json(run_job_store(move || jobs.list_media()).await?))
+}
+
+fn job_service(state: &AppState) -> AppResult<JobService> {
+    state
+        .jobs
+        .clone()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("install job service is not configured")))
+}
+
+async fn run_job_store<T, F>(task: F) -> AppResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| {
+            AppError::Internal(anyhow::Error::new(error).context("job store task panicked"))
+        })?
+        .map_err(AppError::Internal)
 }
 
 const VNC_TICKET_LIFETIME: Duration = Duration::from_secs(30);
@@ -907,6 +1078,7 @@ mod tests {
             connect_uri: "test:///default".to_string(),
             api_token: Arc::from("test-token"),
             vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
+            jobs: None,
         }
     }
 
@@ -1042,6 +1214,7 @@ mod tests {
             "test:///default".to_string(),
             PathBuf::from("web/dist"),
             "test-token".to_string(),
+            None,
         );
         let response = app
             .oneshot(
@@ -1059,6 +1232,15 @@ mod tests {
         let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(document["openapi"], "3.1.0");
         assert!(document["paths"]["/api/v1/vms"].is_object());
+        assert!(document["paths"]["/api/v1/install-jobs"].is_object());
+        assert!(document["paths"]["/api/v1/images"].is_object());
+        assert!(document["paths"]["/api/v1/media"].is_object());
+        let install_properties =
+            &document["components"]["schemas"]["FedoraInstallRequest"]["properties"];
+        assert!(install_properties["mediaId"].is_object());
+        assert!(install_properties["imageId"].is_object());
+        assert!(install_properties["iso"].is_null());
+        assert!(install_properties["disk"].is_null());
         assert_eq!(
             document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
             "bearer"
@@ -1071,6 +1253,7 @@ mod tests {
             "test:///default".to_string(),
             PathBuf::from("web/dist"),
             "test-token".to_string(),
+            None,
         );
 
         let response = app
@@ -1089,6 +1272,71 @@ mod tests {
             response.headers()[header::CONTENT_TYPE],
             "application/problem+json"
         );
+    }
+
+    #[tokio::test]
+    async fn install_api_uses_managed_resource_ids() {
+        let directory = std::env::temp_dir().join(format!("qtr-web-job-test-{}", Uuid::new_v4()));
+        let media = directory.join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("Fedora.iso"), b"iso").unwrap();
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media,
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        let app = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/media")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resources: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resources[0]["id"], "Fedora.iso");
+
+        let request = serde_json::json!({
+            "name": "fedora-test",
+            "mediaId": "../Fedora.iso",
+            "imageId": "fedora-test.qcow2",
+            "sshAuthorizedKey": "ssh-ed25519 AAAA test"
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/install-jobs")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+
+        drop(app);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

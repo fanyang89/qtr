@@ -5,6 +5,7 @@ pub mod domain_xml;
 pub mod guest_agent;
 pub mod host;
 pub mod installer;
+pub mod jobs;
 pub mod network;
 pub mod storage;
 pub mod vm;

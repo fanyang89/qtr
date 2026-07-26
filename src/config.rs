@@ -48,6 +48,22 @@ pub struct WebArgs {
     /// Bearer token required by the management API.
     #[arg(long, env = "QTR_API_TOKEN", hide_env_values = true)]
     pub api_token: String,
+
+    /// Directory containing server state and VM manifests.
+    #[arg(long, default_value = ".qtr/server")]
+    pub state_dir: PathBuf,
+
+    /// Directory containing managed VM disk images.
+    #[arg(long, default_value = ".tmp/disks")]
+    pub image_root: PathBuf,
+
+    /// Directory containing installation media.
+    #[arg(long, default_value = ".tmp/iso")]
+    pub media_root: PathBuf,
+
+    /// Directory containing installation and serial logs.
+    #[arg(long, default_value = ".tmp/logs")]
+    pub log_root: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -422,6 +438,12 @@ pub struct VmInstallFedoraArgs {
     /// Final qtr VM YAML path. The path must not exist.
     #[arg(short, long, value_name = "FILE")]
     pub output: PathBuf,
+    /// Serial console log path. Defaults beside the output manifest.
+    #[arg(long, value_name = "FILE")]
+    pub serial_log: Option<PathBuf>,
+    /// virt-install log path. Defaults beside the output manifest.
+    #[arg(long, value_name = "FILE")]
+    pub install_log: Option<PathBuf>,
     /// OpenSSH public key installed for the qtr user.
     #[arg(long, value_name = "FILE")]
     pub ssh_key: PathBuf,

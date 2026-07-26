@@ -4,6 +4,10 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -27,7 +31,50 @@ use crate::{
 
 pub fn run(args: VmInstallArgs) -> Result<()> {
     match args.command {
-        VmInstallCommand::Fedora(args) => install_fedora(args),
+        VmInstallCommand::Fedora(args) => {
+            install_fedora_with_control(args, &InstallControl::default())
+        }
+    }
+}
+
+type PhaseReporter = dyn Fn(&'static str) + Send + Sync;
+
+#[derive(Clone)]
+pub struct InstallControl {
+    cancelled: Arc<AtomicBool>,
+    report_phase: Arc<PhaseReporter>,
+}
+
+impl Default for InstallControl {
+    fn default() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            report_phase: Arc::new(|_| {}),
+        }
+    }
+}
+
+impl InstallControl {
+    pub fn new(
+        cancelled: Arc<AtomicBool>,
+        report_phase: impl Fn(&'static str) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            cancelled,
+            report_phase: Arc::new(report_phase),
+        }
+    }
+
+    fn phase(&self, phase: &'static str) -> Result<()> {
+        (self.report_phase)(phase);
+        self.check()
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            bail!("installation cancelled");
+        }
+        Ok(())
     }
 }
 
@@ -60,16 +107,22 @@ struct FileIdentity {
     inode: u64,
 }
 
-fn install_fedora(args: VmInstallFedoraArgs) -> Result<()> {
+pub fn install_fedora_with_control(
+    args: VmInstallFedoraArgs,
+    control: &InstallControl,
+) -> Result<()> {
+    control.phase("planning")?;
     let plan = build_plan(args)?;
+    control.phase("preflight")?;
     preflight(&plan)?;
+    control.check()?;
     if plan.args.dry_run {
         print_plan(&plan);
         return Ok(());
     }
 
     let mut owned = OwnedResources::default();
-    let result = execute_install(&plan, &mut owned);
+    let result = execute_install(&plan, &mut owned, control);
     if let Err(error) = result {
         if !owned.committed && !plan.args.keep_failed {
             if let Err(cleanup_error) = rollback(&plan, &mut owned) {
@@ -128,8 +181,20 @@ fn build_plan(mut args: VmInstallFedoraArgs) -> Result<InstallPlan> {
     let hostname = args.hostname.clone().unwrap_or_else(|| args.name.clone());
     validate_hostname(&hostname)?;
     let disk_size_bytes = vm::parse_disk_size_bytes(&args.disk_size)?;
-    let serial_log = output.with_extension("serial.log");
-    let install_log = output.with_extension("install.log");
+    let serial_log = args
+        .serial_log
+        .clone()
+        .map(|path| canonical_destination(&cwd, &path, "serial log"))
+        .transpose()?
+        .unwrap_or_else(|| output.with_extension("serial.log"));
+    let install_log = args
+        .install_log
+        .clone()
+        .map(|path| canonical_destination(&cwd, &path, "install log"))
+        .transpose()?
+        .unwrap_or_else(|| output.with_extension("install.log"));
+    args.serial_log = Some(serial_log.clone());
+    args.install_log = Some(install_log.clone());
     ensure_distinct_paths(&[&disk, &output, &serial_log, &install_log])?;
     let manifest = fedora_manifest(&args, &disk, &serial_log);
     let manifest_yaml = vm::serialize_manifest_yaml(&manifest)?;
@@ -195,7 +260,12 @@ fn preflight(plan: &InstallPlan) -> Result<()> {
     Ok(())
 }
 
-fn execute_install(plan: &InstallPlan, owned: &mut OwnedResources) -> Result<()> {
+fn execute_install(
+    plan: &InstallPlan,
+    owned: &mut OwnedResources,
+    control: &InstallControl,
+) -> Result<()> {
+    control.phase("workspace")?;
     let work_dir = plan
         .output
         .parent()
@@ -209,7 +279,9 @@ fn execute_install(plan: &InstallPlan, owned: &mut OwnedResources) -> Result<()>
     write_private_file(&kickstart_path, plan.kickstart.as_bytes())?;
     validate_kickstart(&kickstart_path)?;
 
+    control.phase("disk")?;
     owned.disk_identity = Some(create_disk_atomic(&plan.disk, plan.disk_size_bytes)?);
+    control.phase("domain")?;
     let domain_uuid = Uuid::new_v4().to_string();
     owned.domain_uuid = Some(domain_uuid.clone());
     vm::define_new_by_manifest(&plan.args.connect_uri, plan.manifest.clone(), &domain_uuid)
@@ -219,7 +291,9 @@ fn execute_install(plan: &InstallPlan, owned: &mut OwnedResources) -> Result<()>
         "[qtr] installing Fedora; log: {}",
         plan.install_log.display()
     );
-    run_virt_install(plan, &kickstart_path)?;
+    control.phase("installing")?;
+    run_virt_install(plan, &kickstart_path, control)?;
+    control.phase("committing")?;
     ensure_domain_inactive(&plan.args.connect_uri, &plan.args.name)?;
     vm::remove_cdrom_by_media_path(&plan.args.connect_uri, &plan.args.name, &plan.iso)?;
     vm::apply_by_manifest(&plan.args.connect_uri, plan.manifest.clone())
@@ -227,8 +301,11 @@ fn execute_install(plan: &InstallPlan, owned: &mut OwnedResources) -> Result<()>
     owned.committed = true;
     write_atomic(&plan.output, plan.manifest_yaml.as_bytes())?;
 
+    control.phase("starting")?;
     vm::start_by_name(&plan.args.connect_uri, &plan.args.name).map_err(anyhow::Error::new)?;
+    control.phase("verifying")?;
     verify_installed_guest(plan)?;
+    control.phase("cleanup")?;
     if work_dir.exists() {
         fs::remove_dir_all(&work_dir)
             .with_context(|| format!("failed to remove work directory {}", work_dir.display()))?;
@@ -239,7 +316,11 @@ fn execute_install(plan: &InstallPlan, owned: &mut OwnedResources) -> Result<()>
     Ok(())
 }
 
-fn run_virt_install(plan: &InstallPlan, kickstart_path: &Path) -> Result<()> {
+fn run_virt_install(
+    plan: &InstallPlan,
+    kickstart_path: &Path,
+    control: &InstallControl,
+) -> Result<()> {
     let log = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -260,6 +341,11 @@ fn run_virt_install(plan: &InstallPlan, kickstart_path: &Path) -> Result<()> {
         .context("failed to start virt-install")?;
     let deadline = Instant::now() + Duration::from_secs(plan.args.timeout_secs);
     loop {
+        if let Err(error) = control.check() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         if let Some(status) = child
             .try_wait()
             .context("failed to wait for virt-install")?
@@ -843,6 +929,16 @@ mod tests {
     }
 
     #[test]
+    fn install_control_reports_cancellation() {
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let control = InstallControl::new(cancelled, |_| {});
+        assert_eq!(
+            control.check().unwrap_err().to_string(),
+            "installation cancelled"
+        );
+    }
+
+    #[test]
     fn final_manifest_apply_preserves_domain_uuid() {
         let dir = std::env::temp_dir().join(format!("qtr-installer-test-{}", Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
@@ -855,6 +951,8 @@ mod tests {
             disk: disk.clone(),
             disk_size: "1GiB".to_string(),
             output: dir.join("vm.yaml"),
+            serial_log: None,
+            install_log: None,
             ssh_key: dir.join("id.pub"),
             memory_mib: 1024,
             vcpus: 1,
