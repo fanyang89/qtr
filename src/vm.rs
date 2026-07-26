@@ -35,7 +35,7 @@ use crate::{
         VmLaunchDomainSpec, VmLaunchInterfaceSpec, VmLaunchIoThreadsSpec,
         build_vm_launch_domain_xml, parse_boot_devices,
     },
-    guest_agent, vm_reconcile,
+    guest_agent, installer, vm_reconcile,
 };
 
 pub use crate::vm_model::{
@@ -50,6 +50,7 @@ pub fn run(args: VmArgs) -> Result<()> {
     clear_error_callback();
 
     match args.command {
+        VmCommand::Install(args) => installer::run(args),
         VmCommand::Capabilities(args) => capabilities(args),
         VmCommand::Init(args) => init(args),
         VmCommand::Apply(args) => apply(args),
@@ -4307,7 +4308,7 @@ fn find_disk_for_resize(xml: &str, selector: &str) -> VmApiResult<VmDisk> {
         })
 }
 
-fn parse_disk_size_bytes(input: &str) -> Result<u64> {
+pub(crate) fn parse_disk_size_bytes(input: &str) -> Result<u64> {
     let input = input.trim();
     if input.is_empty() {
         bail!("disk size must not be empty");
@@ -4532,6 +4533,37 @@ pub fn create_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiR
         .map_err(VmApiError::Internal)?;
 
     domain_summary(&domain).map_err(VmApiError::Internal)
+}
+
+pub(crate) fn define_new_by_manifest(
+    connect_uri: &str,
+    mut manifest: VmManifest,
+    uuid: &str,
+) -> VmApiResult<()> {
+    let base_dir = env::current_dir()
+        .context("failed to determine current directory")
+        .map_err(VmApiError::Internal)?;
+    normalize_manifest_paths(&mut manifest, &base_dir).map_err(VmApiError::InvalidRequest)?;
+    validate_manifest(&manifest).map_err(VmApiError::InvalidRequest)?;
+    validate_new_vm_disks(&manifest).map_err(VmApiError::InvalidRequest)?;
+    let boot = manifest_boot_order(&manifest);
+    let boot_devices = parse_boot_devices(&boot).map_err(VmApiError::InvalidRequest)?;
+    let mut xml =
+        build_manifest_domain_xml(&manifest, &boot_devices).map_err(VmApiError::InvalidRequest)?;
+    let name_end = xml
+        .find("</name>")
+        .map(|index| index + "</name>".len())
+        .ok_or_else(|| {
+            VmApiError::Internal(anyhow::anyhow!("generated domain XML is missing name"))
+        })?;
+    xml.insert_str(name_end, &format!("\n  <uuid>{uuid}</uuid>"));
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    ensure_domain_absent_api(&conn, &manifest.name)?;
+    prepare_serial_log_path(manifest.serial_log.as_deref()).map_err(VmApiError::Internal)?;
+    Domain::define_xml_flags(&conn, &xml, sys::VIR_DOMAIN_DEFINE_VALIDATE)
+        .with_context(|| format!("failed to define domain {}", manifest.name))
+        .map_err(VmApiError::Internal)?;
+    Ok(())
 }
 
 pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiResult<VmSummary> {

@@ -323,6 +323,9 @@ pub struct VmArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum VmCommand {
+    #[command(about = "Install an operating system into a new VM")]
+    Install(VmInstallArgs),
+
     #[command(about = "Print VM capabilities reported by libvirt")]
     Capabilities(VmCapabilitiesArgs),
 
@@ -382,6 +385,76 @@ pub enum VmCommand {
 
     #[command(about = "Copy one file between host and guest")]
     Cp(VmCpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VmInstallArgs {
+    #[command(subcommand)]
+    pub command: VmInstallCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum VmInstallCommand {
+    #[command(about = "Install Fedora Server from a local DVD ISO")]
+    Fedora(VmInstallFedoraArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VmInstallFedoraArgs {
+    /// New libvirt domain name.
+    #[arg(long)]
+    pub name: String,
+    /// Fedora Server DVD x86_64 ISO.
+    #[arg(long, value_name = "FILE")]
+    pub iso: PathBuf,
+    /// New qcow2 root disk path. The path must not exist.
+    #[arg(long, value_name = "FILE")]
+    pub disk: PathBuf,
+    /// New root disk capacity.
+    #[arg(long, default_value = "40GiB")]
+    pub disk_size: String,
+    /// Final qtr VM YAML path. The path must not exist.
+    #[arg(short, long, value_name = "FILE")]
+    pub output: PathBuf,
+    /// OpenSSH public key installed for the qtr user.
+    #[arg(long, value_name = "FILE")]
+    pub ssh_key: PathBuf,
+    /// Guest memory size in MiB.
+    #[arg(long, default_value_t = 4096)]
+    pub memory_mib: u64,
+    /// Number of guest vCPUs.
+    #[arg(long, default_value_t = 2)]
+    pub vcpus: u32,
+    /// Libvirt network attached to the VM.
+    #[arg(long, default_value = "default")]
+    pub network: String,
+    /// Installed system hostname. Defaults to the VM name.
+    #[arg(long)]
+    pub hostname: Option<String>,
+    /// Fedora repository mirror configured in the installed guest.
+    #[arg(long, value_enum, default_value_t = FedoraMirror::Official)]
+    pub mirror: FedoraMirror,
+    /// Maximum seconds for the unattended installation.
+    #[arg(long, default_value_t = 7200)]
+    pub timeout_secs: u64,
+    /// Maximum seconds to wait for post-install Guest Agent verification.
+    #[arg(long, default_value_t = 300)]
+    pub verify_timeout_secs: u64,
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+    /// Print the installation plan without creating resources.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Keep the domain, disk and private work directory after failure.
+    #[arg(long)]
+    pub keep_failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum FedoraMirror {
+    Official,
+    Tuna,
 }
 
 #[derive(Debug, Args)]

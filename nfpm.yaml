@@ -24,11 +24,17 @@ depends:
   - libvirt-daemon-driver-qemu
   - libvirt-daemon-kvm
   - libvirt-libs
+  - libosinfo
+  - osinfo-db
+  - openssh-clients
   - polkit
+  - pykickstart
   - qemu-img
   - qemu-kvm
   - shadow-utils
   - systemd
+  - util-linux-core
+  - virt-install
 
 rpm:
   group: Applications/System
