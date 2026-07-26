@@ -78,11 +78,11 @@ function formatCpuUsage(vm: VmSummary, previous?: VmMetricSnapshot): string {
 }
 
 function formatMemoryUsage(metrics: VmMetricSnapshot): string {
-  if (metrics.memoryTotalMiB <= 0) {
+  if (metrics.memoryTotalMib <= 0) {
     return '-'
   }
 
-  const percent = metrics.memoryUsedMiB / metrics.memoryTotalMiB
+  const percent = metrics.memoryUsedMib / metrics.memoryTotalMib
   return percentFormatter.format(percent)
 }
 

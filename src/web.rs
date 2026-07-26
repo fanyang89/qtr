@@ -381,6 +381,7 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(shutdown_vm))
         .routes(routes!(destroy_vm))
         .routes(routes!(create_vnc_ticket))
+        .routes(routes!(session))
         .routes(routes!(list_install_jobs, create_install_job))
         .routes(routes!(get_install_job))
         .routes(routes!(cancel_install_job))
@@ -433,6 +434,20 @@ async fn health(State(state): State<AppState>) -> Json<HealthStatus> {
         libvirt_uri: state.connect_uri,
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+#[utoipa::path(
+    get,
+    path = "/session",
+    tag = "system",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = NO_CONTENT),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn session() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 #[utoipa::path(
@@ -1210,13 +1225,13 @@ mod tests {
 
     #[tokio::test]
     async fn openapi_document_describes_versioned_bearer_api() {
-        let app = app(
+        let router = app(
             "test:///default".to_string(),
             PathBuf::from("web/dist"),
             "test-token".to_string(),
             None,
         );
-        let response = app
+        let response = router
             .oneshot(
                 Request::get("/api/v1/openapi.json")
                     .body(Body::empty())
@@ -1235,6 +1250,7 @@ mod tests {
         assert!(document["paths"]["/api/v1/install-jobs"].is_object());
         assert!(document["paths"]["/api/v1/images"].is_object());
         assert!(document["paths"]["/api/v1/media"].is_object());
+        assert!(document["paths"]["/api/v1/session"].is_object());
         let install_properties =
             &document["components"]["schemas"]["FedoraInstallRequest"]["properties"];
         assert!(install_properties["mediaId"].is_object());
@@ -1249,21 +1265,22 @@ mod tests {
 
     #[tokio::test]
     async fn app_exposes_only_the_versioned_management_api() {
-        let app = app(
+        let router = app(
             "test:///default".to_string(),
             PathBuf::from("web/dist"),
             "test-token".to_string(),
             None,
         );
 
-        let response = app
+        let response = router
             .clone()
             .oneshot(Request::get("/api/v1/vms").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        let response = app
+        let response = router
+            .clone()
             .oneshot(Request::get("/api/vms").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -1272,6 +1289,17 @@ mod tests {
             response.headers()[header::CONTENT_TYPE],
             "application/problem+json"
         );
+
+        let response = router
+            .oneshot(
+                Request::get("/api/v1/session")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

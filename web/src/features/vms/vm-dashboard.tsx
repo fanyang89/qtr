@@ -296,7 +296,7 @@ function VmRow({
       </TableCell>
       <TableCell>{vm.vcpus ?? '-'}</TableCell>
       <TableCell>
-        {vm.memoryMiB ? `${Math.round(vm.memoryMiB / 1024)} GiB` : '-'}
+        {vm.memoryMib ? `${Math.round(vm.memoryMib / 1024)} GiB` : '-'}
       </TableCell>
       <TableCell>{metrics.cpu}</TableCell>
       <TableCell>{metrics.memory}</TableCell>

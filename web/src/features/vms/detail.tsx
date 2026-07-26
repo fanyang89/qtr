@@ -81,7 +81,7 @@ export function VmDetail({ name }: { name: string }) {
           <InfoCard title='vCPUs' value={String(vm?.vcpus ?? '-')} icon={Cpu} />
           <InfoCard
             title='Memory'
-            value={vm?.memoryMiB ? `${vm.memoryMiB} MiB` : '-'}
+            value={vm?.memoryMib ? `${vm.memoryMib} MiB` : '-'}
             icon={MemoryStick}
           />
           <InfoCard title='Network' value={vm?.network ?? '-'} icon={Network} />

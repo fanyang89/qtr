@@ -328,6 +328,34 @@
         ]
       }
     },
+    "/api/v1/session": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "session",
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/vms": {
       "get": {
         "tags": [

@@ -167,7 +167,7 @@ function summaryToDefaultValues(vm: VmSummary): VmFormInput {
       : [{ type: 'file', path: '', format: 'qcow2', bus: 'virtio-blk' }],
     cdrom: vm.cdrom ?? '',
     boot: vm.boot?.join(',') ?? 'hd',
-    memoryGiB: vm.memoryMiB ? Math.round(vm.memoryMiB / 1024) : 4,
+    memoryGiB: vm.memoryMib ? Math.round(vm.memoryMib / 1024) : 4,
     vcpus: vm.vcpus ?? 2,
     network: vm.network ?? 'default',
     graphics: vm.graphics ?? 'vnc',

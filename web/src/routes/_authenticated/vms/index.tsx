@@ -1,7 +1,6 @@
-import { createFileRoute, redirect } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
+import { VmDashboard } from '@/features/vms/vm-dashboard'
 
 export const Route = createFileRoute('/_authenticated/vms/')({
-  beforeLoad: () => {
-    throw redirect({ to: '/' })
-  },
+  component: VmDashboard,
 })

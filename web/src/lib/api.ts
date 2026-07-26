@@ -15,8 +15,8 @@ export const vmStateSchema = z.enum([
 
 const vmMetricsSchema = z.object({
   cpuTimeNs: z.number(),
-  memoryUsedMiB: z.number(),
-  memoryTotalMiB: z.number(),
+  memoryUsedMib: z.number(),
+  memoryTotalMib: z.number(),
   txBytes: z.number(),
   rxBytes: z.number(),
   sampledAtMs: z.number(),
@@ -50,14 +50,14 @@ const vmDiskSchema = z.object({
   io: vmDiskIoSchema.optional(),
 })
 
-const vmSummarySchema = z.object({
+export const vmSummarySchema = z.object({
   name: z.string(),
   state: vmStateSchema,
   id: z.string().nullable(),
   vnc: z.boolean(),
   vncEndpoint: z.string().nullish(),
   serialLog: z.string().nullish(),
-  memoryMiB: z.number().nullish(),
+  memoryMib: z.number().nullish(),
   vcpus: z.number().nullish(),
   ioThreads: vmIoThreadsSchema.nullish(),
   network: z.string().nullish(),
@@ -129,6 +129,18 @@ apiClient.interceptors.request.use((config) => {
   return config
 })
 
+apiClient.interceptors.response.use(undefined, (error: unknown) => {
+  if (
+    axios.isAxiosError(error) &&
+    error.response?.status === 401 &&
+    window.location.pathname !== '/access'
+  ) {
+    setApiToken('')
+    window.location.assign('/access')
+  }
+  return Promise.reject(error)
+})
+
 async function parseResponse<T>(
   request: Promise<AxiosResponse<unknown>>,
   schema: z.ZodType<T>
@@ -139,6 +151,10 @@ async function parseResponse<T>(
 
 export async function getHealth(): Promise<HealthStatus> {
   return parseResponse(apiClient.get('/health'), healthStatusSchema)
+}
+
+export async function validateSession(): Promise<void> {
+  await apiClient.get('/session')
 }
 
 export async function getVms(): Promise<VmSummary[]> {
