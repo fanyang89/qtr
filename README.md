@@ -212,6 +212,8 @@ Version 3 supports multiple `interfaces`. Each NIC has a stable ID, `network` or
 
 Interfaces also support a single `vlan` tag, `mtu`, and `link: up|down`. VLAN configuration requires `type: bridge` and a VLAN ID from 1 through 4094. Omit these fields to preserve existing XML or set any field to `null` to remove its element.
 
+Use `type: direct` to attach through macvtap, with the host interface in `source` and optional `mode: vepa|bridge|private|passthrough`. VLAN tagging on direct interfaces requires `mode: passthrough`. Omit `mode` to preserve an existing source mode or set it to `null` to remove the XML attribute.
+
 Apply it:
 
 ```bash

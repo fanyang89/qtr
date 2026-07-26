@@ -41,9 +41,9 @@ use crate::{
 pub use crate::vm_model::{
     VmCdrom, VmCdromEntry, VmCpu, VmCpuMode, VmCpuTopology, VmDisk, VmDiskBus, VmDiskCache,
     VmDiskDetectZeroes, VmDiskDiscard, VmDiskEntry, VmDiskIoConfig, VmDiskIoMode, VmDiskIoTune,
-    VmDiskIoTuneConfig, VmDiskSerial, VmDiskType, VmInterface, VmInterfaceEntry,
-    VmInterfaceLinkState, VmInterfaceType, VmIoThreads, VmMachine, VmManifest, VmMemory,
-    VmOptionalValue,
+    VmDiskIoTuneConfig, VmDiskSerial, VmDiskType, VmInterface, VmInterfaceDirectMode,
+    VmInterfaceEntry, VmInterfaceLinkState, VmInterfaceType, VmIoThreads, VmMachine, VmManifest,
+    VmMemory, VmOptionalValue,
 };
 
 pub fn run(args: VmArgs) -> Result<()> {
@@ -578,6 +578,7 @@ fn init(args: VmInitArgs) -> Result<()> {
             source: args.network,
             model: "virtio".to_string(),
             mac: None,
+            mode: VmOptionalValue::default(),
             vlan: VmOptionalValue::default(),
             mtu: VmOptionalValue::default(),
             link: VmOptionalValue::default(),
@@ -736,6 +737,7 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
                 .unwrap_or_else(|| "default".to_string()),
             model: "virtio".to_string(),
             mac: None,
+            mode: VmOptionalValue::default(),
             vlan: VmOptionalValue::default(),
             mtu: VmOptionalValue::default(),
             link: VmOptionalValue::default(),
@@ -772,6 +774,11 @@ fn launch_interface_spec(interface: &VmInterface) -> VmLaunchInterfaceSpec<'_> {
         interface_type: interface.interface_type.as_xml(),
         source_attribute: interface.interface_type.source_attribute(),
         source: &interface.source,
+        source_mode: interface
+            .mode
+            .as_ref()
+            .copied()
+            .map(VmInterfaceDirectMode::as_xml),
         model: &interface.model,
         mac: interface.mac.as_deref(),
         vlan: interface.vlan.as_ref().copied(),
@@ -1867,7 +1874,10 @@ fn patch_interfaces(
         .children()
         .filter(|child| {
             child.has_tag_name("interface")
-                && matches!(child.attribute("type"), Some("network" | "bridge"))
+                && matches!(
+                    child.attribute("type"),
+                    Some("network" | "bridge" | "direct")
+                )
         })
         .collect::<Vec<_>>();
     let parsed = interfaces_from_domain_xml(devices)?;
@@ -1937,10 +1947,13 @@ fn patch_interfaces(
                     xml,
                     node,
                     &desired_xml,
-                    interface.mac.is_some(),
-                    !interface.vlan.is_preserve(),
-                    !interface.mtu.is_preserve(),
-                    !interface.link.is_preserve(),
+                    vm_reconcile::InterfaceManagedFields {
+                        mac: interface.mac.is_some(),
+                        source_mode: !interface.mode.is_preserve(),
+                        vlan: !interface.vlan.is_preserve(),
+                        mtu: !interface.mtu.is_preserve(),
+                        link: !interface.link.is_preserve(),
+                    },
                 ),
             });
         } else {
@@ -2703,13 +2716,15 @@ fn interfaces_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmInterface>>
             let interface_type = match interface.attribute("type") {
                 Some("network") => VmInterfaceType::Network,
                 Some("bridge") => VmInterfaceType::Bridge,
+                Some("direct") => VmInterfaceType::Direct,
                 _ => return None,
             };
             Some((interface, interface_type))
         })
         .enumerate()
         .map(|(index, (interface, interface_type))| {
-            let source = required_child(interface, "source")?
+            let source_node = required_child(interface, "source")?;
+            let source = source_node
                 .attribute(interface_type.source_attribute())
                 .with_context(|| {
                     format!(
@@ -2719,6 +2734,18 @@ fn interfaces_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmInterface>>
                     )
                 })?
                 .to_string();
+            let mode = source_node
+                .attribute("mode")
+                .map(|mode| match mode {
+                    "vepa" => Ok(VmInterfaceDirectMode::Vepa),
+                    "bridge" => Ok(VmInterfaceDirectMode::Bridge),
+                    "private" => Ok(VmInterfaceDirectMode::Private),
+                    "passthrough" => Ok(VmInterfaceDirectMode::Passthrough),
+                    _ => bail!("unsupported domain XML direct interface mode {mode:?}"),
+                })
+                .transpose()?
+                .map(VmOptionalValue::configured)
+                .unwrap_or_default();
             let mac = optional_child(interface, "mac")
                 .and_then(|mac| mac.attribute("address"))
                 .map(str::to_string);
@@ -2780,6 +2807,7 @@ fn interfaces_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmInterface>>
                 source,
                 model,
                 mac,
+                mode,
                 vlan,
                 mtu,
                 link,
@@ -3171,12 +3199,21 @@ fn validate_interfaces(interfaces: &[VmInterfaceEntry]) -> Result<()> {
         if interface.model.trim().is_empty() {
             bail!("interface {} model must not be empty", interface.id);
         }
+        if !interface.mode.is_preserve() && interface.interface_type != VmInterfaceType::Direct {
+            bail!("interface {} mode requires type: direct", interface.id);
+        }
         if let Some(vlan) = interface.vlan.as_ref() {
             if !(1..=4094).contains(vlan) {
                 bail!("interface {} VLAN must be between 1 and 4094", interface.id);
             }
-            if interface.interface_type != VmInterfaceType::Bridge {
-                bail!("interface {} VLAN requires type: bridge", interface.id);
+            let supported = interface.interface_type == VmInterfaceType::Bridge
+                || (interface.interface_type == VmInterfaceType::Direct
+                    && interface.mode.as_ref() == Some(&VmInterfaceDirectMode::Passthrough));
+            if !supported {
+                bail!(
+                    "interface {} VLAN requires type: bridge or direct mode: passthrough",
+                    interface.id
+                );
             }
         }
         if interface.mtu.as_ref() == Some(&0) {
@@ -4864,6 +4901,7 @@ mod tests {
             interface_type: "network",
             source_attribute: "network",
             source: "default",
+            source_mode: None,
             model: "virtio",
             mac: None,
             vlan: None,
@@ -5185,6 +5223,7 @@ mod tests {
                 source: "br-main".to_string(),
                 model: "e1000e".to_string(),
                 mac: Some("52:54:00:12:34:56".to_string()),
+                mode: VmOptionalValue::default(),
                 vlan: VmOptionalValue::configured(100),
                 mtu: VmOptionalValue::configured(9000),
                 link: VmOptionalValue::configured(VmInterfaceLinkState::Down),
@@ -5195,6 +5234,18 @@ mod tests {
                 source: "storage-net".to_string(),
                 model: "virtio".to_string(),
                 mac: None,
+                mode: VmOptionalValue::default(),
+                vlan: VmOptionalValue::default(),
+                mtu: VmOptionalValue::default(),
+                link: VmOptionalValue::default(),
+            }),
+            VmInterfaceEntry::present(VmInterface {
+                id: "uplink".to_string(),
+                interface_type: VmInterfaceType::Direct,
+                source: "eno1".to_string(),
+                model: "virtio".to_string(),
+                mac: None,
+                mode: VmOptionalValue::configured(VmInterfaceDirectMode::Bridge),
                 vlan: VmOptionalValue::default(),
                 mtu: VmOptionalValue::default(),
                 link: VmOptionalValue::default(),
@@ -5216,6 +5267,8 @@ mod tests {
         assert!(patched.contains("<tag id='100'/>"));
         assert!(patched.contains("<mtu size='9000'/>"));
         assert!(patched.contains("<link state='down'/>"));
+        assert!(patched.contains("<interface type='direct'>"));
+        assert!(patched.contains("<source dev='eno1' mode='bridge'/>"));
 
         manifest.interfaces.as_mut().unwrap()[0]
             .as_present_mut()
@@ -5239,10 +5292,12 @@ mod tests {
         manifest.interfaces = Some(vec![
             VmInterfaceEntry::present(primary),
             VmInterfaceEntry::absent("storage"),
+            VmInterfaceEntry::absent("uplink"),
         ]);
         let removed = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd])
             .expect("interface tombstone should detach persistently");
         assert!(!removed.contains("ua-qtr-nic-storage"));
+        assert!(!removed.contains("ua-qtr-nic-uplink"));
         assert!(removed.contains("ua-qtr-nic-primary"));
         assert!(!removed.contains("<vlan>"), "{removed}");
         assert!(!removed.contains("<mtu "));
@@ -6023,12 +6078,18 @@ interfaces:
   vlan: 100
   mtu: 9000
   link: down
+- id: uplink
+  type: direct
+  source: eno1
+  model: virtio
+  mode: passthrough
+  vlan: 200
 - id: retired
   state: absent
 "#;
         let manifest = parse_manifest_yaml(yaml).expect("multiple interfaces should parse");
         let interfaces = manifest.interfaces.as_ref().unwrap();
-        assert_eq!(interfaces.len(), 3);
+        assert_eq!(interfaces.len(), 4);
         assert_eq!(
             interfaces[0].as_present().unwrap(),
             &VmInterface {
@@ -6037,18 +6098,25 @@ interfaces:
                 source: "default".to_string(),
                 model: "virtio".to_string(),
                 mac: Some("52:54:00:12:34:56".to_string()),
+                mode: VmOptionalValue::default(),
                 vlan: VmOptionalValue::default(),
                 mtu: VmOptionalValue::default(),
                 link: VmOptionalValue::default(),
             }
         );
-        assert_eq!(interfaces[2].absent_id(), Some("retired"));
+        assert_eq!(interfaces[3].absent_id(), Some("retired"));
         let storage = interfaces[1].as_present().unwrap();
         assert_eq!(storage.vlan, VmOptionalValue::configured(100));
         assert_eq!(storage.mtu, VmOptionalValue::configured(9000));
         assert_eq!(
             storage.link,
             VmOptionalValue::configured(VmInterfaceLinkState::Down)
+        );
+        let uplink = interfaces[2].as_present().unwrap();
+        assert_eq!(uplink.interface_type, VmInterfaceType::Direct);
+        assert_eq!(
+            uplink.mode,
+            VmOptionalValue::configured(VmInterfaceDirectMode::Passthrough)
         );
 
         let output = serialize_manifest_yaml(&manifest).unwrap();
@@ -6412,6 +6480,7 @@ disks:
             source: "default".to_string(),
             model: "virtio".to_string(),
             mac: Some("52:54:00:12:34:56".to_string()),
+            mode: VmOptionalValue::default(),
             vlan: VmOptionalValue::default(),
             mtu: VmOptionalValue::default(),
             link: VmOptionalValue::default(),
@@ -6440,12 +6509,20 @@ disks:
                 .to_string()
                 .contains("VLAN requires type: bridge")
         );
+        let interface = manifest.interfaces.as_mut().unwrap()[0]
+            .as_present_mut()
+            .unwrap();
+        interface.interface_type = VmInterfaceType::Direct;
+        interface.source = "eno1".to_string();
+        interface.mode = VmOptionalValue::configured(VmInterfaceDirectMode::Passthrough);
+        assert!(validate_manifest(&manifest).is_ok());
         manifest.interfaces.as_mut().unwrap()[0] = VmInterfaceEntry::present(VmInterface {
             id: "primary".to_string(),
             interface_type: VmInterfaceType::Network,
             source: "default".to_string(),
             model: "virtio".to_string(),
             mac: Some("not-a-mac".to_string()),
+            mode: VmOptionalValue::default(),
             vlan: VmOptionalValue::default(),
             mtu: VmOptionalValue::default(),
             link: VmOptionalValue::default(),

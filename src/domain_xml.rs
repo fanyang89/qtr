@@ -25,6 +25,7 @@ pub struct VmLaunchInterfaceSpec<'a> {
     pub interface_type: &'a str,
     pub source_attribute: &'a str,
     pub source: &'a str,
+    pub source_mode: Option<&'a str>,
     pub model: &'a str,
     pub mac: Option<&'a str>,
     pub vlan: Option<u16>,
@@ -224,8 +225,12 @@ pub fn build_interface_xml(spec: &VmLaunchInterfaceSpec<'_>) -> String {
         .link
         .map(|link| format!("      <link state='{}'/>\n", escape_xml(link)))
         .unwrap_or_default();
+    let source_mode = spec
+        .source_mode
+        .map(|mode| format!(" mode='{}'", escape_xml(mode)))
+        .unwrap_or_default();
     format!(
-        "    <interface type='{interface_type}'>\n{mac}      <source {source_attribute}='{source}'/>\n{vlan}      <model type='{model}'/>\n{link}{mtu}{alias}    </interface>\n",
+        "    <interface type='{interface_type}'>\n{mac}      <source {source_attribute}='{source}'{source_mode}/>\n{vlan}      <model type='{model}'/>\n{link}{mtu}{alias}    </interface>\n",
         interface_type = escape_xml(spec.interface_type),
         source_attribute = escape_xml(spec.source_attribute),
         source = escape_xml(spec.source),
@@ -661,6 +666,7 @@ mod tests {
             interface_type: "network",
             source_attribute: "network",
             source: "default",
+            source_mode: None,
             model: "virtio",
             mac: Some("52:54:00:12:34:56"),
             vlan: None,
@@ -672,11 +678,24 @@ mod tests {
             interface_type: "bridge",
             source_attribute: "bridge",
             source: "br-storage",
+            source_mode: None,
             model: "e1000e",
             mac: None,
             vlan: Some(100),
             mtu: Some(9000),
             link: Some("down"),
+        });
+        let direct = build_interface_xml(&VmLaunchInterfaceSpec {
+            id: Some("uplink"),
+            interface_type: "direct",
+            source_attribute: "dev",
+            source: "eno1",
+            source_mode: Some("bridge"),
+            model: "virtio",
+            mac: None,
+            vlan: None,
+            mtu: None,
+            link: None,
         });
 
         assert!(network.contains("<mac address='52:54:00:12:34:56'/>"));
@@ -688,6 +707,8 @@ mod tests {
         assert!(bridge.contains("<tag id='100'/>"));
         assert!(bridge.contains("<mtu size='9000'/>"));
         assert!(bridge.contains("<link state='down'/>"));
+        assert!(direct.contains("<interface type='direct'>"));
+        assert!(direct.contains("<source dev='eno1' mode='bridge'/>"));
     }
 
     #[test]

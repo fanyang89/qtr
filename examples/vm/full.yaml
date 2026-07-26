@@ -58,6 +58,11 @@ interfaces:
   vlan: 100
   mtu: 9000
   link: up
+- id: uplink
+  type: direct
+  source: eno1
+  model: virtio
+  mode: bridge
 graphics: vnc
 vncListen: 127.0.0.1
 serialLog: .tmp/logs/install-os.serial.log

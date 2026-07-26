@@ -59,6 +59,8 @@ pub struct VmInterface {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
     #[serde(default, skip_serializing_if = "VmOptionalValue::is_preserve")]
+    pub mode: VmOptionalValue<VmInterfaceDirectMode>,
+    #[serde(default, skip_serializing_if = "VmOptionalValue::is_preserve")]
     pub vlan: VmOptionalValue<u16>,
     #[serde(default, skip_serializing_if = "VmOptionalValue::is_preserve")]
     pub mtu: VmOptionalValue<u32>,
@@ -71,6 +73,27 @@ pub struct VmInterface {
 pub enum VmInterfaceType {
     Network,
     Bridge,
+    Direct,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmInterfaceDirectMode {
+    Vepa,
+    Bridge,
+    Private,
+    Passthrough,
+}
+
+impl VmInterfaceDirectMode {
+    pub(crate) fn as_xml(self) -> &'static str {
+        match self {
+            Self::Vepa => "vepa",
+            Self::Bridge => "bridge",
+            Self::Private => "private",
+            Self::Passthrough => "passthrough",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -94,6 +117,7 @@ impl VmInterfaceType {
         match self {
             Self::Network => "network",
             Self::Bridge => "bridge",
+            Self::Direct => "direct",
         }
     }
 
@@ -101,6 +125,7 @@ impl VmInterfaceType {
         match self {
             Self::Network => "network",
             Self::Bridge => "bridge",
+            Self::Direct => "dev",
         }
     }
 }

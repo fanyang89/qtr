@@ -1,13 +1,18 @@
 use roxmltree::{Document, Node};
 
+pub(crate) struct InterfaceManagedFields {
+    pub mac: bool,
+    pub source_mode: bool,
+    pub vlan: bool,
+    pub mtu: bool,
+    pub link: bool,
+}
+
 pub(crate) fn merge_interface_xml(
     current_xml: &str,
     current: Node<'_, '_>,
     desired_xml: &str,
-    manage_mac: bool,
-    manage_vlan: bool,
-    manage_mtu: bool,
-    manage_link: bool,
+    managed: InterfaceManagedFields,
 ) -> String {
     let desired_doc = Document::parse(desired_xml).expect("generated interface XML should parse");
     let desired = desired_doc.root_element();
@@ -31,7 +36,7 @@ pub(crate) fn merge_interface_xml(
     for child in current.children().filter(Node::is_element) {
         match child.tag_name().name() {
             "mac" if !emitted_mac => {
-                if manage_mac {
+                if managed.mac {
                     if let Some(mac) = desired_mac {
                         output.push_str(&render_interface_child(
                             current_xml,
@@ -46,11 +51,16 @@ pub(crate) fn merge_interface_xml(
                 emitted_mac = true;
             }
             "source" if !emitted_source => {
+                let managed_attributes = if managed.source_mode {
+                    &["network", "bridge", "dev", "mode"][..]
+                } else {
+                    &["network", "bridge", "dev"][..]
+                };
                 output.push_str(&render_interface_child(
                     current_xml,
                     desired_source,
                     Some(child),
-                    &["network", "bridge"],
+                    managed_attributes,
                 ));
                 emitted_source = true;
             }
@@ -70,7 +80,7 @@ pub(crate) fn merge_interface_xml(
                     desired_xml,
                     child,
                     desired_vlan,
-                    manage_vlan,
+                    managed.vlan,
                     &[],
                 );
                 emitted_vlan = true;
@@ -82,7 +92,7 @@ pub(crate) fn merge_interface_xml(
                     desired_xml,
                     child,
                     desired_mtu,
-                    manage_mtu,
+                    managed.mtu,
                     &["size"],
                 );
                 emitted_mtu = true;
@@ -94,7 +104,7 @@ pub(crate) fn merge_interface_xml(
                     desired_xml,
                     child,
                     desired_link,
-                    manage_link,
+                    managed.link,
                     &["state"],
                 );
                 emitted_link = true;
@@ -106,9 +116,9 @@ pub(crate) fn merge_interface_xml(
                     desired_vlan,
                     desired_mtu,
                     desired_link,
-                    manage_vlan,
-                    manage_mtu,
-                    manage_link,
+                    managed.vlan,
+                    managed.mtu,
+                    managed.link,
                     &mut emitted_vlan,
                     &mut emitted_mtu,
                     &mut emitted_link,
@@ -119,7 +129,7 @@ pub(crate) fn merge_interface_xml(
                     desired_mac,
                     desired_source,
                     desired_model,
-                    manage_mac,
+                    managed.mac,
                     &mut emitted_mac,
                     &mut emitted_source,
                     &mut emitted_model,
@@ -140,9 +150,9 @@ pub(crate) fn merge_interface_xml(
                     desired_vlan,
                     desired_mtu,
                     desired_link,
-                    manage_vlan,
-                    manage_mtu,
-                    manage_link,
+                    managed.vlan,
+                    managed.mtu,
+                    managed.link,
                     &mut emitted_vlan,
                     &mut emitted_mtu,
                     &mut emitted_link,
@@ -153,7 +163,7 @@ pub(crate) fn merge_interface_xml(
                     desired_mac,
                     desired_source,
                     desired_model,
-                    manage_mac,
+                    managed.mac,
                     &mut emitted_mac,
                     &mut emitted_source,
                     &mut emitted_model,
@@ -174,7 +184,7 @@ pub(crate) fn merge_interface_xml(
         desired_mac,
         desired_source,
         desired_model,
-        manage_mac,
+        managed.mac,
         &mut emitted_mac,
         &mut emitted_source,
         &mut emitted_model,
@@ -185,9 +195,9 @@ pub(crate) fn merge_interface_xml(
         desired_vlan,
         desired_mtu,
         desired_link,
-        manage_vlan,
-        manage_mtu,
-        manage_link,
+        managed.vlan,
+        managed.mtu,
+        managed.link,
         &mut emitted_vlan,
         &mut emitted_mtu,
         &mut emitted_link,
