@@ -291,6 +291,29 @@ export async function getIsos(): Promise<ManagedResource[]> {
   return parseResponse(apiClient.get('/media'), managedResourceArraySchema)
 }
 
+export async function uploadIso(
+  id: string,
+  file: File,
+  options: {
+    signal?: AbortSignal
+    onProgress?: (loaded: number, total: number) => void
+  } = {}
+): Promise<ManagedResource> {
+  return parseResponse(
+    apiClient.put(`/media/${encodeURIComponent(id)}`, file, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+      signal: options.signal,
+      onUploadProgress: (event) =>
+        options.onProgress?.(event.loaded, file.size),
+    }),
+    managedResourceSchema
+  )
+}
+
+export async function deleteIso(id: string): Promise<void> {
+  await apiClient.delete(`/media/${encodeURIComponent(id)}`)
+}
+
 export async function getNetworks(): Promise<NetworkSummary[]> {
   return parseResponse(apiClient.get('/networks'), networkSummaryArraySchema)
 }

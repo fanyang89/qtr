@@ -90,6 +90,8 @@ Open `http://127.0.0.1:8080/settings` and store the same token for the current b
 
 Fedora installations are persistent jobs under `/api/v1/install-jobs`. Requests use `mediaId` and `imageId` instead of host paths. The default roots are `.tmp/iso`, `.tmp/disks`, and `.tmp/logs`; server state and VM manifests are stored under `.qtr/server`. Override them with `--media-root`, `--image-root`, `--log-root`, and `--state-dir`. SQLite uses WAL mode, queued jobs resume after restart, and jobs that were running are marked `interrupted` without deleting uncertain VM resources.
 
+The ISOs page supports authenticated, streaming upload and protected deletion. Uploads are limited to 32 GiB by default; override the limit with `--max-iso-upload-bytes`. Existing ISO IDs are never overwritten, and deletion is blocked while an ISO is referenced by an automated install or VM CD-ROM.
+
 qtr serves plain HTTP. Keep the default loopback binding or put a TLS reverse proxy in front of qtr on trusted networks. The server logs a warning when plain HTTP listens on a non-loopback address.
 
 Regenerate the committed OpenAPI 3.1 document after changing API handlers:

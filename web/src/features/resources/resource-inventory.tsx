@@ -11,6 +11,7 @@ import { Main } from '@/components/layout/main'
 import { PageHeading } from '@/components/page-heading'
 import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
+import { DeleteIsoButton, IsoUploadButton } from './iso-actions'
 
 export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
   const [search, setSearch] = useState('')
@@ -43,6 +44,7 @@ export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
               ? 'Managed virtual disks available to machines on this host.'
               : 'Read-only ISO installation media available to deployment jobs.'
           }
+          actions={kind === 'isos' ? <IsoUploadButton /> : undefined}
         />
 
         <div className='mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
@@ -74,10 +76,11 @@ export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
         </div>
 
         <section className='overflow-hidden border border-border bg-card'>
-          <div className='grid grid-cols-[1fr_auto] gap-4 border-b border-border px-4 py-3 font-mono text-[0.625rem] tracking-[0.14em] text-muted-foreground uppercase sm:grid-cols-[1fr_8rem_13rem]'>
+          <div className='grid grid-cols-[1fr_auto_2.25rem] gap-4 border-b border-border px-4 py-3 font-mono text-[0.625rem] tracking-[0.14em] text-muted-foreground uppercase sm:grid-cols-[1fr_8rem_13rem_2.25rem]'>
             <span>{singular} ID</span>
             <span>Size</span>
             <span className='hidden sm:block'>Modified</span>
+            <span />
           </div>
           {query.isPending ? (
             <ResourceMessage>Reading resource root…</ResourceMessage>
@@ -93,7 +96,7 @@ export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
             resources.map((resource) => (
               <div
                 key={resource.id}
-                className='grid grid-cols-[1fr_auto] items-center gap-4 border-b border-border px-4 py-4 last:border-b-0 sm:grid-cols-[1fr_8rem_13rem]'
+                className='grid grid-cols-[1fr_auto_2.25rem] items-center gap-4 border-b border-border px-4 py-4 last:border-b-0 sm:grid-cols-[1fr_8rem_13rem_2.25rem]'
               >
                 <span className='flex min-w-0 items-center gap-3'>
                   <Icon className='size-4 shrink-0 text-muted-foreground' />
@@ -106,6 +109,9 @@ export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
                 </span>
                 <span className='hidden text-sm text-muted-foreground sm:block'>
                   {formatTimestamp(resource.modifiedAtMs)}
+                </span>
+                <span>
+                  {kind === 'isos' && <DeleteIsoButton iso={resource} />}
                 </span>
               </div>
             ))

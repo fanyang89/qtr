@@ -766,10 +766,12 @@ mod tests {
         assert_eq!(cancelled.status, JobStatus::Cancelled);
         assert!(cancelled.cancel_requested);
         assert!(cancelled.finished_at_ms.is_some());
-        assert!(store
-            .active_media_user("Fedora-Server.iso")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .active_media_user("Fedora-Server.iso")
+                .unwrap()
+                .is_none()
+        );
         assert!(store.claim(&job.id).unwrap().is_none());
         std::fs::remove_dir_all(directory).unwrap();
     }
