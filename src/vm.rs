@@ -4566,6 +4566,54 @@ pub(crate) fn define_new_by_manifest(
     Ok(())
 }
 
+pub(crate) fn remove_cdrom_by_media_path(
+    connect_uri: &str,
+    name: &str,
+    media: &Path,
+) -> Result<()> {
+    let conn = connect(connect_uri)?;
+    let domain = lookup_domain(&conn, name)?;
+    if domain.is_active()? {
+        bail!("domain {name} must be inactive before removing installation media");
+    }
+    let xml = domain.get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)?;
+    let (xml, removed) = remove_cdrom_media_xml(&xml, media)?;
+    if removed {
+        Domain::define_xml_flags(&conn, &xml, sys::VIR_DOMAIN_DEFINE_VALIDATE)
+            .with_context(|| format!("failed to remove installation media from domain {name}"))?;
+    }
+    Ok(())
+}
+
+fn remove_cdrom_media_xml(xml: &str, media: &Path) -> Result<(String, bool)> {
+    let doc = Document::parse(xml).context("failed to parse domain XML")?;
+    let devices = required_child(doc.root_element(), "devices")?;
+    let matches = devices
+        .children()
+        .filter(|node| node.has_tag_name("disk") && node.attribute("device") == Some("cdrom"))
+        .filter(|node| {
+            optional_child(*node, "source")
+                .and_then(|source| source.attribute("file"))
+                .is_some_and(|source| Path::new(source) == media)
+        })
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        bail!(
+            "domain XML contains multiple CD-ROM devices using {}",
+            media.display()
+        );
+    }
+    let Some(cdrom) = matches.first() else {
+        return Ok((xml.to_string(), false));
+    };
+    let range = cdrom.range();
+    let replacement = XmlReplacement {
+        range: line_start(xml, range.start)..line_end(xml, range.end),
+        value: String::new(),
+    };
+    Ok((apply_xml_replacements(xml, vec![replacement])?, true))
+}
+
 pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiResult<VmSummary> {
     let base_dir = env::current_dir()
         .context("failed to determine current directory")
@@ -5840,6 +5888,25 @@ disks:
             .expect("repeated detach should be idempotent");
         assert_eq!(patched_again, patched);
         assert!(disk_path.exists());
+    }
+
+    #[test]
+    fn removes_only_matching_installer_cdrom() {
+        let xml = test_domain_xml().replace(
+            "    <interface type='network'>",
+            "    <disk type='file' device='cdrom'>\n      <driver name='qemu' type='raw'/>\n      <source file='/fixtures/qtr/iso/CentOS-7-x86_64-DVD-2207-02.iso'/>\n      <target dev='sda' bus='sata'/>\n      <readonly/>\n    </disk>\n    <interface type='network'>",
+        );
+        let media = Path::new("/fixtures/qtr/iso/CentOS-7-x86_64-DVD-2207-02.iso");
+
+        let (removed, changed) = remove_cdrom_media_xml(&xml, media).unwrap();
+        assert!(changed);
+        assert!(!removed.contains(media.to_str().unwrap()));
+        assert!(removed.contains("device='disk'"));
+        assert!(removed.contains("<interface type='network'>"));
+
+        let (unchanged, changed) = remove_cdrom_media_xml(&xml, Path::new("/missing.iso")).unwrap();
+        assert!(!changed);
+        assert_eq!(unchanged, xml);
     }
 
     #[test]

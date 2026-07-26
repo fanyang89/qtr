@@ -221,6 +221,7 @@ fn execute_install(plan: &InstallPlan, owned: &mut OwnedResources) -> Result<()>
     );
     run_virt_install(plan, &kickstart_path)?;
     ensure_domain_inactive(&plan.args.connect_uri, &plan.args.name)?;
+    vm::remove_cdrom_by_media_path(&plan.args.connect_uri, &plan.args.name, &plan.iso)?;
     vm::apply_by_manifest(&plan.args.connect_uri, plan.manifest.clone())
         .map_err(anyhow::Error::new)?;
     owned.committed = true;
@@ -533,7 +534,7 @@ autopart --type=btrfs
 bootloader --location=mbr --append="selinux=0 console=ttyS0,115200n8"
 
 %packages
-@^minimal-environment
+@^custom-environment
 qemu-guest-agent
 openssh-server
 sudo
@@ -794,6 +795,7 @@ mod tests {
         );
         for expected in [
             "autopart --type=btrfs",
+            "@^custom-environment",
             "selinux --disabled",
             "firewall --disabled",
             "qemu-guest-agent",
