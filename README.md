@@ -213,12 +213,16 @@ cargo run -- vm resume install-os
 cargo run -- vm autostart install-os
 cargo run -- vm autostart install-os --enable
 cargo run -- vm autostart install-os --disable
+cargo run -- vm save install-os
+cargo run -- vm saved-state install-os
+cargo run -- vm restore install-os
+cargo run -- vm saved-state install-os --remove
 cargo run -- vm rm install-os
 cargo run -- vm apply -f vm.yaml --dry-run
 cargo run -- vm apply -f vm.yaml --dry-run --color always
 ```
 
-`reboot` requests an orderly guest reboot through libvirt. `reset` is an immediate virtual hardware reset and can cause data loss. `suspend` and `resume` are idempotent for already paused/running VMs. `autostart` without a flag prints the current state.
+`reboot` requests an orderly guest reboot through libvirt. `reset` is an immediate virtual hardware reset and can cause data loss. `suspend` and `resume` are idempotent for already paused/running VMs. `autostart` without a flag prints the current state. `save` stores the running state as a libvirt managed save image and stops the VM. `restore` starts an inactive VM from that image. `saved-state` prints `present` or `absent`; pass `--remove` to discard the image without starting the VM.
 
 Dump an existing VM definition:
 

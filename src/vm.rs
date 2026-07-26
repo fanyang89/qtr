@@ -26,7 +26,7 @@ use crate::{
     config::{
         ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmAutostartArgs,
         VmCapabilitiesArgs, VmCommand, VmCpArgs, VmDumpArgs, VmExecArgs, VmInitArgs, VmListArgs,
-        VmNameArgs, VmRemoveArgs, VmStartArgs, VmStopArgs,
+        VmNameArgs, VmRemoveArgs, VmSavedStateArgs, VmStartArgs, VmStopArgs,
     },
     domain_xml::{
         self, BootDevice, GraphicsSpec, VmLaunchCpuSpec, VmLaunchDiskSource, VmLaunchDiskSpec,
@@ -57,6 +57,9 @@ pub fn run(args: VmArgs) -> Result<()> {
         VmCommand::Suspend(args) => suspend(args),
         VmCommand::Resume(args) => resume(args),
         VmCommand::Autostart(args) => autostart(args),
+        VmCommand::Save(args) => managed_save(args),
+        VmCommand::Restore(args) => restore_managed_save(args),
+        VmCommand::SavedState(args) => managed_save_state(args),
         VmCommand::Rm(args) => remove(args),
         VmCommand::Vnc(args) => vnc(args),
         VmCommand::Exec(args) => exec(args),
@@ -3111,6 +3114,35 @@ fn autostart(args: VmAutostartArgs) -> Result<()> {
     Ok(())
 }
 
+fn managed_save(args: VmNameArgs) -> Result<()> {
+    managed_save_by_name(&args.connect_uri, &args.name).map_err(anyhow::Error::new)?;
+    eprintln!("[qtr] saved VM state: {}", args.name);
+    Ok(())
+}
+
+fn restore_managed_save(args: VmNameArgs) -> Result<()> {
+    restore_managed_save_by_name(&args.connect_uri, &args.name).map_err(anyhow::Error::new)?;
+    eprintln!("[qtr] restored VM state: {}", args.name);
+    Ok(())
+}
+
+fn managed_save_state(args: VmSavedStateArgs) -> Result<()> {
+    if args.remove {
+        let removed = remove_managed_save_by_name(&args.connect_uri, &args.name)
+            .map_err(anyhow::Error::new)?;
+        if removed {
+            eprintln!("[qtr] removed saved VM state: {}", args.name);
+        } else {
+            eprintln!("[qtr] VM has no saved state: {}", args.name);
+        }
+    } else {
+        let present =
+            has_managed_save_by_name(&args.connect_uri, &args.name).map_err(anyhow::Error::new)?;
+        println!("{}", if present { "present" } else { "absent" });
+    }
+    Ok(())
+}
+
 fn remove(args: VmRemoveArgs) -> Result<()> {
     let conn = connect(&args.connect_uri)?;
     let domain = lookup_domain(&conn, &args.name)?;
@@ -3599,6 +3631,67 @@ pub fn autostart_by_name(
     domain
         .get_autostart()
         .with_context(|| format!("failed to query autostart for domain {name}"))
+        .map_err(VmApiError::Internal)
+}
+
+pub fn managed_save_by_name(connect_uri: &str, name: &str) -> VmApiResult<()> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    ensure_active_domain(&domain, name, "save its state")?;
+    domain
+        .managed_save(0)
+        .with_context(|| format!("failed to save state for domain {name}"))
+        .map(|_| ())
+        .map_err(VmApiError::Internal)
+}
+
+pub fn restore_managed_save_by_name(connect_uri: &str, name: &str) -> VmApiResult<()> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    if domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
+    {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} must be inactive to restore its saved state"
+        )));
+    }
+    if !has_managed_save(&domain, name)? {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} has no managed save image"
+        )));
+    }
+    domain
+        .create()
+        .with_context(|| format!("failed to restore saved state for domain {name}"))
+        .map(|_| ())
+        .map_err(VmApiError::Internal)
+}
+
+pub fn has_managed_save_by_name(connect_uri: &str, name: &str) -> VmApiResult<bool> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    has_managed_save(&domain, name)
+}
+
+pub fn remove_managed_save_by_name(connect_uri: &str, name: &str) -> VmApiResult<bool> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    if !has_managed_save(&domain, name)? {
+        return Ok(false);
+    }
+    domain
+        .managed_save_remove(0)
+        .with_context(|| format!("failed to remove saved state for domain {name}"))
+        .map(|_| true)
+        .map_err(VmApiError::Internal)
+}
+
+fn has_managed_save(domain: &Domain, name: &str) -> VmApiResult<bool> {
+    domain
+        .has_managed_save(0)
+        .with_context(|| format!("failed to query saved state for domain {name}"))
         .map_err(VmApiError::Internal)
 }
 
@@ -5521,6 +5614,46 @@ disks:
         assert_eq!(resume_state_action(sys::VIR_DOMAIN_RUNNING), Some(false));
         assert_eq!(resume_state_action(sys::VIR_DOMAIN_BLOCKED), Some(false));
         assert_eq!(resume_state_action(sys::VIR_DOMAIN_SHUTOFF), None);
+    }
+
+    #[test]
+    fn libvirt_test_driver_supports_managed_save_lifecycle() {
+        let conn = Connect::open(Some("test:///default")).expect("test driver should connect");
+        let domain = Domain::lookup_by_name(&conn, "test").expect("test domain should exist");
+
+        domain.managed_save(0).expect("managed save should succeed");
+        assert!(
+            !domain
+                .is_active()
+                .expect("domain state should be available")
+        );
+        assert!(
+            domain
+                .has_managed_save(0)
+                .expect("saved state should be available")
+        );
+
+        domain.create().expect("managed restore should succeed");
+        assert!(
+            domain
+                .is_active()
+                .expect("domain state should be available")
+        );
+        assert!(
+            !domain
+                .has_managed_save(0)
+                .expect("saved state should be consumed")
+        );
+
+        domain.managed_save(0).expect("second save should succeed");
+        domain
+            .managed_save_remove(0)
+            .expect("saved state removal should succeed");
+        assert!(
+            !domain
+                .has_managed_save(0)
+                .expect("saved state should be removed")
+        );
     }
 
     #[test]

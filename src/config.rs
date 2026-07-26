@@ -359,6 +359,15 @@ pub enum VmCommand {
     #[command(about = "Query or change VM autostart")]
     Autostart(VmAutostartArgs),
 
+    #[command(about = "Save a running VM using libvirt managed save")]
+    Save(VmNameArgs),
+
+    #[command(about = "Restore a VM from libvirt managed save")]
+    Restore(VmNameArgs),
+
+    #[command(about = "Query or remove a managed save image")]
+    SavedState(VmSavedStateArgs),
+
     #[command(about = "Remove an inactive VM definition")]
     Rm(VmRemoveArgs),
 
@@ -527,6 +536,20 @@ pub struct VmAutostartArgs {
     /// Disable autostart.
     #[arg(long, conflicts_with = "enable")]
     pub disable: bool,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+}
+
+#[derive(Debug, Args)]
+pub struct VmSavedStateArgs {
+    /// Libvirt domain name.
+    pub name: String,
+
+    /// Remove the managed save image.
+    #[arg(long)]
+    pub remove: bool,
 
     /// Libvirt connection URI.
     #[arg(long, default_value = "qemu:///system")]
