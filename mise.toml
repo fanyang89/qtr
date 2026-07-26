@@ -1,0 +1,18 @@
+[settings]
+task.output = "prefix"
+
+[tasks.dev]
+description = "Start the Rust API and Vite development server"
+run = [{ tasks = ["dev:backend", "dev:web"] }]
+
+[tasks."dev:backend"]
+hide = true
+env.QTR_API_TOKEN = "qtr-dev"
+run = "cargo run -- web --listen 127.0.0.1:18080"
+
+[tasks."dev:web"]
+hide = true
+dir = "{{ config_root }}/web"
+env.VITE_QTR_API_TOKEN = "qtr-dev"
+env.QTR_DEV_API_URL = "http://127.0.0.1:18080"
+run = "pnpm dev --host 127.0.0.1"

@@ -1,6 +1,7 @@
 /target
 /dist
 /.venv
+/.qtr
 /deploy/inventory.ini
 .tmp/
 .opencode/

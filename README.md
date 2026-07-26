@@ -70,7 +70,15 @@ If `virsh` reports `no connection driver available for qemu:///system`, install 
 
 ## Web API
 
-Build the Web UI and start the authenticated server:
+Start the Rust API and Vite development server together:
+
+```bash
+mise run dev
+```
+
+Open `http://127.0.0.1:5173`. Development uses the loopback-only `qtr-dev` token and initializes the browser session automatically. Press `Ctrl+C` to stop both servers.
+
+For a production-style build, build the Web UI and start the authenticated server manually:
 
 ```bash
 pnpm -C web build

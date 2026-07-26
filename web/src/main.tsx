@@ -8,12 +8,15 @@ import {
 } from '@tanstack/react-query'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { toast } from 'sonner'
+import { bootstrapDevelopmentSession } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { ThemeProvider } from './context/theme-provider'
 // Generated Routes
 import { routeTree } from './routeTree.gen'
 // Styles
 import './styles/index.css'
+
+bootstrapDevelopmentSession()
 
 const queryClient = new QueryClient({
   defaultOptions: {

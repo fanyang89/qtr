@@ -171,6 +171,11 @@ export function setApiToken(token: string): void {
   }
 }
 
+export function bootstrapDevelopmentSession(): void {
+  const token = import.meta.env.VITE_QTR_API_TOKEN
+  if (import.meta.env.DEV && token && !getApiToken()) setApiToken(token)
+}
+
 const apiClient = axios.create({ baseURL: '/api/v1' })
 
 apiClient.interceptors.request.use((config) => {
