@@ -1,4 +1,4 @@
-schemaVersion: 2
+schemaVersion: 3
 name: install-os
 machine:
   type: q35
@@ -46,7 +46,15 @@ cdroms:
 boot:
 - cdrom
 - hd
-network: default
+interfaces:
+- id: primary
+  type: network
+  source: default
+  model: virtio
+- id: storage
+  type: bridge
+  source: br-storage
+  model: virtio
 graphics: vnc
 vncListen: 127.0.0.1
 serialLog: .tmp/logs/install-os.serial.log

@@ -15,8 +15,18 @@ pub struct VmLaunchDomainSpec<'a> {
     pub cdroms: &'a [VmLaunchCdromSpec<'a>],
     pub serial_log: Option<&'a Path>,
     pub boot_devices: &'a [BootDevice],
-    pub network: &'a str,
+    pub interfaces: &'a [VmLaunchInterfaceSpec<'a>],
     pub graphics: GraphicsSpec<'a>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VmLaunchInterfaceSpec<'a> {
+    pub id: Option<&'a str>,
+    pub interface_type: &'a str,
+    pub source_attribute: &'a str,
+    pub source: &'a str,
+    pub model: &'a str,
+    pub mac: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -141,6 +151,11 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
     let cdroms_xml = spec.cdroms.iter().map(build_cdrom_xml).collect::<String>();
     let console_xml = build_console_xml(spec.serial_log);
     let graphics_xml = build_graphics_xml(spec.graphics);
+    let interfaces_xml = spec
+        .interfaces
+        .iter()
+        .map(build_interface_xml)
+        .collect::<String>();
     let machine = spec
         .machine
         .map(|machine| format!(" machine='{}'", escape_xml(machine)))
@@ -162,11 +177,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
     <apic/>
   </features>
 {cpu_xml}  <devices>
-{disks_xml}{scsi_controller_xml}{cdroms_xml}    <interface type='network'>
-      <source network='{network}'/>
-      <model type='virtio'/>
-    </interface>
-    <channel type='unix'>
+{disks_xml}{scsi_controller_xml}{cdroms_xml}{interfaces_xml}    <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>
 {console_xml}{graphics_xml}  </devices>
@@ -182,10 +193,28 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         boot_xml = boot_xml,
         disks_xml = disks_xml,
         scsi_controller_xml = scsi_controller_xml,
-        network = escape_xml(spec.network),
+        interfaces_xml = interfaces_xml,
         cdroms_xml = cdroms_xml,
         console_xml = console_xml,
         graphics_xml = graphics_xml,
+    )
+}
+
+pub fn build_interface_xml(spec: &VmLaunchInterfaceSpec<'_>) -> String {
+    let mac = spec
+        .mac
+        .map(|mac| format!("      <mac address='{}'/>\n", escape_xml(mac)))
+        .unwrap_or_default();
+    let alias = spec
+        .id
+        .map(|id| format!("      <alias name='ua-qtr-nic-{}'/>\n", escape_xml(id)))
+        .unwrap_or_default();
+    format!(
+        "    <interface type='{interface_type}'>\n{mac}      <source {source_attribute}='{source}'/>\n      <model type='{model}'/>\n{alias}    </interface>\n",
+        interface_type = escape_xml(spec.interface_type),
+        source_attribute = escape_xml(spec.source_attribute),
+        source = escape_xml(spec.source),
+        model = escape_xml(spec.model),
     )
 }
 
@@ -611,6 +640,33 @@ mod tests {
     }
 
     #[test]
+    fn builds_network_and_bridge_interfaces() {
+        let network = build_interface_xml(&VmLaunchInterfaceSpec {
+            id: Some("primary"),
+            interface_type: "network",
+            source_attribute: "network",
+            source: "default",
+            model: "virtio",
+            mac: Some("52:54:00:12:34:56"),
+        });
+        let bridge = build_interface_xml(&VmLaunchInterfaceSpec {
+            id: Some("storage"),
+            interface_type: "bridge",
+            source_attribute: "bridge",
+            source: "br-storage",
+            model: "e1000e",
+            mac: None,
+        });
+
+        assert!(network.contains("<mac address='52:54:00:12:34:56'/>"));
+        assert!(network.contains("<source network='default'/>"));
+        assert!(network.contains("<alias name='ua-qtr-nic-primary'/>"));
+        assert!(bridge.contains("<interface type='bridge'>"));
+        assert!(bridge.contains("<source bridge='br-storage'/>"));
+        assert!(bridge.contains("<model type='e1000e'/>"));
+    }
+
+    #[test]
     fn disk_xml_escapes_paths() {
         let mut disk = disk_spec("vda", "virtio");
         disk.path = PathBuf::from("/tmp/a&b.qcow2");
@@ -636,7 +692,7 @@ mod tests {
             cdroms: &[],
             serial_log: None,
             boot_devices: &boot_devices,
-            network: "default",
+            interfaces: &[],
             graphics: GraphicsSpec {
                 mode: GraphicsMode::None,
                 vnc_listen: "127.0.0.1",
@@ -660,7 +716,7 @@ mod tests {
             cdroms: &[],
             serial_log: None,
             boot_devices: &boot_devices,
-            network: "default",
+            interfaces: &[],
             graphics: GraphicsSpec {
                 mode: GraphicsMode::None,
                 vnc_listen: "127.0.0.1",
@@ -718,7 +774,7 @@ mod tests {
             cdroms: &[],
             serial_log: None,
             boot_devices: &boot_devices,
-            network: "default",
+            interfaces: &[],
             graphics: GraphicsSpec {
                 mode: GraphicsMode::None,
                 vnc_listen: "127.0.0.1",

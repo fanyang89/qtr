@@ -1,5 +1,172 @@
 use roxmltree::{Document, Node};
 
+pub(crate) fn merge_interface_xml(
+    current_xml: &str,
+    current: Node<'_, '_>,
+    desired_xml: &str,
+    manage_mac: bool,
+) -> String {
+    let desired_doc = Document::parse(desired_xml).expect("generated interface XML should parse");
+    let desired = desired_doc.root_element();
+    let desired_mac = desired.children().find(|child| child.has_tag_name("mac"));
+    let desired_source = desired_child(desired, "source");
+    let desired_model = desired_child(desired, "model");
+    let desired_alias = desired.children().find(|child| child.has_tag_name("alias"));
+    let mut output = render_element_start("    ", desired, Some(current), &["type"]);
+    output.push_str(">\n");
+    let mut emitted_mac = false;
+    let mut emitted_source = false;
+    let mut emitted_model = false;
+    let mut emitted_alias = false;
+
+    for child in current.children().filter(Node::is_element) {
+        match child.tag_name().name() {
+            "mac" if !emitted_mac => {
+                if manage_mac {
+                    if let Some(mac) = desired_mac {
+                        output.push_str(&render_interface_child(
+                            current_xml,
+                            mac,
+                            Some(child),
+                            &["address"],
+                        ));
+                    }
+                } else {
+                    output.push_str(&render_raw_node(current_xml, child, "      "));
+                }
+                emitted_mac = true;
+            }
+            "source" if !emitted_source => {
+                output.push_str(&render_interface_child(
+                    current_xml,
+                    desired_source,
+                    Some(child),
+                    &["network", "bridge"],
+                ));
+                emitted_source = true;
+            }
+            "model" if !emitted_model => {
+                output.push_str(&render_interface_child(
+                    current_xml,
+                    desired_model,
+                    Some(child),
+                    &["type"],
+                ));
+                emitted_model = true;
+            }
+            "alias" if !emitted_alias => {
+                emit_missing_interface_children(
+                    &mut output,
+                    desired_xml,
+                    desired_mac,
+                    desired_source,
+                    desired_model,
+                    manage_mac,
+                    &mut emitted_mac,
+                    &mut emitted_source,
+                    &mut emitted_model,
+                );
+                if is_qtr_alias(child, "ua-qtr-nic-") {
+                    if let Some(alias) = desired_alias {
+                        output.push_str(&render_raw_node(desired_xml, alias, "      "));
+                    }
+                } else {
+                    output.push_str(&render_raw_node(current_xml, child, "      "));
+                }
+                emitted_alias = true;
+            }
+            "address" if !emitted_alias => {
+                emit_missing_interface_children(
+                    &mut output,
+                    desired_xml,
+                    desired_mac,
+                    desired_source,
+                    desired_model,
+                    manage_mac,
+                    &mut emitted_mac,
+                    &mut emitted_source,
+                    &mut emitted_model,
+                );
+                if let Some(alias) = desired_alias {
+                    output.push_str(&render_raw_node(desired_xml, alias, "      "));
+                }
+                emitted_alias = true;
+                output.push_str(&render_raw_node(current_xml, child, "      "));
+            }
+            "mac" | "source" | "model" | "alias" => {}
+            _ => output.push_str(&render_raw_node(current_xml, child, "      ")),
+        }
+    }
+    emit_missing_interface_children(
+        &mut output,
+        desired_xml,
+        desired_mac,
+        desired_source,
+        desired_model,
+        manage_mac,
+        &mut emitted_mac,
+        &mut emitted_source,
+        &mut emitted_model,
+    );
+    if !emitted_alias && let Some(alias) = desired_alias {
+        output.push_str(&render_raw_node(desired_xml, alias, "      "));
+    }
+    output.push_str("    </interface>\n");
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_missing_interface_children(
+    output: &mut String,
+    desired_xml: &str,
+    mac: Option<Node<'_, '_>>,
+    source: Node<'_, '_>,
+    model: Node<'_, '_>,
+    manage_mac: bool,
+    emitted_mac: &mut bool,
+    emitted_source: &mut bool,
+    emitted_model: &mut bool,
+) {
+    if manage_mac && !*emitted_mac {
+        if let Some(mac) = mac {
+            output.push_str(&render_raw_node(desired_xml, mac, "      "));
+        }
+        *emitted_mac = true;
+    }
+    if !*emitted_source {
+        output.push_str(&render_raw_node(desired_xml, source, "      "));
+        *emitted_source = true;
+    }
+    if !*emitted_model {
+        output.push_str(&render_raw_node(desired_xml, model, "      "));
+        *emitted_model = true;
+    }
+}
+
+fn render_interface_child(
+    current_xml: &str,
+    desired: Node<'_, '_>,
+    current: Option<Node<'_, '_>>,
+    managed_attributes: &[&str],
+) -> String {
+    let mut output = render_element_start("      ", desired, current, managed_attributes);
+    let opaque = current
+        .into_iter()
+        .flat_map(|node| node.children())
+        .filter(Node::is_element)
+        .collect::<Vec<_>>();
+    if opaque.is_empty() {
+        output.push_str("/>\n");
+    } else {
+        output.push_str(">\n");
+        for child in opaque {
+            output.push_str(&render_raw_node(current_xml, child, "        "));
+        }
+        output.push_str(&format!("      </{}>\n", desired.tag_name().name()));
+    }
+    output
+}
+
 pub(crate) fn merge_disk_xml(
     current_xml: &str,
     current_disk: Node<'_, '_>,

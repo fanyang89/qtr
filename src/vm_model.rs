@@ -33,8 +33,10 @@ pub struct VmManifest {
     pub memory_gib: u64,
     #[serde(default = "default_vm_vcpus")]
     pub vcpus: u32,
-    #[serde(default = "default_vm_network")]
-    pub network: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interfaces: Option<Vec<VmInterfaceEntry>>,
     #[serde(default = "default_vm_graphics")]
     pub graphics: GraphicsMode,
     #[serde(default = "default_vm_vnc_listen")]
@@ -43,6 +45,85 @@ pub struct VmManifest {
     pub vnc_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial_log: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmInterface {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub interface_type: VmInterfaceType,
+    pub source: String,
+    #[serde(default = "default_vm_interface_model")]
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmInterfaceType {
+    Network,
+    Bridge,
+}
+
+impl VmInterfaceType {
+    pub(crate) fn as_xml(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Bridge => "bridge",
+        }
+    }
+
+    pub(crate) fn source_attribute(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Bridge => "bridge",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, untagged)]
+pub enum VmInterfaceEntry {
+    Present(VmInterface),
+    Absent {
+        id: String,
+        state: VmAbsentInterfaceState,
+    },
+}
+
+impl VmInterfaceEntry {
+    pub fn present(interface: VmInterface) -> Self {
+        Self::Present(interface)
+    }
+
+    pub fn absent(id: impl Into<String>) -> Self {
+        Self::Absent {
+            id: id.into(),
+            state: VmAbsentInterfaceState::Absent,
+        }
+    }
+
+    pub fn as_present(&self) -> Option<&VmInterface> {
+        match self {
+            Self::Present(interface) => Some(interface),
+            Self::Absent { .. } => None,
+        }
+    }
+
+    pub fn absent_id(&self) -> Option<&str> {
+        match self {
+            Self::Present(_) => None,
+            Self::Absent { id, .. } => Some(id),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmAbsentInterfaceState {
+    Absent,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -653,8 +734,8 @@ fn default_vm_vcpus() -> u32 {
     2
 }
 
-fn default_vm_network() -> String {
-    "default".to_string()
+fn default_vm_interface_model() -> String {
+    "virtio".to_string()
 }
 
 fn default_vm_graphics() -> GraphicsMode {

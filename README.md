@@ -134,7 +134,7 @@ Serial console file output is disabled by default. Configure `serialLog` in the 
 
 ## Declarative VM Config
 
-VM YAML emitted by qtr includes `schemaVersion: 2`. Existing unversioned and version 1 definitions remain supported.
+VM YAML emitted by qtr includes `schemaVersion: 3`. Existing unversioned, version 1, and version 2 definitions remain supported.
 
 Query the VM features reported by the current libvirt/QEMU host before using host-specific machine, firmware, CPU or device options:
 
@@ -155,7 +155,7 @@ Edit `cdroms[].media` to point at the installer ISO. Create or resize disks with
 The generated YAML is an installer-oriented template:
 
 ```yaml
-schemaVersion: 2
+schemaVersion: 3
 name: install-os
 machine:
   type: q35
@@ -176,7 +176,11 @@ cdroms:
 - id: installer
   media: /path/to/installer.iso
 boot: [cdrom, hd]
-network: default
+interfaces:
+- id: primary
+  type: network
+  source: default
+  model: virtio
 graphics: vnc
 vncListen: 127.0.0.1
 ```
@@ -203,6 +207,8 @@ disks:
 Detach updates only the inactive libvirt domain definition. It never deletes the disk file, block device, or storage volume. Omitting an existing disk without `state: absent` remains an error.
 
 Multiple CD-ROM trays are supported. Set `media: null` to keep an empty tray, change `media` to swap media, or use `state: absent` with the stable ID to remove the tray from the persistent definition. Existing version 1 definitions using the single `cdrom` field remain supported.
+
+Version 3 supports multiple `interfaces`. Each NIC has a stable ID, `network` or `bridge` type, source, model, and optional MAC. IDs are written as `ua-qtr-nic-*` aliases. Use `state: absent` to remove a NIC from the persistent definition. Legacy `network: default` definitions remain supported and only update the first libvirt network interface, leaving additional NICs untouched.
 
 Apply it:
 

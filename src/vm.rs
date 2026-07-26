@@ -32,7 +32,8 @@ use crate::{
     disk,
     domain_xml::{
         self, BootDevice, GraphicsSpec, VmLaunchCpuSpec, VmLaunchDiskSource, VmLaunchDiskSpec,
-        VmLaunchDomainSpec, VmLaunchIoThreadsSpec, build_vm_launch_domain_xml, parse_boot_devices,
+        VmLaunchDomainSpec, VmLaunchInterfaceSpec, VmLaunchIoThreadsSpec,
+        build_vm_launch_domain_xml, parse_boot_devices,
     },
     guest_agent, vm_reconcile,
 };
@@ -40,7 +41,8 @@ use crate::{
 pub use crate::vm_model::{
     VmCdrom, VmCdromEntry, VmCpu, VmCpuMode, VmCpuTopology, VmDisk, VmDiskBus, VmDiskCache,
     VmDiskDetectZeroes, VmDiskDiscard, VmDiskEntry, VmDiskIoConfig, VmDiskIoMode, VmDiskIoTune,
-    VmDiskIoTuneConfig, VmDiskSerial, VmDiskType, VmIoThreads, VmMachine, VmManifest, VmMemory,
+    VmDiskIoTuneConfig, VmDiskSerial, VmDiskType, VmInterface, VmInterfaceEntry, VmInterfaceType,
+    VmIoThreads, VmMachine, VmManifest, VmMemory,
 };
 
 pub fn run(args: VmArgs) -> Result<()> {
@@ -70,7 +72,7 @@ pub fn run(args: VmArgs) -> Result<()> {
     }
 }
 
-const VM_MANIFEST_SCHEMA_VERSION: u64 = 2;
+const VM_MANIFEST_SCHEMA_VERSION: u64 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -273,7 +275,11 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
     if has_key("cdrom") && has_key("cdroms") {
         bail!("cdrom and cdroms are mutually exclusive");
     }
+    if has_key("network") && has_key("interfaces") {
+        bail!("network and interfaces are mutually exclusive");
+    }
     let has_cdroms = has_key("cdroms");
+    let has_interfaces = has_key("interfaces");
 
     let version = match mapping.remove(&schema_key) {
         Some(version) => version
@@ -301,9 +307,16 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
     if version == 1 && has_cdroms {
         bail!("cdroms requires schemaVersion 2");
     }
+    if version < 3 && has_interfaces {
+        bail!("interfaces requires schemaVersion 3");
+    }
 
-    serde_yaml::from_value(serde_yaml::Value::Mapping(mapping))
-        .context("failed to parse VM manifest")
+    let mut manifest: VmManifest = serde_yaml::from_value(serde_yaml::Value::Mapping(mapping))
+        .context("failed to parse VM manifest")?;
+    if manifest.network.is_none() && manifest.interfaces.is_none() {
+        manifest.network = Some("default".to_string());
+    }
+    Ok(manifest)
 }
 
 pub fn serialize_manifest_yaml(manifest: &VmManifest) -> Result<String> {
@@ -557,7 +570,14 @@ fn init(args: VmInitArgs) -> Result<()> {
         boot: Some(boot),
         memory_gib: args.memory_gib,
         vcpus: args.vcpus,
-        network: args.network,
+        network: None,
+        interfaces: Some(vec![VmInterfaceEntry::present(VmInterface {
+            id: "primary".to_string(),
+            interface_type: VmInterfaceType::Network,
+            source: args.network,
+            model: "virtio".to_string(),
+            mac: None,
+        })]),
         graphics: GraphicsMode::Vnc,
         vnc_listen: args.vnc_listen,
         vnc_port: None,
@@ -695,6 +715,26 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
 
     let memory = effective_memory(manifest)?;
     let vcpus = effective_vcpus(manifest)?;
+    let legacy_interface;
+    let interfaces = if let Some(entries) = &manifest.interfaces {
+        entries
+            .iter()
+            .filter_map(VmInterfaceEntry::as_present)
+            .map(launch_interface_spec)
+            .collect::<Vec<_>>()
+    } else {
+        legacy_interface = VmInterface {
+            id: "primary".to_string(),
+            interface_type: VmInterfaceType::Network,
+            source: manifest
+                .network
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            model: "virtio".to_string(),
+            mac: None,
+        };
+        vec![launch_interface_spec(&legacy_interface)]
+    };
 
     Ok(build_vm_launch_domain_xml(VmLaunchDomainSpec {
         name: &manifest.name,
@@ -710,13 +750,24 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
         cdroms: &cdroms,
         serial_log: manifest.serial_log.as_deref(),
         boot_devices,
-        network: &manifest.network,
+        interfaces: &interfaces,
         graphics: GraphicsSpec {
             mode: manifest.graphics,
             vnc_listen: &manifest.vnc_listen,
             vnc_port: manifest.vnc_port,
         },
     }))
+}
+
+fn launch_interface_spec(interface: &VmInterface) -> VmLaunchInterfaceSpec<'_> {
+    VmLaunchInterfaceSpec {
+        id: Some(&interface.id),
+        interface_type: interface.interface_type.as_xml(),
+        source_attribute: interface.interface_type.source_attribute(),
+        source: &interface.source,
+        model: &interface.model,
+        mac: interface.mac.as_deref(),
+    }
 }
 
 fn disk_launch_source(disk_type: VmDiskType) -> VmLaunchDiskSource {
@@ -897,7 +948,7 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
         .collect();
     let io_threads = io_threads_from_domain_xml(domain, devices)?;
     let cdroms = cdroms_from_domain_xml(devices)?;
-    let network = network_name(devices)?;
+    let interfaces = interfaces_from_domain_xml(devices)?;
     let (graphics, vnc_listen, vnc_port) = graphics_config(devices)?;
     let serial_log = serial_log_path(devices);
 
@@ -913,7 +964,13 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
         boot: Some(boot),
         memory_gib: memory.size_mib / 1024,
         vcpus,
-        network,
+        network: None,
+        interfaces: Some(
+            interfaces
+                .into_iter()
+                .map(VmInterfaceEntry::present)
+                .collect(),
+        ),
         graphics,
         vnc_listen,
         vnc_port,
@@ -978,7 +1035,16 @@ fn patch_domain_xml(
         patch_cdroms(xml, devices, cdroms, &mut replacements)?;
     }
 
-    patch_network(xml, devices, &manifest.network, &mut replacements)?;
+    if let Some(interfaces) = &manifest.interfaces {
+        patch_interfaces(xml, devices, interfaces, &mut replacements)?;
+    } else {
+        patch_network(
+            xml,
+            devices,
+            manifest.network.as_deref().unwrap_or("default"),
+            &mut replacements,
+        )?;
+    }
     patch_graphics(xml, devices, manifest, &mut replacements)?;
 
     if let Some(serial_log) = &manifest.serial_log {
@@ -1777,6 +1843,120 @@ fn patch_network(
     push_attr_replacement(xml, source, "network", network, replacements)
 }
 
+fn patch_interfaces(
+    xml: &str,
+    devices: Node<'_, '_>,
+    manifest_interfaces: &[VmInterfaceEntry],
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let nodes = devices
+        .children()
+        .filter(|child| {
+            child.has_tag_name("interface")
+                && matches!(child.attribute("type"), Some("network" | "bridge"))
+        })
+        .collect::<Vec<_>>();
+    let parsed = interfaces_from_domain_xml(devices)?;
+    let mut current = nodes
+        .into_iter()
+        .zip(parsed)
+        .map(|(node, interface)| (node, interface, false))
+        .collect::<Vec<_>>();
+
+    for id in manifest_interfaces
+        .iter()
+        .filter_map(VmInterfaceEntry::absent_id)
+    {
+        let matches = current
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, interface, used))| !used && interface.id == id)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("existing domain XML has duplicate interface id {id}");
+        }
+        if let Some(index) = matches.into_iter().next() {
+            current[index].2 = true;
+            let range = current[index].0.range();
+            replacements.push(XmlReplacement {
+                range: line_start(xml, range.start)..line_end(xml, range.end),
+                value: String::new(),
+            });
+        }
+    }
+
+    let mut new_xml = String::new();
+    for interface in manifest_interfaces
+        .iter()
+        .filter_map(VmInterfaceEntry::as_present)
+    {
+        let matches = current
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, existing, used))| {
+                !used
+                    && (existing.id == interface.id
+                        || interface.mac.as_deref().is_some_and(|mac| {
+                            existing
+                                .mac
+                                .as_deref()
+                                .is_some_and(|existing| existing.eq_ignore_ascii_case(mac))
+                        }))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!(
+                "existing domain XML has duplicate interface id {}",
+                interface.id
+            );
+        }
+        let desired_xml = domain_xml::build_interface_xml(&launch_interface_spec(interface));
+        if let Some(index) = matches.into_iter().next() {
+            current[index].2 = true;
+            let node = current[index].0;
+            let range = node.range();
+            replacements.push(XmlReplacement {
+                range: line_start(xml, range.start)..line_end(xml, range.end),
+                value: vm_reconcile::merge_interface_xml(
+                    xml,
+                    node,
+                    &desired_xml,
+                    interface.mac.is_some(),
+                ),
+            });
+        } else {
+            new_xml.push_str(&desired_xml);
+        }
+    }
+
+    if let Some((_, interface, _)) = current.iter().find(|(node, _, used)| {
+        !used
+            && optional_child(*node, "alias")
+                .and_then(|alias| alias.attribute("name"))
+                .is_some_and(|alias| alias.starts_with("ua-qtr-nic-"))
+    }) {
+        bail!(
+            "manifest does not identify existing interface {}; keep it by stable id or add state: absent",
+            interface.id
+        );
+    }
+
+    if !new_xml.is_empty() {
+        let insert_at = devices
+            .children()
+            .find(|child| child.has_tag_name("channel"))
+            .map(|node| line_start(xml, node.range().start))
+            .unwrap_or_else(|| devices_closing_tag_start(xml, devices));
+        replacements.push(XmlReplacement {
+            range: insert_at..insert_at,
+            value: new_xml,
+        });
+    }
+    Ok(())
+}
+
 fn patch_graphics(
     xml: &str,
     devices: Node<'_, '_>,
@@ -2498,6 +2678,61 @@ fn disk_target_dev(disk: Node<'_, '_>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn interfaces_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmInterface>> {
+    devices
+        .children()
+        .filter(|child| child.has_tag_name("interface"))
+        .filter_map(|interface| {
+            let interface_type = match interface.attribute("type") {
+                Some("network") => VmInterfaceType::Network,
+                Some("bridge") => VmInterfaceType::Bridge,
+                _ => return None,
+            };
+            Some((interface, interface_type))
+        })
+        .enumerate()
+        .map(|(index, (interface, interface_type))| {
+            let source = required_child(interface, "source")?
+                .attribute(interface_type.source_attribute())
+                .with_context(|| {
+                    format!(
+                        "domain XML {} interface source is missing {}",
+                        interface_type.as_xml(),
+                        interface_type.source_attribute()
+                    )
+                })?
+                .to_string();
+            let mac = optional_child(interface, "mac")
+                .and_then(|mac| mac.attribute("address"))
+                .map(str::to_string);
+            let target =
+                optional_child(interface, "target").and_then(|target| target.attribute("dev"));
+            let id = optional_child(interface, "alias")
+                .and_then(|alias| alias.attribute("name"))
+                .and_then(|alias| alias.strip_prefix("ua-qtr-nic-"))
+                .filter(|id| is_valid_disk_id(id))
+                .map(str::to_string)
+                .or_else(|| {
+                    mac.as_deref()
+                        .map(|mac| format!("nic-{}", mac.replace(':', "-")))
+                })
+                .or_else(|| target.map(|target| format!("nic-{target}")))
+                .unwrap_or_else(|| format!("nic-{}", index + 1));
+            let model = optional_child(interface, "model")
+                .and_then(|model| model.attribute("type"))
+                .unwrap_or("virtio")
+                .to_string();
+            Ok(VmInterface {
+                id,
+                interface_type,
+                source,
+                model,
+                mac,
+            })
+        })
+        .collect()
+}
+
 fn network_name(devices: Node<'_, '_>) -> Result<String> {
     let interface = devices
         .children()
@@ -2681,6 +2916,16 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
     if manifest.disks.is_empty() {
         bail!("VM definition must contain at least one disk");
     }
+    if manifest
+        .network
+        .as_deref()
+        .is_some_and(|network| network.trim().is_empty())
+    {
+        bail!("network must not be empty");
+    }
+    if let Some(interfaces) = &manifest.interfaces {
+        validate_interfaces(interfaces)?;
+    }
 
     if let Some(machine) = &manifest.machine
         && machine.machine_type.trim().is_empty()
@@ -2845,6 +3090,50 @@ fn validate_disk_iotune(io_tune: &VmDiskIoTune) -> Result<()> {
         bail!("ioTune.totalIops cannot be combined with readIops or writeIops");
     }
     Ok(())
+}
+
+fn validate_interfaces(interfaces: &[VmInterfaceEntry]) -> Result<()> {
+    let mut ids = BTreeSet::new();
+    let mut macs = BTreeSet::new();
+    for entry in interfaces {
+        let id = entry
+            .as_present()
+            .map(|interface| interface.id.as_str())
+            .or_else(|| entry.absent_id())
+            .expect("interface entry should have an id");
+        if !is_valid_disk_id(id) {
+            bail!("invalid interface id {id:?}; use 1-48 ASCII letters, digits, '.', '_' or '-'");
+        }
+        if !ids.insert(id) {
+            bail!("duplicate interface id {id}");
+        }
+        let Some(interface) = entry.as_present() else {
+            continue;
+        };
+        if interface.source.trim().is_empty() {
+            bail!("interface {} source must not be empty", interface.id);
+        }
+        if interface.model.trim().is_empty() {
+            bail!("interface {} model must not be empty", interface.id);
+        }
+        if let Some(mac) = interface.mac.as_deref() {
+            if !is_valid_mac_address(mac) {
+                bail!("interface {} has invalid MAC address {mac:?}", interface.id);
+            }
+            if !macs.insert(mac.to_ascii_lowercase()) {
+                bail!("duplicate interface MAC address {mac}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_mac_address(mac: &str) -> bool {
+    let parts = mac.split(':').collect::<Vec<_>>();
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|part| part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn validate_disk_id(id: &str) -> Result<()> {
@@ -4504,6 +4793,14 @@ mod tests {
             media: Some(Path::new("/isos/os.iso")),
             target: "sda",
         }];
+        let interfaces = [VmLaunchInterfaceSpec {
+            id: Some("primary"),
+            interface_type: "network",
+            source_attribute: "network",
+            source: "default",
+            model: "virtio",
+            mac: None,
+        }];
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "install-os",
             machine: None,
@@ -4525,7 +4822,7 @@ mod tests {
             cdroms: &cdroms,
             serial_log: Some(Path::new("/logs/install-os.serial.log")),
             boot_devices: &boot_devices,
-            network: "default",
+            interfaces: &interfaces,
             graphics: GraphicsSpec {
                 mode: GraphicsMode::Vnc,
                 vnc_listen: "0.0.0.0",
@@ -4613,7 +4910,17 @@ mod tests {
                 topology: None,
             })
         );
-        assert_eq!(manifest.network, "default");
+        assert_eq!(manifest.network, None);
+        assert_eq!(
+            manifest
+                .interfaces
+                .as_ref()
+                .unwrap()
+                .first()
+                .and_then(VmInterfaceEntry::as_present)
+                .map(|interface| interface.source.as_str()),
+            Some("default")
+        );
         assert_eq!(manifest.graphics, GraphicsMode::Vnc);
         assert_eq!(manifest.vnc_listen, "0.0.0.0");
         assert_eq!(manifest.vnc_port, Some(5901));
@@ -4722,7 +5029,8 @@ mod tests {
             boot: Some(vec!["hd".to_string()]),
             memory_gib: 4,
             vcpus: 2,
-            network: "default".to_string(),
+            network: Some("default".to_string()),
+            interfaces: None,
             graphics: GraphicsMode::Vnc,
             vnc_listen: "0.0.0.0".to_string(),
             vnc_port: None,
@@ -4787,6 +5095,62 @@ mod tests {
         let patched_again = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd])
             .expect("second opaque disk patch should succeed");
         assert_eq!(patched_again, patched);
+    }
+
+    #[test]
+    fn reconciles_multiple_interfaces_and_preserves_opaque_xml() {
+        let xml = test_domain_xml().replace(
+            "      <source network='default'/>\n      <model type='virtio'/>",
+            "      <mac address='52:54:00:12:34:56'/>\n      <source network='default' trustGuestRxFilters='yes'/>\n      <target dev='vnet0'/>\n      <model type='virtio'/>\n      <filterref filter='clean-traffic'/>\n      <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>",
+        );
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/sys.qcow2",
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.network = None;
+        manifest.interfaces = Some(vec![
+            VmInterfaceEntry::present(VmInterface {
+                id: "primary".to_string(),
+                interface_type: VmInterfaceType::Bridge,
+                source: "br-main".to_string(),
+                model: "e1000e".to_string(),
+                mac: Some("52:54:00:65:43:21".to_string()),
+            }),
+            VmInterfaceEntry::present(VmInterface {
+                id: "storage".to_string(),
+                interface_type: VmInterfaceType::Network,
+                source: "storage-net".to_string(),
+                model: "virtio".to_string(),
+                mac: None,
+            }),
+        ]);
+
+        let patched = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd])
+            .expect("multiple interfaces should reconcile");
+        assert!(patched.contains("<interface type='bridge'>"));
+        assert!(patched.contains("<source bridge='br-main'"));
+        assert!(patched.contains("trustGuestRxFilters='yes'"));
+        assert!(patched.contains("<mac address='52:54:00:65:43:21'/>"));
+        assert!(patched.contains("<model type='e1000e'/>"));
+        assert!(patched.contains("<target dev='vnet0'/>"));
+        assert!(patched.contains("<filterref filter='clean-traffic'/>"));
+        assert!(patched.contains("<alias name='ua-qtr-nic-primary'/>"));
+        assert!(patched.contains("<alias name='ua-qtr-nic-storage'/>"));
+        assert!(patched.contains("<source network='storage-net'/>"));
+
+        let patched_again = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd])
+            .expect("interface reconciliation should be idempotent");
+        assert_eq!(patched_again, patched);
+
+        manifest.interfaces = Some(vec![
+            manifest.interfaces.as_ref().unwrap()[0].clone(),
+            VmInterfaceEntry::absent("storage"),
+        ]);
+        let removed = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd])
+            .expect("interface tombstone should detach persistently");
+        assert!(!removed.contains("ua-qtr-nic-storage"));
+        assert!(removed.contains("ua-qtr-nic-primary"));
     }
 
     #[test]
@@ -5403,7 +5767,8 @@ disks:
             boot: Some(vec!["hd".to_string()]),
             memory_gib: 4,
             vcpus: 2,
-            network: "default".to_string(),
+            network: Some("default".to_string()),
+            interfaces: None,
             graphics: GraphicsMode::Vnc,
             vnc_listen: "127.0.0.1".to_string(),
             vnc_port: None,
@@ -5472,7 +5837,7 @@ disks:
         )]))
         .expect("manifest should serialize");
 
-        assert!(yaml.starts_with("schemaVersion: 2\n"));
+        assert!(yaml.starts_with("schemaVersion: 3\n"));
         assert!(yaml.contains("name: install-os\n"));
     }
 
@@ -5484,7 +5849,7 @@ disks:
         let output = serialize_manifest_yaml(&manifest).expect("absent disk should serialize");
 
         assert_eq!(manifest.disks[0].absent_id(), Some("data"));
-        assert!(output.starts_with("schemaVersion: 2\n"));
+        assert!(output.starts_with("schemaVersion: 3\n"));
         assert!(output.contains("- id: data\n  state: absent\n"));
         assert!(!output.contains("path:"));
     }
@@ -5541,6 +5906,52 @@ disks:
         assert_eq!(
             remove.disks[0].as_present().unwrap().io_tune,
             VmDiskIoTuneConfig::Remove
+        );
+    }
+
+    #[test]
+    fn parses_and_serializes_multiple_interfaces() {
+        let yaml = r#"schemaVersion: 3
+name: vm
+disks: []
+interfaces:
+- id: primary
+  type: network
+  source: default
+  model: virtio
+  mac: 52:54:00:12:34:56
+- id: storage
+  type: bridge
+  source: br-storage
+  model: e1000e
+- id: retired
+  state: absent
+"#;
+        let manifest = parse_manifest_yaml(yaml).expect("multiple interfaces should parse");
+        let interfaces = manifest.interfaces.as_ref().unwrap();
+        assert_eq!(interfaces.len(), 3);
+        assert_eq!(
+            interfaces[0].as_present().unwrap(),
+            &VmInterface {
+                id: "primary".to_string(),
+                interface_type: VmInterfaceType::Network,
+                source: "default".to_string(),
+                model: "virtio".to_string(),
+                mac: Some("52:54:00:12:34:56".to_string()),
+            }
+        );
+        assert_eq!(interfaces[2].absent_id(), Some("retired"));
+
+        let output = serialize_manifest_yaml(&manifest).unwrap();
+        assert!(output.starts_with("schemaVersion: 3\n"));
+        assert!(output.contains("type: bridge"));
+        assert!(output.contains("state: absent"));
+        assert!(!output.contains("network: default"));
+
+        let conflict = format!("{yaml}network: default\n");
+        assert!(parse_manifest_yaml(&conflict).is_err());
+        assert!(
+            parse_manifest_yaml(&yaml.replacen("schemaVersion: 3", "schemaVersion: 2", 1)).is_err()
         );
     }
 
@@ -5681,10 +6092,10 @@ disks:
 
     #[test]
     fn rejects_unsupported_manifest_schema_version() {
-        let error = parse_manifest_yaml("schemaVersion: 3\nname: vm\ndisks: []\n")
+        let error = parse_manifest_yaml("schemaVersion: 4\nname: vm\ndisks: []\n")
             .expect_err("future schema should be rejected");
 
-        assert!(error.to_string().contains("unsupported VM schemaVersion 3"));
+        assert!(error.to_string().contains("unsupported VM schemaVersion 4"));
     }
 
     #[test]
@@ -5783,7 +6194,8 @@ disks:
             boot: Some(vec!["hd".to_string()]),
             memory_gib: 4,
             vcpus: 2,
-            network: "default".to_string(),
+            network: Some("default".to_string()),
+            interfaces: None,
             graphics: GraphicsMode::None,
             vnc_listen: "127.0.0.1".to_string(),
             vnc_port: None,
@@ -5871,6 +6283,52 @@ disks:
         });
 
         assert!(validate_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_checks_interface_identity_and_mac() {
+        let dir = TestDiskDir::new();
+        let disk = dir.create_disk("sys.qcow2");
+        let mut manifest = test_manifest(vec![test_file_disk(
+            disk.to_str().unwrap(),
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.network = None;
+        manifest.interfaces = Some(vec![VmInterfaceEntry::present(VmInterface {
+            id: "primary".to_string(),
+            interface_type: VmInterfaceType::Network,
+            source: "default".to_string(),
+            model: "virtio".to_string(),
+            mac: Some("52:54:00:12:34:56".to_string()),
+        })]);
+        assert!(validate_manifest(&manifest).is_ok());
+
+        manifest
+            .interfaces
+            .as_mut()
+            .unwrap()
+            .push(VmInterfaceEntry::absent("primary"));
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate interface id")
+        );
+        manifest.interfaces.as_mut().unwrap().pop();
+        manifest.interfaces.as_mut().unwrap()[0] = VmInterfaceEntry::present(VmInterface {
+            id: "primary".to_string(),
+            interface_type: VmInterfaceType::Network,
+            source: "default".to_string(),
+            model: "virtio".to_string(),
+            mac: Some("not-a-mac".to_string()),
+        });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid MAC")
+        );
     }
 
     #[test]
