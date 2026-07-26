@@ -24,9 +24,9 @@ use virt::{
 
 use crate::{
     config::{
-        ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmCapabilitiesArgs, VmCommand,
-        VmCpArgs, VmDumpArgs, VmExecArgs, VmInitArgs, VmListArgs, VmNameArgs, VmRemoveArgs,
-        VmStartArgs, VmStopArgs,
+        ColorMode, DiskFormat, GraphicsMode, VmApplyArgs, VmArgs, VmAutostartArgs,
+        VmCapabilitiesArgs, VmCommand, VmCpArgs, VmDumpArgs, VmExecArgs, VmInitArgs, VmListArgs,
+        VmNameArgs, VmRemoveArgs, VmStartArgs, VmStopArgs,
     },
     domain_xml::{
         self, BootDevice, GraphicsSpec, VmLaunchCpuSpec, VmLaunchDiskSource, VmLaunchDiskSpec,
@@ -52,6 +52,11 @@ pub fn run(args: VmArgs) -> Result<()> {
         VmCommand::List(args) => list(args),
         VmCommand::Start(args) => start(args),
         VmCommand::Stop(args) => stop(args),
+        VmCommand::Reboot(args) => reboot(args),
+        VmCommand::Reset(args) => reset(args),
+        VmCommand::Suspend(args) => suspend(args),
+        VmCommand::Resume(args) => resume(args),
+        VmCommand::Autostart(args) => autostart(args),
         VmCommand::Rm(args) => remove(args),
         VmCommand::Vnc(args) => vnc(args),
         VmCommand::Exec(args) => exec(args),
@@ -3060,6 +3065,52 @@ fn stop(args: VmStopArgs) -> Result<()> {
     Ok(())
 }
 
+fn reboot(args: VmNameArgs) -> Result<()> {
+    reboot_by_name(&args.connect_uri, &args.name).map_err(anyhow::Error::new)?;
+    eprintln!("[qtr] reboot requested: {}", args.name);
+    Ok(())
+}
+
+fn reset(args: VmNameArgs) -> Result<()> {
+    reset_by_name(&args.connect_uri, &args.name).map_err(anyhow::Error::new)?;
+    eprintln!("[qtr] reset VM: {}", args.name);
+    Ok(())
+}
+
+fn suspend(args: VmNameArgs) -> Result<()> {
+    let changed = suspend_by_name(&args.connect_uri, &args.name).map_err(anyhow::Error::new)?;
+    if changed {
+        eprintln!("[qtr] suspended VM: {}", args.name);
+    } else {
+        eprintln!("[qtr] VM already suspended: {}", args.name);
+    }
+    Ok(())
+}
+
+fn resume(args: VmNameArgs) -> Result<()> {
+    let changed = resume_by_name(&args.connect_uri, &args.name).map_err(anyhow::Error::new)?;
+    if changed {
+        eprintln!("[qtr] resumed VM: {}", args.name);
+    } else {
+        eprintln!("[qtr] VM already running: {}", args.name);
+    }
+    Ok(())
+}
+
+fn autostart(args: VmAutostartArgs) -> Result<()> {
+    let desired = if args.enable {
+        Some(true)
+    } else if args.disable {
+        Some(false)
+    } else {
+        None
+    };
+    let enabled =
+        autostart_by_name(&args.connect_uri, &args.name, desired).map_err(anyhow::Error::new)?;
+    println!("{}", if enabled { "enabled" } else { "disabled" });
+    Ok(())
+}
+
 fn remove(args: VmRemoveArgs) -> Result<()> {
     let conn = connect(&args.connect_uri)?;
     let domain = lookup_domain(&conn, &args.name)?;
@@ -3465,6 +3516,119 @@ fn join_command_args(args: &[String]) -> String {
         .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub fn reboot_by_name(connect_uri: &str, name: &str) -> VmApiResult<()> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    ensure_active_domain(&domain, name, "reboot")?;
+    domain
+        .reboot(0)
+        .with_context(|| format!("failed to reboot domain {name}"))
+        .map_err(VmApiError::Internal)
+}
+
+pub fn reset_by_name(connect_uri: &str, name: &str) -> VmApiResult<()> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    ensure_active_domain(&domain, name, "reset")?;
+    domain
+        .reset()
+        .with_context(|| format!("failed to reset domain {name}"))
+        .map(|_| ())
+        .map_err(VmApiError::Internal)
+}
+
+pub fn suspend_by_name(connect_uri: &str, name: &str) -> VmApiResult<bool> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    let state = domain
+        .get_state()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
+        .0;
+    match suspend_state_action(state) {
+        Some(false) => Ok(false),
+        Some(true) => domain
+            .suspend()
+            .with_context(|| format!("failed to suspend domain {name}"))
+            .map(|_| true)
+            .map_err(VmApiError::Internal),
+        None => Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} cannot be suspended from state {}",
+            domain_state_name(state)
+        ))),
+    }
+}
+
+pub fn resume_by_name(connect_uri: &str, name: &str) -> VmApiResult<bool> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    let state = domain
+        .get_state()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
+        .0;
+    match resume_state_action(state) {
+        Some(false) => Ok(false),
+        Some(true) => domain
+            .resume()
+            .with_context(|| format!("failed to resume domain {name}"))
+            .map(|_| true)
+            .map_err(VmApiError::Internal),
+        None => Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} cannot be resumed from state {}",
+            domain_state_name(state)
+        ))),
+    }
+}
+
+pub fn autostart_by_name(
+    connect_uri: &str,
+    name: &str,
+    desired: Option<bool>,
+) -> VmApiResult<bool> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    if let Some(desired) = desired {
+        domain
+            .set_autostart(desired)
+            .with_context(|| format!("failed to set autostart for domain {name}"))
+            .map_err(VmApiError::Internal)?;
+    }
+    domain
+        .get_autostart()
+        .with_context(|| format!("failed to query autostart for domain {name}"))
+        .map_err(VmApiError::Internal)
+}
+
+fn ensure_active_domain(domain: &Domain, name: &str, operation: &str) -> VmApiResult<()> {
+    if !domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
+    {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} must be active to {operation}"
+        )));
+    }
+    Ok(())
+}
+
+fn suspend_state_action(state: sys::virDomainState) -> Option<bool> {
+    match state {
+        sys::VIR_DOMAIN_PAUSED => Some(false),
+        sys::VIR_DOMAIN_RUNNING | sys::VIR_DOMAIN_BLOCKED => Some(true),
+        _ => None,
+    }
+}
+
+fn resume_state_action(state: sys::virDomainState) -> Option<bool> {
+    match state {
+        sys::VIR_DOMAIN_RUNNING | sys::VIR_DOMAIN_BLOCKED => Some(false),
+        sys::VIR_DOMAIN_PAUSED => Some(true),
+        _ => None,
+    }
 }
 
 pub fn start_by_name(connect_uri: &str, name: &str) -> VmApiResult<()> {
@@ -5344,6 +5508,19 @@ disks:
         .map(domain_state_name);
 
         assert_eq!(states.as_slice(), expected);
+    }
+
+    #[test]
+    fn lifecycle_state_actions_are_idempotent_and_reject_inactive_states() {
+        assert_eq!(suspend_state_action(sys::VIR_DOMAIN_RUNNING), Some(true));
+        assert_eq!(suspend_state_action(sys::VIR_DOMAIN_BLOCKED), Some(true));
+        assert_eq!(suspend_state_action(sys::VIR_DOMAIN_PAUSED), Some(false));
+        assert_eq!(suspend_state_action(sys::VIR_DOMAIN_SHUTOFF), None);
+
+        assert_eq!(resume_state_action(sys::VIR_DOMAIN_PAUSED), Some(true));
+        assert_eq!(resume_state_action(sys::VIR_DOMAIN_RUNNING), Some(false));
+        assert_eq!(resume_state_action(sys::VIR_DOMAIN_BLOCKED), Some(false));
+        assert_eq!(resume_state_action(sys::VIR_DOMAIN_SHUTOFF), None);
     }
 
     #[test]

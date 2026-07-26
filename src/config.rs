@@ -344,6 +344,21 @@ pub enum VmCommand {
     #[command(about = "Stop a running VM")]
     Stop(VmStopArgs),
 
+    #[command(about = "Request a reboot of a running VM")]
+    Reboot(VmNameArgs),
+
+    #[command(about = "Immediately reset a running VM")]
+    Reset(VmNameArgs),
+
+    #[command(about = "Suspend a running VM")]
+    Suspend(VmNameArgs),
+
+    #[command(about = "Resume a suspended VM")]
+    Resume(VmNameArgs),
+
+    #[command(about = "Query or change VM autostart")]
+    Autostart(VmAutostartArgs),
+
     #[command(about = "Remove an inactive VM definition")]
     Rm(VmRemoveArgs),
 
@@ -494,6 +509,24 @@ pub struct VmListArgs {
 pub struct VmNameArgs {
     /// Libvirt domain name.
     pub name: String,
+
+    /// Libvirt connection URI.
+    #[arg(long, default_value = "qemu:///system")]
+    pub connect_uri: String,
+}
+
+#[derive(Debug, Args)]
+pub struct VmAutostartArgs {
+    /// Libvirt domain name.
+    pub name: String,
+
+    /// Enable autostart.
+    #[arg(long, conflicts_with = "disable")]
+    pub enable: bool,
+
+    /// Disable autostart.
+    #[arg(long, conflicts_with = "enable")]
+    pub disable: bool,
 
     /// Libvirt connection URI.
     #[arg(long, default_value = "qemu:///system")]

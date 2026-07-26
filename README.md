@@ -206,10 +206,19 @@ Apply it:
 cargo run -- vm apply -f vm.yaml
 cargo run -- vm start install-os
 cargo run -- vm stop install-os --wait
+cargo run -- vm reboot install-os
+cargo run -- vm reset install-os
+cargo run -- vm suspend install-os
+cargo run -- vm resume install-os
+cargo run -- vm autostart install-os
+cargo run -- vm autostart install-os --enable
+cargo run -- vm autostart install-os --disable
 cargo run -- vm rm install-os
 cargo run -- vm apply -f vm.yaml --dry-run
 cargo run -- vm apply -f vm.yaml --dry-run --color always
 ```
+
+`reboot` requests an orderly guest reboot through libvirt. `reset` is an immediate virtual hardware reset and can cause data loss. `suspend` and `resume` are idempotent for already paused/running VMs. `autostart` without a flag prints the current state.
 
 Dump an existing VM definition:
 
