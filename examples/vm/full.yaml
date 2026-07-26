@@ -21,6 +21,9 @@ disks:
   format: qcow2
   target: vda
   bus: virtio-blk
+  discard: unmap
+  detectZeroes: unmap
+  serial: root-disk
 - id: data
   path: /dev/disk/by-id/example-block-device
   type: block
@@ -28,6 +31,7 @@ disks:
   target: sda
   bus: virtio-scsi
   cache: none
+  readonly: true
   io:
     mode: threads
 cdroms:

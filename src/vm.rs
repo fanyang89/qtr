@@ -37,8 +37,8 @@ use crate::{
 
 pub use crate::vm_model::{
     VmCdrom, VmCdromEntry, VmCpu, VmCpuMode, VmCpuTopology, VmDisk, VmDiskBus, VmDiskCache,
-    VmDiskEntry, VmDiskIoConfig, VmDiskIoMode, VmDiskType, VmIoThreads, VmMachine, VmManifest,
-    VmMemory,
+    VmDiskDetectZeroes, VmDiskDiscard, VmDiskEntry, VmDiskIoConfig, VmDiskIoMode, VmDiskSerial,
+    VmDiskType, VmIoThreads, VmMachine, VmManifest, VmMemory,
 };
 
 pub fn run(args: VmArgs) -> Result<()> {
@@ -497,6 +497,10 @@ fn init(args: VmInitArgs) -> Result<()> {
                 bus: VmDiskBus::VirtioBlk,
                 cache: None,
                 io: None,
+                discard: None,
+                detect_zeroes: None,
+                readonly: None,
+                serial: VmDiskSerial::default(),
             })
         })
         .collect();
@@ -726,6 +730,10 @@ fn launch_disk_spec(
         bus: disk.bus.target_bus().to_string(),
         cache: disk.cache.map(VmDiskCache::as_xml),
         io: disk.io.map(|io| io.mode.as_xml()),
+        discard: disk.discard.map(VmDiskDiscard::as_xml),
+        detect_zeroes: disk.detect_zeroes.map(VmDiskDetectZeroes::as_xml),
+        readonly: disk.readonly,
+        serial: disk.serial.as_deref(),
         io_threads,
     }
 }
@@ -1485,7 +1493,13 @@ fn build_patched_disk_xml(
         disk_target_or(manifest_disk, index),
         io_threads,
     ));
-    vm_reconcile::merge_disk_xml(xml, domain_disk, &desired_xml)
+    vm_reconcile::merge_disk_xml(
+        xml,
+        domain_disk,
+        &desired_xml,
+        manifest_disk.readonly.is_some(),
+        !manifest_disk.serial.is_preserve(),
+    )
 }
 
 fn patch_machine(
@@ -2169,6 +2183,26 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 .and_then(|driver| driver.attribute("io"))
                 .map(parse_disk_io)
                 .transpose()?;
+            let discard = driver
+                .and_then(|driver| driver.attribute("discard"))
+                .map(parse_disk_discard)
+                .transpose()?;
+            let detect_zeroes = driver
+                .and_then(|driver| driver.attribute("detect_zeroes"))
+                .map(parse_disk_detect_zeroes)
+                .transpose()?;
+            let readonly = optional_child(disk, "readonly").map(|_| true);
+            let serial = optional_child(disk, "serial")
+                .map(|serial| {
+                    let value = serial
+                        .text()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .context("domain XML disk serial is empty")?;
+                    Ok::<_, anyhow::Error>(VmDiskSerial::value(value))
+                })
+                .transpose()?
+                .unwrap_or_default();
 
             Ok(VmDisk {
                 id: Some(disk_id_from_domain_xml(disk, &target_dev)),
@@ -2179,6 +2213,10 @@ fn disks_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmDisk>> {
                 bus,
                 cache,
                 io,
+                discard,
+                detect_zeroes,
+                readonly,
+                serial,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2334,6 +2372,23 @@ fn parse_disk_io(value: &str) -> Result<VmDiskIoConfig> {
             mode: VmDiskIoMode::IoUring,
         }),
         _ => bail!("unsupported disk io mode {value:?}"),
+    }
+}
+
+fn parse_disk_discard(value: &str) -> Result<VmDiskDiscard> {
+    match value {
+        "ignore" => Ok(VmDiskDiscard::Ignore),
+        "unmap" => Ok(VmDiskDiscard::Unmap),
+        _ => bail!("unsupported disk discard mode {value:?}"),
+    }
+}
+
+fn parse_disk_detect_zeroes(value: &str) -> Result<VmDiskDetectZeroes> {
+    match value {
+        "off" => Ok(VmDiskDetectZeroes::Off),
+        "on" => Ok(VmDiskDetectZeroes::On),
+        "unmap" => Ok(VmDiskDetectZeroes::Unmap),
+        _ => bail!("unsupported disk detect_zeroes mode {value:?}"),
     }
 }
 
@@ -2639,6 +2694,13 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
     let targets = assign_manifest_disk_targets(manifest)?;
     for (disk, target) in present_disks(&manifest.disks).zip(&targets) {
         validate_disk_target_for_bus(target, disk.bus)?;
+        if disk
+            .serial
+            .as_deref()
+            .is_some_and(|serial| serial.trim().is_empty())
+        {
+            bail!("disk serial must not be empty");
+        }
         if !disk.path.exists() {
             bail!("disk {} does not exist", disk.path.display());
         }
@@ -4141,6 +4203,10 @@ mod tests {
                 bus: "virtio".to_string(),
                 cache: None,
                 io: None,
+                discard: None,
+                detect_zeroes: None,
+                readonly: None,
+                serial: None,
                 io_threads: None,
             },
             VmLaunchDiskSpec {
@@ -4152,6 +4218,10 @@ mod tests {
                 bus: "scsi".to_string(),
                 cache: Some("none"),
                 io: Some("threads"),
+                discard: Some("unmap"),
+                detect_zeroes: Some("unmap"),
+                readonly: Some(true),
+                serial: Some("data-disk"),
                 io_threads: Some(VmLaunchIoThreadsSpec {
                     count: 4,
                     queues: 4,
@@ -4222,6 +4292,10 @@ mod tests {
                 mode: VmDiskIoMode::Threads,
             })
         );
+        assert_eq!(second_disk.discard, Some(VmDiskDiscard::Unmap));
+        assert_eq!(second_disk.detect_zeroes, Some(VmDiskDetectZeroes::Unmap));
+        assert_eq!(second_disk.readonly, Some(true));
+        assert_eq!(second_disk.serial, VmDiskSerial::value("data-disk"));
         assert_eq!(
             manifest.io_threads,
             Some(VmIoThreads {
@@ -4353,6 +4427,10 @@ mod tests {
                 io: Some(VmDiskIoConfig {
                     mode: VmDiskIoMode::Native,
                 }),
+                discard: None,
+                detect_zeroes: None,
+                readonly: None,
+                serial: VmDiskSerial::default(),
             })],
             cdrom: Some(PathBuf::from(
                 "/fixtures/qtr/iso/CentOS-7-x86_64-DVD-2207-02.iso",
@@ -4426,6 +4504,42 @@ mod tests {
         let patched_again = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd])
             .expect("second opaque disk patch should succeed");
         assert_eq!(patched_again, patched);
+    }
+
+    #[test]
+    fn reconciles_advanced_disk_options_explicitly() {
+        let xml = test_domain_xml().replace(
+            "<driver name='qemu' type='qcow2'/>",
+            "<driver name='qemu' type='qcow2' discard='ignore' detect_zeroes='off' error_policy='stop'/>",
+        ).replace(
+            "      <address type='pci'",
+            "      <readonly/>\n      <serial>old-disk</serial>\n      <address type='pci'",
+        );
+        let mut disk = test_file_disk("/vm/sys.qcow2", Some("vda"), VmDiskBus::VirtioBlk);
+        disk.discard = Some(VmDiskDiscard::Unmap);
+        disk.detect_zeroes = Some(VmDiskDetectZeroes::Unmap);
+        disk.readonly = Some(false);
+        disk.serial = VmDiskSerial::Remove;
+        let manifest = test_manifest(vec![disk]);
+
+        let removed = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd])
+            .expect("advanced disk options should reconcile");
+        assert!(removed.contains("discard='unmap' detect_zeroes='unmap' error_policy='stop'"));
+        assert!(!removed.contains("<readonly/>"));
+        assert!(!removed.contains("<serial>"));
+
+        let mut disk = manifest.disks[0].as_present().unwrap().clone();
+        disk.readonly = Some(true);
+        disk.serial = VmDiskSerial::value("new&disk");
+        let manifest = test_manifest(vec![disk]);
+        let added = patch_domain_xml(&removed, &manifest, &[BootDevice::Hd])
+            .expect("advanced disk options should be added");
+        assert!(added.contains("<readonly/>"));
+        assert!(added.contains("<serial>new&amp;disk</serial>"));
+
+        let added_again = patch_domain_xml(&added, &manifest, &[BootDevice::Hd])
+            .expect("advanced disk reconciliation should be idempotent");
+        assert_eq!(added_again, added);
     }
 
     #[test]
@@ -4959,6 +5073,10 @@ disks:
                 bus: VmDiskBus::VirtioBlk,
                 cache: None,
                 io: None,
+                discard: None,
+                detect_zeroes: None,
+                readonly: None,
+                serial: VmDiskSerial::default(),
             })],
             cdrom: None,
             cdroms: None,
@@ -5052,9 +5170,49 @@ disks:
     }
 
     #[test]
+    fn parses_and_serializes_advanced_disk_options() {
+        let yaml = r#"schemaVersion: 2
+name: vm
+disks:
+- id: root
+  path: /tmp/root.qcow2
+  format: qcow2
+  discard: unmap
+  detectZeroes: on
+  readonly: false
+  serial: null
+"#;
+
+        let manifest = parse_manifest_yaml(yaml).expect("advanced disk options should parse");
+        let disk = manifest.disks[0].as_present().unwrap();
+        assert_eq!(disk.discard, Some(VmDiskDiscard::Unmap));
+        assert_eq!(disk.detect_zeroes, Some(VmDiskDetectZeroes::On));
+        assert_eq!(disk.readonly, Some(false));
+        assert_eq!(disk.serial, VmDiskSerial::Remove);
+
+        let output =
+            serialize_manifest_yaml(&manifest).expect("advanced disk options should serialize");
+        assert!(output.contains("discard: unmap"));
+        assert!(output.contains("detectZeroes: on"));
+        assert!(output.contains("readonly: false"));
+        assert!(output.contains("serial: null"));
+    }
+
+    #[test]
+    fn rejects_invalid_advanced_disk_modes() {
+        for field in ["discard: trim", "detectZeroes: auto"] {
+            let yaml =
+                format!("name: vm\ndisks:\n- path: /tmp/root.qcow2\n  format: qcow2\n  {field}\n");
+            assert!(parse_manifest_yaml(&yaml).is_err(), "accepted {field}");
+        }
+    }
+
+    #[test]
     fn rejects_disk_state_in_v1_and_present_fields_on_absent_disk() {
         let v1 = "schemaVersion: 1\nname: vm\ndisks:\n- id: data\n  state: absent\n";
         let invalid_absent = "schemaVersion: 2\nname: vm\ndisks:\n- id: data\n  state: absent\n  path: /tmp/data.qcow2\n  format: qcow2\n";
+        let invalid_advanced_absent =
+            "schemaVersion: 2\nname: vm\ndisks:\n- id: data\n  state: absent\n  readonly: true\n";
 
         assert!(
             parse_manifest_yaml(v1)
@@ -5063,6 +5221,8 @@ disks:
                 .contains("requires schemaVersion 2")
         );
         let error = parse_manifest_yaml(invalid_absent).unwrap_err();
+        assert!(format!("{error:#}").contains("absent disk only accepts id and state"));
+        let error = parse_manifest_yaml(invalid_advanced_absent).unwrap_err();
         assert!(format!("{error:#}").contains("absent disk only accepts id and state"));
     }
 
@@ -5295,6 +5455,10 @@ disks:
             bus,
             cache: None,
             io: None,
+            discard: None,
+            detect_zeroes: None,
+            readonly: None,
+            serial: VmDiskSerial::default(),
         }
     }
 
@@ -5411,6 +5575,15 @@ disks:
                 .unwrap_err()
                 .to_string()
                 .contains("mutually exclusive")
+        );
+
+        manifest.cpu = None;
+        manifest.disks[0].as_present_mut().unwrap().serial = VmDiskSerial::value("   ");
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("disk serial must not be empty")
         );
     }
 

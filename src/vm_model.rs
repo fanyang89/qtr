@@ -142,6 +142,14 @@ pub struct VmDisk {
     pub cache: Option<VmDiskCache>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub io: Option<VmDiskIoConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discard: Option<VmDiskDiscard>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detect_zeroes: Option<VmDiskDetectZeroes>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
+    #[serde(default, skip_serializing_if = "VmDiskSerial::is_preserve")]
+    pub serial: VmDiskSerial,
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +233,10 @@ impl<'de> Deserialize<'de> for VmDiskEntry {
                     bus: wire.bus.unwrap_or_default(),
                     cache: wire.cache,
                     io: wire.io,
+                    discard: wire.discard,
+                    detect_zeroes: wire.detect_zeroes,
+                    readonly: wire.readonly,
+                    serial: wire.serial,
                 }))
             }
             VmDeviceState::Absent => {
@@ -236,6 +248,10 @@ impl<'de> Deserialize<'de> for VmDiskEntry {
                     || wire.bus.is_some()
                     || wire.cache.is_some()
                     || wire.io.is_some()
+                    || wire.discard.is_some()
+                    || wire.detect_zeroes.is_some()
+                    || wire.readonly.is_some()
+                    || !wire.serial.is_preserve()
                 {
                     return Err(D::Error::custom("absent disk only accepts id and state"));
                 }
@@ -274,6 +290,11 @@ struct VmDiskWire {
     bus: Option<VmDiskBus>,
     cache: Option<VmDiskCache>,
     io: Option<VmDiskIoConfig>,
+    discard: Option<VmDiskDiscard>,
+    detect_zeroes: Option<VmDiskDetectZeroes>,
+    readonly: Option<bool>,
+    #[serde(default)]
+    serial: VmDiskSerial,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -426,6 +447,89 @@ impl VmDiskCache {
             Self::Directsync => "directsync",
             Self::Unsafe => "unsafe",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmDiskDiscard {
+    Ignore,
+    Unmap,
+}
+
+impl VmDiskDiscard {
+    pub(crate) fn as_xml(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignore",
+            Self::Unmap => "unmap",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmDiskDetectZeroes {
+    Off,
+    On,
+    Unmap,
+}
+
+impl VmDiskDetectZeroes {
+    pub(crate) fn as_xml(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Unmap => "unmap",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum VmDiskSerial {
+    #[default]
+    Preserve,
+    Remove,
+    Value(String),
+}
+
+impl VmDiskSerial {
+    pub fn value(value: impl Into<String>) -> Self {
+        Self::Value(value.into())
+    }
+
+    pub fn as_deref(&self) -> Option<&str> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Preserve | Self::Remove => None,
+        }
+    }
+
+    pub fn is_preserve(&self) -> bool {
+        matches!(self, Self::Preserve)
+    }
+}
+
+impl Serialize for VmDiskSerial {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Preserve | Self::Remove => serializer.serialize_none(),
+            Self::Value(value) => serializer.serialize_str(value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VmDiskSerial {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            Some(value) => Self::Value(value),
+            None => Self::Remove,
+        })
     }
 }
 

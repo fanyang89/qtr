@@ -4,12 +4,20 @@ pub(crate) fn merge_disk_xml(
     current_xml: &str,
     current_disk: Node<'_, '_>,
     desired_xml: &str,
+    manage_readonly: bool,
+    manage_serial: bool,
 ) -> String {
     let desired_doc = Document::parse(desired_xml).expect("generated disk XML should parse");
     let desired_disk = desired_doc.root_element();
     let desired_driver = desired_child(desired_disk, "driver");
     let desired_source = desired_child(desired_disk, "source");
     let desired_target = desired_child(desired_disk, "target");
+    let desired_readonly = desired_disk
+        .children()
+        .find(|child| child.has_tag_name("readonly"));
+    let desired_serial = desired_disk
+        .children()
+        .find(|child| child.has_tag_name("serial"));
     let desired_alias = desired_disk
         .children()
         .find(|child| child.has_tag_name("alias"));
@@ -35,6 +43,8 @@ pub(crate) fn merge_disk_xml(
     }
     let mut emitted_source = false;
     let mut emitted_target = false;
+    let mut emitted_readonly = false;
+    let mut emitted_serial = false;
     let mut emitted_alias = false;
     for child in current_disk.children().filter(Node::is_element) {
         match child.tag_name().name() {
@@ -65,7 +75,41 @@ pub(crate) fn merge_disk_xml(
                 ));
                 emitted_target = true;
             }
+            "readonly" if !emitted_readonly => {
+                if manage_readonly {
+                    if let Some(desired_readonly) = desired_readonly {
+                        output.push_str(&render_raw_node(desired_xml, desired_readonly, "      "));
+                    }
+                } else {
+                    output.push_str(&render_raw_node(current_xml, child, "      "));
+                }
+                emitted_readonly = true;
+            }
+            "serial" if !emitted_serial => {
+                if manage_serial {
+                    if let Some(desired_serial) = desired_serial {
+                        output.push_str(&render_raw_node(desired_xml, desired_serial, "      "));
+                    }
+                } else {
+                    output.push_str(&render_raw_node(current_xml, child, "      "));
+                }
+                emitted_serial = true;
+            }
             "alias" if !emitted_alias => {
+                emit_optional_disk_child(
+                    &mut output,
+                    desired_xml,
+                    desired_readonly,
+                    manage_readonly,
+                    &mut emitted_readonly,
+                );
+                emit_optional_disk_child(
+                    &mut output,
+                    desired_xml,
+                    desired_serial,
+                    manage_serial,
+                    &mut emitted_serial,
+                );
                 if is_qtr_disk_alias(child)
                     && let Some(desired_alias) = desired_alias
                 {
@@ -76,13 +120,27 @@ pub(crate) fn merge_disk_xml(
                 emitted_alias = true;
             }
             "address" if !emitted_alias => {
+                emit_optional_disk_child(
+                    &mut output,
+                    desired_xml,
+                    desired_readonly,
+                    manage_readonly,
+                    &mut emitted_readonly,
+                );
+                emit_optional_disk_child(
+                    &mut output,
+                    desired_xml,
+                    desired_serial,
+                    manage_serial,
+                    &mut emitted_serial,
+                );
                 if let Some(desired_alias) = desired_alias {
                     output.push_str(&render_raw_node(desired_xml, desired_alias, "      "));
                 }
                 emitted_alias = true;
                 output.push_str(&render_raw_node(current_xml, child, "      "));
             }
-            "driver" | "source" | "target" => {}
+            "driver" | "source" | "target" | "readonly" | "serial" => {}
             _ => output.push_str(&render_raw_node(current_xml, child, "      ")),
         }
     }
@@ -97,10 +155,53 @@ pub(crate) fn merge_disk_xml(
         }
     }
     if !emitted_alias && let Some(desired_alias) = desired_alias {
+        emit_optional_disk_child(
+            &mut output,
+            desired_xml,
+            desired_readonly,
+            manage_readonly,
+            &mut emitted_readonly,
+        );
+        emit_optional_disk_child(
+            &mut output,
+            desired_xml,
+            desired_serial,
+            manage_serial,
+            &mut emitted_serial,
+        );
         output.push_str(&render_raw_node(desired_xml, desired_alias, "      "));
     }
+    emit_optional_disk_child(
+        &mut output,
+        desired_xml,
+        desired_readonly,
+        manage_readonly,
+        &mut emitted_readonly,
+    );
+    emit_optional_disk_child(
+        &mut output,
+        desired_xml,
+        desired_serial,
+        manage_serial,
+        &mut emitted_serial,
+    );
     output.push_str("    </disk>\n");
     output
+}
+
+fn emit_optional_disk_child(
+    output: &mut String,
+    desired_xml: &str,
+    desired: Option<Node<'_, '_>>,
+    manage: bool,
+    emitted: &mut bool,
+) {
+    if manage && !*emitted {
+        if let Some(desired) = desired {
+            output.push_str(&render_raw_node(desired_xml, desired, "      "));
+        }
+        *emitted = true;
+    }
 }
 
 pub(crate) fn merge_cdrom_xml(

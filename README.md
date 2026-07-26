@@ -185,6 +185,8 @@ vncListen: 127.0.0.1
 
 `disks[].id` is the stable qtr device identity and is written to libvirt as a `ua-qtr-disk-*` alias. Keep the ID unchanged when moving a disk source or reordering disks. Existing definitions without IDs remain supported; `vm dump` derives deterministic IDs from disk targets.
 
+Disks support `discard: ignore|unmap`, `detectZeroes: off|on|unmap`, `readonly`, and a guest-visible `serial`. Omitted advanced fields preserve existing libvirt XML during updates. Set `readonly: false` to make an existing disk writable and `serial: null` to remove its serial. `discard: unmap` only releases storage when the complete backing chain supports it; disk `serial` is separate from the VM console `serialLog`.
+
 Persistently detach a disk by keeping its ID as an absent tombstone:
 
 ```yaml

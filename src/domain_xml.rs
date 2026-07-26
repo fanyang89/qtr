@@ -55,6 +55,10 @@ pub struct VmLaunchDiskSpec<'a> {
     pub bus: String,
     pub cache: Option<&'a str>,
     pub io: Option<&'a str>,
+    pub discard: Option<&'a str>,
+    pub detect_zeroes: Option<&'a str>,
+    pub readonly: Option<bool>,
+    pub serial: Option<&'a str>,
     pub io_threads: Option<VmLaunchIoThreadsSpec>,
 }
 
@@ -248,26 +252,38 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         .map(|cache| format!(" cache='{cache}'"))
         .unwrap_or_default();
     let io = disk.io.map(|io| format!(" io='{io}'")).unwrap_or_default();
+    let discard = disk
+        .discard
+        .map(|discard| format!(" discard='{discard}'"))
+        .unwrap_or_default();
+    let detect_zeroes = disk
+        .detect_zeroes
+        .map(|detect_zeroes| format!(" detect_zeroes='{detect_zeroes}'"))
+        .unwrap_or_default();
     let queues = disk
         .io_threads
         .map(|io_threads| format!(" queues='{}'", io_threads.queues))
         .unwrap_or_default();
     let driver = match disk.io_threads {
         Some(io_threads) => format!(
-            r#"      <driver name='qemu' type='{format}'{cache}{io}{queues}>
+            r#"      <driver name='qemu' type='{format}'{cache}{io}{discard}{detect_zeroes}{queues}>
 {mapping}      </driver>
 "#,
             format = disk.format.as_qemu_arg(),
             cache = cache,
             io = io,
+            discard = discard,
+            detect_zeroes = detect_zeroes,
             queues = queues,
             mapping = build_iothreads_mapping_xml(io_threads, "        "),
         ),
         None => format!(
-            "      <driver name='qemu' type='{format}'{cache}{io}{queues}/>\n",
+            "      <driver name='qemu' type='{format}'{cache}{io}{discard}{detect_zeroes}{queues}/>\n",
             format = disk.format.as_qemu_arg(),
             cache = cache,
             io = io,
+            discard = discard,
+            detect_zeroes = detect_zeroes,
             queues = queues,
         ),
     };
@@ -275,12 +291,21 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         .id
         .map(|id| format!("      <alias name='ua-qtr-disk-{}'/>\n", escape_xml(id)))
         .unwrap_or_default();
+    let readonly = if disk.readonly == Some(true) {
+        "      <readonly/>\n"
+    } else {
+        ""
+    };
+    let serial = disk
+        .serial
+        .map(|serial| format!("      <serial>{}</serial>\n", escape_xml(serial)))
+        .unwrap_or_default();
 
     format!(
         r#"    <disk type='{disk_type}' device='disk'>
 {driver}      <source {source_attr}='{path}'/>
       <target dev='{target}' bus='{bus}'/>
-{alias}    </disk>
+{readonly}{serial}{alias}    </disk>
 "#,
         disk_type = disk_type,
         driver = driver,
@@ -288,6 +313,8 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         path = escape_xml(&disk.path.display().to_string()),
         target = escape_xml(&disk.target),
         bus = escape_xml(&disk.bus),
+        readonly = readonly,
+        serial = serial,
         alias = alias,
     )
 }
@@ -421,6 +448,10 @@ mod tests {
             bus: bus.to_string(),
             cache: None,
             io: None,
+            discard: None,
+            detect_zeroes: None,
+            readonly: None,
+            serial: None,
             io_threads: None,
         }
     }
@@ -519,6 +550,21 @@ mod tests {
         let block_xml = build_disk_xml(&block);
         assert!(block_xml.contains("<disk type='block' device='disk'>"));
         assert!(block_xml.contains("<source dev='/dev/disk/by-id/test'/>"));
+    }
+
+    #[test]
+    fn builds_advanced_disk_options() {
+        let mut disk = disk_spec("vda", "virtio");
+        disk.discard = Some("unmap");
+        disk.detect_zeroes = Some("unmap");
+        disk.readonly = Some(true);
+        disk.serial = Some("root&disk");
+
+        let xml = build_disk_xml(&disk);
+
+        assert!(xml.contains("discard='unmap' detect_zeroes='unmap'"));
+        assert!(xml.contains("<readonly/>"));
+        assert!(xml.contains("<serial>root&amp;disk</serial>"));
     }
 
     #[test]
