@@ -43,8 +43,8 @@ use crate::config::GraphicsMode;
 use crate::{
     config::WebArgs,
     jobs::{
-        FedoraInstallRequest, InstallJob, InstallJobCreateOutcome, IsoDeleteOutcome,
-        IsoPublishOutcome, JobRoots, JobService, ManagedResource,
+        FedoraInstallRequest, ImageCreateOutcome, InstallJob, InstallJobCreateOutcome,
+        IsoDeleteOutcome, IsoPublishOutcome, JobRoots, JobService, ManagedResource,
     },
     network, vm,
 };
@@ -235,6 +235,14 @@ struct CreateVmConsole {
     graphics: GraphicsMode,
     #[serde(default)]
     serial_log: bool,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateImageRequest {
+    id: String,
+    format: crate::config::DiskFormat,
+    size_bytes: u64,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -489,7 +497,7 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(list_install_jobs, create_install_job))
         .routes(routes!(get_install_job))
         .routes(routes!(cancel_install_job))
-        .routes(routes!(list_images))
+        .routes(routes!(list_images, create_image))
         .routes(routes!(list_media))
         .routes(routes!(upload_iso, delete_iso))
         .routes(routes!(list_networks))
@@ -962,6 +970,42 @@ async fn cancel_install_job(
 async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<ManagedResource>>> {
     let jobs = job_service(&state)?;
     Ok(Json(run_job_store(move || jobs.list_images()).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/images",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    request_body = CreateImageRequest,
+    responses(
+        (status = CREATED, body = ManagedResource),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn create_image(
+    State(state): State<AppState>,
+    request: std::result::Result<Json<CreateImageRequest>, JsonRejection>,
+) -> AppResult<(StatusCode, Json<ManagedResource>)> {
+    let request = api_json(request)?;
+    let jobs = job_service(&state)?;
+    jobs.validate_image_id(&request.id, request.format)
+        .map_err(AppError::BadRequest)?;
+    if request.size_bytes == 0 {
+        return Err(AppError::BadRequest(anyhow::anyhow!(
+            "sizeBytes must be greater than zero"
+        )));
+    }
+    let outcome =
+        run_job_store(move || jobs.create_image(&request.id, request.format, request.size_bytes))
+            .await?;
+    match outcome {
+        ImageCreateOutcome::Created(image) => Ok((StatusCode::CREATED, Json(image))),
+        ImageCreateOutcome::Conflict(detail) => Err(AppError::Conflict(detail)),
+    }
 }
 
 #[utoipa::path(
@@ -1733,6 +1777,29 @@ mod tests {
             .unwrap();
         let resources: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(resources[0]["id"], "Fedora.iso");
+
+        for (id, status) in [
+            ("wrong.raw", StatusCode::BAD_REQUEST),
+            ("reserved.qcow2", StatusCode::CONFLICT),
+        ] {
+            let request = serde_json::json!({
+                "id": id,
+                "format": "qcow2",
+                "sizeBytes": 1_073_741_824_u64
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/images")
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(request.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+        }
 
         let request = serde_json::json!({
             "name": "fedora-test",

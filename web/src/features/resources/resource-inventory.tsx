@@ -11,6 +11,7 @@ import { Main } from '@/components/layout/main'
 import { PageHeading } from '@/components/page-heading'
 import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
+import { CreateDiskButton } from './disk-actions'
 import { DeleteIsoButton, IsoUploadButton } from './iso-actions'
 
 export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
@@ -44,7 +45,7 @@ export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
               ? 'Managed virtual disks available to machines on this host.'
               : 'Read-only ISO installation media available to deployment jobs.'
           }
-          actions={kind === 'isos' ? <IsoUploadButton /> : undefined}
+          actions={kind === 'isos' ? <IsoUploadButton /> : <CreateDiskButton />}
         />
 
         <div className='mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
@@ -105,7 +106,7 @@ export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
                   </code>
                 </span>
                 <span className='font-mono text-xs tabular-nums'>
-                  {formatBytes(resource.sizeBytes)}
+                  {formatBytes(resource.virtualSizeBytes ?? resource.sizeBytes)}
                 </span>
                 <span className='hidden text-sm text-muted-foreground sm:block'>
                   {formatTimestamp(resource.modifiedAtMs)}

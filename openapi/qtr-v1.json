@@ -65,6 +65,79 @@
             "bearerAuth": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "resources"
+        ],
+        "operationId": "create_image",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateImageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedResource"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/api/v1/install-jobs": {
@@ -1179,6 +1252,28 @@
   },
   "components": {
     "schemas": {
+      "CreateImageRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "format",
+          "sizeBytes"
+        ],
+        "properties": {
+          "format": {
+            "$ref": "#/components/schemas/DiskFormat"
+          },
+          "id": {
+            "type": "string"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateVmConsole": {
         "type": "object",
         "required": [
@@ -1454,6 +1549,14 @@
           },
           "sizeBytes": {
             "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "virtualSizeBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "minimum": 0
           }

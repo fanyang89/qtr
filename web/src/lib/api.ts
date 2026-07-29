@@ -123,6 +123,7 @@ export const installJobSchema = z.object({
 export const managedResourceSchema = z.object({
   id: z.string(),
   sizeBytes: z.number(),
+  virtualSizeBytes: z.number().nullish(),
   modifiedAtMs: z.number().nullish(),
 })
 
@@ -148,6 +149,12 @@ export type FedoraInstallRequest = z.infer<typeof fedoraInstallRequestSchema>
 export type InstallJob = z.infer<typeof installJobSchema>
 export type ManagedResource = z.infer<typeof managedResourceSchema>
 export type NetworkSummary = z.infer<typeof networkSummarySchema>
+
+export type ImageCreateInput = {
+  id: string
+  format: 'raw' | 'qcow2'
+  sizeBytes: number
+}
 
 export type VmCreateInput = {
   name: string
@@ -285,6 +292,12 @@ export async function cancelInstallJob(id: string): Promise<InstallJob> {
 
 export async function getDisks(): Promise<ManagedResource[]> {
   return parseResponse(apiClient.get('/images'), managedResourceArraySchema)
+}
+
+export async function createDisk(
+  input: ImageCreateInput
+): Promise<ManagedResource> {
+  return parseResponse(apiClient.post('/images', input), managedResourceSchema)
 }
 
 export async function getIsos(): Promise<ManagedResource[]> {

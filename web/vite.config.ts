@@ -9,7 +9,7 @@ import { playwright } from '@vitest/browser-playwright'
 // https://vite.dev/config/
 export default defineConfig({
   optimizeDeps: {
-    include: ['@tanstack/react-query'],
+    include: ['@radix-ui/react-select', '@tanstack/react-query'],
   },
   server: {
     proxy: {

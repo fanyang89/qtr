@@ -10,6 +10,7 @@ Admin dashboard UI for qtr, built from `satnaing/shadcn-admin` and trimmed for Q
 - TanStack Router routes
 - TanStack Query API hooks
 - VM dashboard and list pages
+- Managed disk creation and ISO lifecycle pages
 - noVNC console shell
 - Vite `/api` proxy for the Rust web server
 

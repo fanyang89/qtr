@@ -92,6 +92,8 @@ Fedora installations are persistent jobs under `/api/v1/install-jobs`. Requests 
 
 The ISOs page supports authenticated, streaming upload and protected deletion. Uploads are limited to 32 GiB by default; override the limit with `--max-iso-upload-bytes`. Existing ISO IDs are never overwritten, and deletion is blocked while an ISO is referenced by an automated install or VM CD-ROM.
 
+The Disks page creates blank managed raw and qcow2 images without host shell access. Image IDs must use the extension matching their format, and creation is rejected while an automated install reserves the same ID.
+
 qtr serves plain HTTP. Keep the default loopback binding or put a TLS reverse proxy in front of qtr on trusted networks. The server logs a warning when plain HTTP listens on a non-loopback address.
 
 Regenerate the committed OpenAPI 3.1 document after changing API handlers:

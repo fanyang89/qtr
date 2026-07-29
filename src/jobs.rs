@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    config::{FedoraMirror, VmInstallFedoraArgs},
+    config::{DiskFormat, FedoraMirror, VmInstallFedoraArgs},
+    disk,
     installer::{self, InstallControl},
 };
 
@@ -123,6 +124,7 @@ pub struct InstallJob {
 pub struct ManagedResource {
     pub id: String,
     pub size_bytes: u64,
+    pub virtual_size_bytes: Option<u64>,
     pub modified_at_ms: Option<i64>,
 }
 
@@ -135,6 +137,11 @@ pub enum IsoDeleteOutcome {
 pub enum IsoPublishOutcome {
     Created(ManagedResource),
     Exists,
+}
+
+pub enum ImageCreateOutcome {
+    Created(ManagedResource),
+    Conflict(String),
 }
 
 pub enum InstallJobCreateOutcome {
@@ -442,7 +449,13 @@ impl JobService {
     }
 
     pub fn list_images(&self) -> Result<Vec<ManagedResource>> {
-        list_resources(&self.roots.images)
+        let mut images = list_resources(&self.roots.images)?;
+        for image in &mut images {
+            image.virtual_size_bytes = Some(disk::image_virtual_size(
+                &self.roots.images.join(&image.id),
+            )?);
+        }
+        Ok(images)
     }
 
     pub fn list_media(&self) -> Result<Vec<ManagedResource>> {
@@ -455,6 +468,61 @@ impl JobService {
 
     pub fn resolve_media(&self, id: &str) -> Result<PathBuf> {
         resolve_resource(&self.roots.media, id, "media")
+    }
+
+    pub fn validate_image_id(&self, id: &str, format: DiskFormat) -> Result<()> {
+        validate_image_id(id, format)
+    }
+
+    pub fn create_image(
+        &self,
+        id: &str,
+        format: DiskFormat,
+        size_bytes: u64,
+    ) -> Result<ImageCreateOutcome> {
+        let _guard = self.lock_resources()?;
+        validate_image_id(id, format)?;
+        if size_bytes == 0 {
+            bail!("image size must be greater than zero");
+        }
+        if let Some(job_id) = self.store.active_resource_user("", &[id.to_string()])? {
+            return Ok(ImageCreateOutcome::Conflict(format!(
+                "image is reserved by automated install job {job_id}"
+            )));
+        }
+        let destination = self.roots.images.join(id);
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                return Ok(ImageCreateOutcome::Conflict(format!(
+                    "image {id:?} already exists"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let staging = self
+            .roots
+            .images
+            .join(".uploads")
+            .join(format!("{}.partial", Uuid::new_v4()));
+        let result = (|| {
+            disk::create_image(&staging, format, &size_bytes.to_string())?;
+            match std::fs::hard_link(&staging, &destination) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Ok(ImageCreateOutcome::Conflict(format!(
+                        "image {id:?} already exists"
+                    )));
+                }
+                Err(error) => return Err(error.into()),
+            }
+            let mut image = resource_from_path(id, &destination)?;
+            image.virtual_size_bytes = Some(size_bytes);
+            Ok(ImageCreateOutcome::Created(image))
+        })();
+        let _ = std::fs::remove_file(staging);
+        result
     }
 
     pub fn active_install_user(
@@ -670,12 +738,14 @@ fn prepare_roots(roots: &JobRoots) -> Result<()> {
         roots.media.as_path(),
         roots.state.join("jobs").as_path(),
         roots.state.join("vms").as_path(),
+        roots.images.join(".uploads").as_path(),
         roots.media.join(".uploads").as_path(),
     ] {
         std::fs::create_dir_all(path)
             .with_context(|| format!("failed to create {}", path.display()))?;
     }
     cleanup_staging(&roots.media.join(".uploads"))?;
+    cleanup_staging(&roots.images.join(".uploads"))?;
     Ok(())
 }
 
@@ -701,6 +771,7 @@ fn list_resources(root: &Path) -> Result<Vec<ManagedResource>> {
         resources.push(ManagedResource {
             id,
             size_bytes: metadata.len(),
+            virtual_size_bytes: None,
             modified_at_ms,
         });
     }
@@ -734,6 +805,27 @@ fn validate_iso_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_image_id(id: &str, format: DiskFormat) -> Result<()> {
+    validate_id(id, "image ID")?;
+    if id.len() > 255 {
+        bail!("image ID must not exceed 255 bytes");
+    }
+    if id.starts_with('.') {
+        bail!("image ID must not start with a dot");
+    }
+    let extension = match format {
+        DiskFormat::Raw => ".raw",
+        DiskFormat::Qcow2 => ".qcow2",
+    };
+    if !id.to_ascii_lowercase().ends_with(extension) {
+        bail!(
+            "{} image ID must end with {extension}",
+            format.as_qemu_arg()
+        );
+    }
+    Ok(())
+}
+
 fn resource_from_path(id: &str, path: &Path) -> Result<ManagedResource> {
     let metadata = path.symlink_metadata()?;
     if !metadata.file_type().is_file() {
@@ -747,6 +839,7 @@ fn resource_from_path(id: &str, path: &Path) -> Result<ManagedResource> {
     Ok(ManagedResource {
         id: id.to_string(),
         size_bytes: metadata.len(),
+        virtual_size_bytes: None,
         modified_at_ms,
     })
 }
@@ -1008,5 +1101,14 @@ mod tests {
         assert!(validate_iso_id(".hidden.iso").is_err());
         assert!(validate_iso_id("../escape.iso").is_err());
         assert!(validate_iso_id(&format!("{}.iso", "a".repeat(252))).is_err());
+    }
+
+    #[test]
+    fn validates_image_ids_against_their_format() {
+        assert!(validate_image_id("system.qcow2", DiskFormat::Qcow2).is_ok());
+        assert!(validate_image_id("data.raw", DiskFormat::Raw).is_ok());
+        assert!(validate_image_id("system.raw", DiskFormat::Qcow2).is_err());
+        assert!(validate_image_id(".hidden.qcow2", DiskFormat::Qcow2).is_err());
+        assert!(validate_image_id("../escape.qcow2", DiskFormat::Qcow2).is_err());
     }
 }
