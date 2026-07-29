@@ -43,8 +43,8 @@ use crate::config::GraphicsMode;
 use crate::{
     config::WebArgs,
     jobs::{
-        FedoraInstallRequest, InstallJob, IsoDeleteOutcome, IsoPublishOutcome, JobRoots,
-        JobService, ManagedResource,
+        FedoraInstallRequest, InstallJob, InstallJobCreateOutcome, IsoDeleteOutcome,
+        IsoPublishOutcome, JobRoots, JobService, ManagedResource,
     },
     network, vm,
 };
@@ -634,32 +634,47 @@ async fn create_vm(
 ) -> AppResult<(StatusCode, Json<vm::VmSummary>)> {
     let request = api_json(request)?;
     let jobs = job_service(&state)?;
-    let manifest = request.into_manifest(&jobs).map_err(AppError::BadRequest)?;
-    let network_id = manifest.network.clone().unwrap_or_default();
     let connect_uri = state.connect_uri;
     let vm = run_libvirt(move || {
-        network::ensure_active(&connect_uri, &network_id)
-            .map_err(vm::VmApiError::InvalidRequest)?;
-        let requested_paths = manifest
-            .disks
-            .iter()
-            .filter_map(vm::VmDiskEntry::as_present)
-            .map(|disk| disk.path.as_path())
-            .collect::<Vec<_>>();
-        for existing in vm::list_summaries(&connect_uri).map_err(vm::VmApiError::Internal)? {
-            if let Some(disk) = existing.disks.iter().flatten().find(|disk| {
-                requested_paths
-                    .iter()
-                    .any(|requested| *requested == std::path::Path::new(&disk.path))
-            }) {
-                return Err(vm::VmApiError::InvalidRequest(anyhow::anyhow!(
-                    "image {} is already attached to VM {}",
-                    disk.path,
-                    existing.name
+        jobs.with_resource_lock(|| {
+            let vm_name = request.name.clone();
+            let image_ids = request
+                .disks
+                .iter()
+                .map(|disk| disk.image_id.clone())
+                .collect::<Vec<_>>();
+            if let Some(job_id) = jobs.active_install_user(&vm_name, &image_ids)? {
+                return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
+                    "VM name or image is reserved by automated install job {job_id}"
                 )));
             }
-        }
-        vm::create_by_manifest(&connect_uri, manifest)
+            let manifest = request
+                .into_manifest(&jobs)
+                .map_err(vm::VmApiError::InvalidRequest)?;
+            let network_id = manifest.network.clone().unwrap_or_default();
+            network::ensure_active(&connect_uri, &network_id)
+                .map_err(vm::VmApiError::InvalidRequest)?;
+            let requested_paths = manifest
+                .disks
+                .iter()
+                .filter_map(vm::VmDiskEntry::as_present)
+                .map(|disk| disk.path.as_path())
+                .collect::<Vec<_>>();
+            for existing in vm::list_summaries(&connect_uri).map_err(vm::VmApiError::Internal)? {
+                if let Some(disk) = existing.disks.iter().flatten().find(|disk| {
+                    requested_paths
+                        .iter()
+                        .any(|requested| *requested == std::path::Path::new(&disk.path))
+                }) {
+                    return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
+                        "image {} is already attached to VM {}",
+                        disk.path,
+                        existing.name
+                    )));
+                }
+            }
+            vm::create_by_manifest(&connect_uri, manifest)
+        })
     })
     .await?;
     Ok((StatusCode::CREATED, Json(vm)))
@@ -687,8 +702,23 @@ async fn update_vm(
     let request = api_json(request)?;
     let mut manifest = request.into_manifest();
     manifest.name = name;
+    let jobs = job_service(&state)?;
     let connect_uri = state.connect_uri;
-    let vm = run_libvirt(move || vm::apply_by_manifest(&connect_uri, manifest)).await?;
+    let vm_name = manifest.name.clone();
+    let vm = run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            let image_ids = jobs.managed_image_ids(
+                manifest
+                    .disks
+                    .iter()
+                    .filter_map(vm::VmDiskEntry::as_present)
+                    .map(|disk| disk.path.as_path()),
+            )?;
+            reject_active_install(&jobs, &vm_name, &image_ids)?;
+            vm::apply_by_manifest(&connect_uri, manifest)
+        })
+    })
+    .await?;
     Ok(Json(vm))
 }
 
@@ -709,8 +739,15 @@ async fn start_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
+    let jobs = job_service(&state)?;
     let connect_uri = state.connect_uri;
-    run_libvirt(move || vm::start_by_name(&connect_uri, &name)).await?;
+    run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            reject_active_install(&jobs, &name, &[])?;
+            vm::start_by_name(&connect_uri, &name)
+        })
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -731,8 +768,15 @@ async fn shutdown_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
+    let jobs = job_service(&state)?;
     let connect_uri = state.connect_uri;
-    run_libvirt(move || vm::shutdown_by_name(&connect_uri, &name, false)).await?;
+    run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            reject_active_install(&jobs, &name, &[])?;
+            vm::shutdown_by_name(&connect_uri, &name, false)
+        })
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -753,8 +797,15 @@ async fn destroy_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
+    let jobs = job_service(&state)?;
     let connect_uri = state.connect_uri;
-    run_libvirt(move || vm::destroy_by_name(&connect_uri, &name)).await?;
+    run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            reject_active_install(&jobs, &name, &[])?;
+            vm::destroy_by_name(&connect_uri, &name)
+        })
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -775,8 +826,15 @@ async fn undefine_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
+    let jobs = job_service(&state)?;
     let connect_uri = state.connect_uri;
-    run_libvirt(move || vm::undefine_by_name(&connect_uri, &name)).await?;
+    run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            reject_active_install(&jobs, &name, &[])?;
+            vm::undefine_by_name(&connect_uri, &name)
+        })
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -806,6 +864,7 @@ async fn list_install_jobs(State(state): State<AppState>) -> AppResult<Json<Vec<
         (status = ACCEPTED, body = InstallJob),
         (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
         (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
         (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
     )
 )]
@@ -816,8 +875,32 @@ async fn create_install_job(
     let request = api_json(request)?;
     request.validate().map_err(AppError::BadRequest)?;
     let jobs = job_service(&state)?;
-    let job = run_job_store(move || jobs.create(request)).await?;
-    Ok((StatusCode::ACCEPTED, Json(job)))
+    let connect_uri = state.connect_uri;
+    let outcome = run_job_store(move || {
+        jobs.create(request, |name| {
+            Ok(vm::list_summaries(&connect_uri)?
+                .into_iter()
+                .any(|vm| vm.name == name))
+        })
+    })
+    .await?;
+    match outcome {
+        InstallJobCreateOutcome::Created(job) => Ok((StatusCode::ACCEPTED, Json(*job))),
+        InstallJobCreateOutcome::Conflict(detail) => Err(AppError::Conflict(detail)),
+    }
+}
+
+fn reject_active_install(
+    jobs: &JobService,
+    vm_name: &str,
+    image_ids: &[String],
+) -> vm::VmApiResult<()> {
+    if let Some(job_id) = jobs.active_install_user(vm_name, image_ids)? {
+        return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
+            "VM is reserved by automated install job {job_id}"
+        )));
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -1614,11 +1697,14 @@ mod tests {
     async fn install_api_uses_managed_resource_ids() {
         let directory = std::env::temp_dir().join(format!("qtr-web-job-test-{}", Uuid::new_v4()));
         let media = directory.join("media");
+        let images = directory.join("images");
         std::fs::create_dir_all(&media).unwrap();
+        std::fs::create_dir_all(&images).unwrap();
         std::fs::write(media.join("Fedora.iso"), b"iso").unwrap();
+        std::fs::write(images.join("reserved.qcow2"), b"disk").unwrap();
         let jobs = JobService::start(JobRoots {
             state: directory.join("state"),
-            images: directory.join("images"),
+            images,
             media,
             logs: directory.join("logs"),
             connect_uri: "test:///default".to_string(),
@@ -1670,6 +1756,25 @@ mod tests {
             response.headers()[header::CONTENT_TYPE],
             "application/problem+json"
         );
+
+        let request = serde_json::json!({
+            "name": "fedora-test",
+            "mediaId": "Fedora.iso",
+            "imageId": "reserved.qcow2",
+            "sshAuthorizedKey": "ssh-ed25519 AAAA test"
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/install-jobs")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
 
         drop(app);
         std::fs::remove_dir_all(directory).unwrap();

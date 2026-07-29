@@ -52,6 +52,10 @@ impl JobStatus {
             _ => bail!("unknown job status {value:?}"),
         }
     }
+
+    fn reserves_resources(self) -> bool {
+        matches!(self, Self::Queued | Self::Running | Self::Interrupted)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -131,6 +135,11 @@ pub enum IsoDeleteOutcome {
 pub enum IsoPublishOutcome {
     Created(ManagedResource),
     Exists,
+}
+
+pub enum InstallJobCreateOutcome {
+    Created(Box<InstallJob>),
+    Conflict(String),
 }
 
 #[derive(Clone)]
@@ -229,12 +238,17 @@ impl JobStore {
         Ok(self
             .list()?
             .into_iter()
+            .find(|job| job.request.media_id == media_id && job.status.reserves_resources())
+            .map(|job| job.id))
+    }
+
+    fn active_resource_user(&self, vm_name: &str, image_ids: &[String]) -> Result<Option<String>> {
+        Ok(self
+            .list()?
+            .into_iter()
             .find(|job| {
-                job.request.media_id == media_id
-                    && matches!(
-                        job.status,
-                        JobStatus::Queued | JobStatus::Running | JobStatus::Interrupted
-                    )
+                job.status.reserves_resources()
+                    && (job.request.name == vm_name || image_ids.contains(&job.request.image_id))
             })
             .map(|job| job.id))
     }
@@ -369,13 +383,44 @@ impl JobService {
         Ok(service)
     }
 
-    pub fn create(&self, request: FedoraInstallRequest) -> Result<InstallJob> {
+    pub fn create<F>(
+        &self,
+        request: FedoraInstallRequest,
+        vm_exists: F,
+    ) -> Result<InstallJobCreateOutcome>
+    where
+        F: FnOnce(&str) -> Result<bool>,
+    {
         let _guard = self.lock_resources()?;
         request.validate()?;
         self.resolve_media(&request.media_id)?;
+        if let Some(job_id) = self
+            .store
+            .active_resource_user(&request.name, std::slice::from_ref(&request.image_id))?
+        {
+            return Ok(InstallJobCreateOutcome::Conflict(format!(
+                "VM name or image is reserved by automated install job {job_id}"
+            )));
+        }
+        if vm_exists(&request.name)? {
+            return Ok(InstallJobCreateOutcome::Conflict(format!(
+                "VM {:?} already exists",
+                request.name
+            )));
+        }
+        match std::fs::symlink_metadata(self.roots.images.join(&request.image_id)) {
+            Ok(_) => {
+                return Ok(InstallJobCreateOutcome::Conflict(format!(
+                    "image {:?} already exists",
+                    request.image_id
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let job = self.store.create(&request)?;
         self.sender.send(job.id.clone())?;
-        Ok(job)
+        Ok(InstallJobCreateOutcome::Created(Box::new(job)))
     }
 
     pub fn get(&self, id: &str) -> Result<Option<InstallJob>> {
@@ -410,6 +455,39 @@ impl JobService {
 
     pub fn resolve_media(&self, id: &str) -> Result<PathBuf> {
         resolve_resource(&self.roots.media, id, "media")
+    }
+
+    pub fn active_install_user(
+        &self,
+        vm_name: &str,
+        image_ids: &[String],
+    ) -> Result<Option<String>> {
+        self.store.active_resource_user(vm_name, image_ids)
+    }
+
+    pub fn managed_image_ids<'a>(
+        &self,
+        paths: impl IntoIterator<Item = &'a Path>,
+    ) -> Result<Vec<String>> {
+        let root = self.roots.images.canonicalize().with_context(|| {
+            format!(
+                "failed to resolve managed image root {}",
+                self.roots.images.display()
+            )
+        })?;
+        let mut ids = Vec::new();
+        for path in paths {
+            let Ok(path) = path.canonicalize() else {
+                continue;
+            };
+            if path.parent() != Some(root.as_path()) {
+                continue;
+            }
+            if let Some(id) = path.file_name().and_then(|value| value.to_str()) {
+                ids.push(id.to_string());
+            }
+        }
+        Ok(ids)
     }
 
     pub fn create_iso_staging_path(&self) -> Result<PathBuf> {
@@ -477,8 +555,14 @@ impl JobService {
         Ok(IsoDeleteOutcome::Deleted)
     }
 
-    pub fn with_resource_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-        let _guard = self.lock_resources()?;
+    pub fn with_resource_lock<T, E>(
+        &self,
+        operation: impl FnOnce() -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E>
+    where
+        E: From<anyhow::Error>,
+    {
+        let _guard = self.lock_resources().map_err(E::from)?;
         operation()
     }
 
@@ -789,6 +873,101 @@ mod tests {
         assert_eq!(interrupted.phase, "interrupted");
         assert!(interrupted.finished_at_ms.is_some());
         drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn active_jobs_reserve_vm_names_and_images() {
+        let (directory, store) = store();
+        let job = store.create(&request()).unwrap();
+
+        assert_eq!(
+            store
+                .active_resource_user("fedora-test", &["other.qcow2".to_string()])
+                .unwrap(),
+            Some(job.id.clone())
+        );
+        assert_eq!(
+            store
+                .active_resource_user("other-vm", &["fedora-test.qcow2".to_string()])
+                .unwrap(),
+            Some(job.id.clone())
+        );
+        assert!(
+            store
+                .active_resource_user("other-vm", &["other.qcow2".to_string()])
+                .unwrap()
+                .is_none()
+        );
+
+        store.finish(&job.id, JobStatus::Succeeded, None).unwrap();
+        assert!(
+            store
+                .active_resource_user("fedora-test", &["fedora-test.qcow2".to_string()])
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn resource_lock_serializes_mutations() {
+        let directory = std::env::temp_dir().join(format!("qtr-lock-test-{}", Uuid::new_v4()));
+        let service = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("media"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        let managed = directory.join("images/managed.qcow2");
+        let external = directory.join("external.qcow2");
+        std::fs::write(&managed, b"managed").unwrap();
+        std::fs::write(&external, b"external").unwrap();
+        assert_eq!(
+            service
+                .managed_image_ids([managed.as_path(), external.as_path()])
+                .unwrap(),
+            ["managed.qcow2"]
+        );
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first_service = service.clone();
+        let first = std::thread::spawn(move || {
+            first_service
+                .with_resource_lock(|| {
+                    first_entered_tx.send(()).unwrap();
+                    release_first_rx.recv().unwrap();
+                    Ok::<_, anyhow::Error>(())
+                })
+                .unwrap();
+        });
+        first_entered_rx.recv().unwrap();
+
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+        let second_service = service.clone();
+        let second = std::thread::spawn(move || {
+            second_service
+                .with_resource_lock(|| {
+                    second_entered_tx.send(()).unwrap();
+                    Ok::<_, anyhow::Error>(())
+                })
+                .unwrap();
+        });
+        assert!(
+            second_entered_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        release_first_tx.send(()).unwrap();
+        second_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+
+        first.join().unwrap();
+        second.join().unwrap();
+        drop(service);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

@@ -174,6 +174,12 @@ impl std::error::Error for VmApiError {
     }
 }
 
+impl From<anyhow::Error> for VmApiError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Internal(error)
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct VmExecOutput {
