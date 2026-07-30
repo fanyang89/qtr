@@ -44,7 +44,7 @@ use crate::{
     config::WebArgs,
     jobs::{
         FedoraInstallRequest, ImageCreateOutcome, InstallJob, InstallJobCreateOutcome,
-        IsoDeleteOutcome, IsoPublishOutcome, JobRoots, JobService, ManagedResource,
+        IsoDeleteOutcome, IsoPublishOutcome, JobRoots, JobService, ManagedImage, ManagedResource,
     },
     network, vm,
 };
@@ -981,11 +981,11 @@ async fn cancel_install_job(
     tag = "resources",
     security(("bearerAuth" = [])),
     responses(
-        (status = OK, body = [ManagedResource]),
+        (status = OK, body = [ManagedImage]),
         (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
     )
 )]
-async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<ManagedResource>>> {
+async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<ManagedImage>>> {
     let jobs = job_service(&state)?;
     Ok(Json(run_job_store(move || jobs.list_images()).await?))
 }
@@ -997,7 +997,7 @@ async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<Manage
     security(("bearerAuth" = [])),
     request_body = CreateImageRequest,
     responses(
-        (status = CREATED, body = ManagedResource),
+        (status = CREATED, body = ManagedImage),
         (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
         (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
         (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
@@ -1007,7 +1007,7 @@ async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<Manage
 async fn create_image(
     State(state): State<AppState>,
     request: std::result::Result<Json<CreateImageRequest>, JsonRejection>,
-) -> AppResult<(StatusCode, Json<ManagedResource>)> {
+) -> AppResult<(StatusCode, Json<ManagedImage>)> {
     let request = api_json(request)?;
     let jobs = job_service(&state)?;
     jobs.validate_image_id(&request.id, request.format)

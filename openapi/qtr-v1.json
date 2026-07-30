@@ -43,7 +43,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/ManagedResource"
+                    "$ref": "#/components/schemas/ManagedImage"
                   }
                 }
               }
@@ -87,7 +87,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ManagedResource"
+                  "$ref": "#/components/schemas/ManagedImage"
                 }
               }
             }
@@ -1528,6 +1528,59 @@
           "failed",
           "cancelled",
           "interrupted"
+        ]
+      },
+      "ManagedImage": {
+        "type": "object",
+        "required": [
+          "id",
+          "sizeBytes",
+          "status"
+        ],
+        "properties": {
+          "format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DiskFormat"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "modifiedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/ManagedImageStatus"
+          },
+          "virtualSizeBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ManagedImageStatus": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "invalid"
         ]
       },
       "ManagedResource": {

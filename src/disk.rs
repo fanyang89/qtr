@@ -59,13 +59,34 @@ fn qemu_img_info(path: &Path) -> Result<QemuImgInfo> {
         .with_context(|| format!("failed to parse qemu-img info for {}", path.display()))
 }
 
-pub(crate) fn image_virtual_size(path: &Path) -> Result<u64> {
-    qemu_img_info(path)?.virtual_size.with_context(|| {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ImageInfo {
+    pub format: DiskFormat,
+    pub virtual_size_bytes: u64,
+}
+
+pub(crate) fn image_info(path: &Path) -> Result<ImageInfo> {
+    let info = qemu_img_info(path)?;
+    let format = match info.format.as_deref() {
+        Some("raw") => DiskFormat::Raw,
+        Some("qcow2") => DiskFormat::Qcow2,
+        Some(format) => bail!("unsupported disk image format {format:?}"),
+        None => bail!("qemu-img did not report an image format"),
+    };
+    let virtual_size_bytes = info.virtual_size.with_context(|| {
         format!(
             "qemu-img did not report virtual size for {}",
             path.display()
         )
+    })?;
+    Ok(ImageInfo {
+        format,
+        virtual_size_bytes,
     })
+}
+
+pub(crate) fn image_virtual_size(path: &Path) -> Result<u64> {
+    Ok(image_info(path)?.virtual_size_bytes)
 }
 
 pub(crate) fn resize_image(path: &Path, format: DiskFormat, size_bytes: u64) -> Result<()> {

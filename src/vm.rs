@@ -131,6 +131,16 @@ pub struct VmSummaryDisk {
     pub io: Option<VmDiskIoConfig>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VmImageAttachment {
+    pub image_id: String,
+    pub vm_name: String,
+    pub vm_state: &'static str,
+    pub target: String,
+    pub active: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VmDiskResizeResult {
@@ -3319,6 +3329,79 @@ pub fn list_summaries(connect_uri: &str) -> Result<Vec<VmSummary>> {
 
     summaries.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(summaries)
+}
+
+pub fn managed_image_attachments(
+    connect_uri: &str,
+    image_root: &Path,
+) -> Result<Vec<VmImageAttachment>> {
+    let root = image_root.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve managed image root {}",
+            image_root.display()
+        )
+    })?;
+    let connection = connect_read_only(connect_uri)?;
+    let mut attachments = BTreeMap::new();
+    for domain in connection
+        .list_all_domains(0)
+        .context("failed to list domains while checking image references")?
+    {
+        let vm_name = domain.get_name().context("failed to read domain name")?;
+        let (state, _) = domain
+            .get_state()
+            .with_context(|| format!("failed to query domain {vm_name} state"))?;
+        let active = domain
+            .is_active()
+            .with_context(|| format!("failed to query domain {vm_name} state"))?;
+        let mut xml_documents = vec![
+            domain
+                .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+                .with_context(|| format!("failed to read inactive domain XML for {vm_name}"))?,
+        ];
+        if active {
+            xml_documents.push(
+                domain
+                    .get_xml_desc(0)
+                    .with_context(|| format!("failed to read active domain XML for {vm_name}"))?,
+            );
+        }
+        for xml in xml_documents {
+            let document = Document::parse(&xml)
+                .with_context(|| format!("failed to parse domain XML for {vm_name}"))?;
+            let devices = required_child(document.root_element(), "devices")?;
+            for (index, disk) in disks_from_domain_xml(devices)?.into_iter().enumerate() {
+                if disk.disk_type != VmDiskType::File {
+                    continue;
+                }
+                let Ok(path) = disk.path.canonicalize() else {
+                    continue;
+                };
+                if path.parent() != Some(root.as_path()) {
+                    continue;
+                }
+                let Some(image_id) = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let target = disk_target_or(&disk, index);
+                attachments.insert(
+                    (image_id.clone(), vm_name.clone(), target.clone()),
+                    VmImageAttachment {
+                        image_id,
+                        vm_name: vm_name.clone(),
+                        vm_state: domain_state_name(state),
+                        target,
+                        active,
+                    },
+                );
+            }
+        }
+    }
+    Ok(attachments.into_values().collect())
 }
 
 pub fn get_summary(connect_uri: &str, name: &str) -> VmApiResult<VmSummary> {

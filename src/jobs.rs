@@ -128,6 +128,24 @@ pub struct ManagedResource {
     pub modified_at_ms: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ManagedImageStatus {
+    Ready,
+    Invalid,
+}
+
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedImage {
+    pub id: String,
+    pub size_bytes: u64,
+    pub virtual_size_bytes: Option<u64>,
+    pub modified_at_ms: Option<i64>,
+    pub format: Option<DiskFormat>,
+    pub status: ManagedImageStatus,
+}
+
 pub enum IsoDeleteOutcome {
     Deleted,
     NotFound,
@@ -140,7 +158,7 @@ pub enum IsoPublishOutcome {
 }
 
 pub enum ImageCreateOutcome {
-    Created(ManagedResource),
+    Created(ManagedImage),
     Conflict(String),
 }
 
@@ -448,14 +466,8 @@ impl JobService {
         Ok(job)
     }
 
-    pub fn list_images(&self) -> Result<Vec<ManagedResource>> {
-        let mut images = list_resources(&self.roots.images)?;
-        for image in &mut images {
-            image.virtual_size_bytes = Some(disk::image_virtual_size(
-                &self.roots.images.join(&image.id),
-            )?);
-        }
-        Ok(images)
+    pub fn list_images(&self) -> Result<Vec<ManagedImage>> {
+        list_images(&self.roots.images)
     }
 
     pub fn list_media(&self) -> Result<Vec<ManagedResource>> {
@@ -517,8 +529,7 @@ impl JobService {
                 }
                 Err(error) => return Err(error.into()),
             }
-            let mut image = resource_from_path(id, &destination)?;
-            image.virtual_size_bytes = Some(size_bytes);
+            let image = image_from_path(id, &destination)?;
             Ok(ImageCreateOutcome::Created(image))
         })();
         let _ = std::fs::remove_file(staging);
@@ -777,6 +788,47 @@ fn list_resources(root: &Path) -> Result<Vec<ManagedResource>> {
     }
     resources.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(resources)
+}
+
+fn list_images(root: &Path) -> Result<Vec<ManagedImage>> {
+    let mut images = Vec::new();
+    for entry in std::fs::read_dir(root)
+        .with_context(|| format!("failed to read image root {}", root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        images.push(image_from_path(&id, &entry.path())?);
+    }
+    images.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(images)
+}
+
+fn image_from_path(id: &str, path: &Path) -> Result<ManagedImage> {
+    let resource = resource_from_path(id, path)?;
+    let info = disk::image_info(path).ok().filter(|info| {
+        let id = id.to_ascii_lowercase();
+        match info.format {
+            DiskFormat::Raw => id.ends_with(".raw"),
+            DiskFormat::Qcow2 => id.ends_with(".qcow2"),
+        }
+    });
+    Ok(ManagedImage {
+        id: resource.id,
+        size_bytes: resource.size_bytes,
+        virtual_size_bytes: info.map(|info| info.virtual_size_bytes),
+        modified_at_ms: resource.modified_at_ms,
+        format: info.map(|info| info.format),
+        status: if info.is_some() {
+            ManagedImageStatus::Ready
+        } else {
+            ManagedImageStatus::Invalid
+        },
+    })
 }
 
 fn resolve_resource(root: &Path, id: &str, kind: &str) -> Result<PathBuf> {
@@ -1090,6 +1142,21 @@ mod tests {
         assert_eq!(resources[0].size_bytes, 1);
         assert_eq!(resources[1].id, "b.iso");
         assert!(resolve_resource(&directory, "linked.iso", "ISO").is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn isolates_invalid_images_while_listing() {
+        let directory = std::env::temp_dir().join(format!("qtr-image-test-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("broken.qcow2"), b"not an image").unwrap();
+        std::fs::write(directory.join("other.qcow2"), b"also not an image").unwrap();
+
+        let images = list_images(&directory).unwrap();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].id, "broken.qcow2");
+        assert_eq!(images[0].status, ManagedImageStatus::Invalid);
+        assert_eq!(images[1].status, ManagedImageStatus::Invalid);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
