@@ -88,9 +88,11 @@ cargo run -- web --api-token-file .qtr-api-token
 
 Open `http://127.0.0.1:8080/access` and store the token for the current browser tab. Management endpoints are under `/api/v1`; `/api/v1/health`, `/api/v1/openapi.json`, and `/docs` are public. VNC connections use short-lived, single-use tickets issued by the authenticated API.
 
-Fedora installations are persistent jobs under `/api/v1/install-jobs`. Requests use `mediaId` and `imageId` instead of host paths. The default roots are `.tmp/iso`, `.tmp/disks`, and `.tmp/logs`; server state and VM manifests are stored under `.qtr/server`. Override them with `--media-root`, `--image-root`, `--log-root`, and `--state-dir`. SQLite uses WAL mode, queued jobs resume after restart, and jobs that were running are marked `interrupted` without deleting uncertain VM resources.
+Fedora installations are persistent jobs under `/api/v1/install-jobs`. Requests use `mediaId` and `imageId` instead of host paths. The default roots are `.tmp/iso`, `.tmp/disks`, and `.tmp/logs`; server state and VM manifests are stored under `.qtr/server`. Override them with `--media-root`, `--image-root`, `--log-root`, and `--state-dir`. SQLite uses WAL mode, queued jobs resume after restart, and jobs that were running are marked `interrupted` without deleting uncertain VM resources. Cancelling an interrupted job acknowledges it and releases its resource reservations.
 
-The ISOs page supports authenticated, streaming upload and protected deletion. Uploads are limited to 32 GiB by default; override the limit with `--max-iso-upload-bytes`. Existing ISO IDs are never overwritten, and deletion is blocked while an ISO is referenced by an automated install or VM CD-ROM.
+The ISOs page supports authenticated, streaming upload and protected deletion. Uploads are limited to 32 GiB by default; override the limit with `--max-iso-upload-bytes`. Existing ISO IDs are never overwritten. The inventory reports invalid files, install-job reservations, and every live or persistent VM tray reference. Deletion is blocked while any reference remains.
+
+VMs support multiple CD-ROM trays with stable IDs. The VM detail page can insert, replace, or eject managed ISO media while a VM is running, blocked, paused, or shut off. Adding or removing an entire tray requires the VM to be shut off without a managed save image. Eject keeps the virtual drive and removes only its media; removing a tray never deletes its ISO. qtr does not force eject guest-locked media.
 
 The Disks page creates, expands, and deletes managed raw and qcow2 images without host shell access. It reports the detected format, virtual capacity, VM attachments, and automated-install reservations. Image IDs must use the extension matching their format. Deletion is blocked while an image is attached or reserved, and expansion only increases capacity and requires every attached VM to be powered off.
 
@@ -269,7 +271,7 @@ disks:
 
 Detach updates only the inactive libvirt domain definition. It never deletes the disk file, block device, or storage volume. Omitting an existing disk without `state: absent` remains an error.
 
-Multiple CD-ROM trays are supported. Set `media: null` to keep an empty tray, change `media` to swap media, or use `state: absent` with the stable ID to remove the tray from the persistent definition. Existing version 1 definitions using the single `cdrom` field remain supported.
+Multiple CD-ROM trays are supported. Set `media: null` to keep an empty tray, change `media` to swap media, or use `state: absent` with the stable ID to remove the tray from the persistent definition. Existing version 1 definitions using the single `cdrom` field remain supported. CLI `vm apply` changes remain persistent-only while a VM is active; use the Web API tray endpoints for live media changes.
 
 Version 3 supports multiple `interfaces`. Each NIC has a stable ID, `network` or `bridge` type, source, model, and optional MAC. IDs are written as `ua-qtr-nic-*` aliases. Use `state: absent` to remove a NIC from the persistent definition. Legacy `network: default` definitions remain supported and only update the first libvirt network interface, leaving additional NICs untouched.
 
