@@ -46,8 +46,23 @@ pub struct WebArgs {
     pub web_dir: PathBuf,
 
     /// Bearer token required by the management API.
-    #[arg(long, env = "QTR_API_TOKEN", hide_env_values = true)]
-    pub api_token: String,
+    #[arg(
+        long,
+        env = "QTR_API_TOKEN",
+        hide_env_values = true,
+        required_unless_present = "api_token_file",
+        conflicts_with = "api_token_file"
+    )]
+    pub api_token: Option<String>,
+
+    /// File containing the bearer token required by the management API.
+    #[arg(
+        long,
+        value_name = "FILE",
+        required_unless_present = "api_token",
+        conflicts_with = "api_token"
+    )]
+    pub api_token_file: Option<PathBuf>,
 
     /// Directory containing server state and VM manifests.
     #[arg(long, default_value = ".qtr/server")]

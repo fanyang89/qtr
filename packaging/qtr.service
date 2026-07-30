@@ -1,0 +1,26 @@
+[Unit]
+Description=qtr single-host virtualization manager
+After=network-online.target libvirtd.service
+Wants=network-online.target
+Requires=libvirtd.service
+ConditionPathExists=/etc/qtr/api-token
+
+[Service]
+Type=simple
+User=qtr
+Group=qtr
+SupplementaryGroups=libvirt
+UMask=0007
+ExecStart=/usr/bin/qtr web --listen 127.0.0.1:8080 --web-dir /usr/share/qtr/web --api-token-file /etc/qtr/api-token --state-dir /var/lib/qtr/state --image-root /var/lib/qtr/images --media-root /var/lib/qtr/iso --log-root /var/lib/qtr/logs
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/qtr
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

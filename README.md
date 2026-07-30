@@ -82,11 +82,11 @@ For a production-style build, build the Web UI and start the authenticated serve
 
 ```bash
 pnpm -C web build
-export QTR_API_TOKEN="$(openssl rand -hex 32)"
-cargo run -- web
+openssl rand -hex 32 > .qtr-api-token
+cargo run -- web --api-token-file .qtr-api-token
 ```
 
-Open `http://127.0.0.1:8080/settings` and store the same token for the current browser tab. Management endpoints are under `/api/v1`; `/api/v1/health`, `/api/v1/openapi.json`, and `/docs` are public. VNC connections use short-lived, single-use tickets issued by the authenticated API.
+Open `http://127.0.0.1:8080/access` and store the token for the current browser tab. Management endpoints are under `/api/v1`; `/api/v1/health`, `/api/v1/openapi.json`, and `/docs` are public. VNC connections use short-lived, single-use tickets issued by the authenticated API.
 
 Fedora installations are persistent jobs under `/api/v1/install-jobs`. Requests use `mediaId` and `imageId` instead of host paths. The default roots are `.tmp/iso`, `.tmp/disks`, and `.tmp/logs`; server state and VM manifests are stored under `.qtr/server`. Override them with `--media-root`, `--image-root`, `--log-root`, and `--state-dir`. SQLite uses WAL mode, queued jobs resume after restart, and jobs that were running are marked `interrupted` without deleting uncertain VM resources.
 
@@ -110,17 +110,20 @@ Build the RPM package with nFPM:
 task package:rpm
 ```
 
-The package installs `qtr` to `/usr/bin/qtr` and depends on the libvirt, QEMU, iSCSI, ACL, polkit and systemd packages needed by the CLI. The Web UI is still in development and is not included in the RPM.
+The package includes the qtr binary, built Web UI, systemd unit, service user declaration, and persistent directory layout. The service listens on `127.0.0.1:8080` and expects its API token at `/etc/qtr/api-token`.
 
-After installing the RPM, start libvirt and grant user access for the VM media directories you use:
+After installing the RPM, create the service token and start qtr:
 
 ```bash
 sudo systemctl enable --now libvirtd
-sudo qtr host setup-libvirt-access \
-  --qemu-rw-dir /path/to/disks \
-  --qemu-ro-dir /path/to/iso
-newgrp libvirt
+QTR_TOKEN="$(openssl rand -hex 32)"
+printf '%s\n' "$QTR_TOKEN" | sudo tee /etc/qtr/api-token >/dev/null
+sudo chown root:qtr /etc/qtr/api-token
+sudo chmod 0640 /etc/qtr/api-token
+sudo systemctl enable --now qtr
 ```
+
+Open `/access` through a TLS reverse proxy and enter `QTR_TOKEN`. The proxy must support WebSocket upgrades for the VNC console. qtr remains loopback-only by default; do not expose port 8080 directly.
 
 Deploy the RPM to Fedora 44 hosts with the uv-managed Ansible playbook:
 
@@ -130,7 +133,7 @@ cp deploy/inventory.example.ini deploy/inventory.ini
 task deploy:rpm LIMIT=fedora44
 ```
 
-The deploy playbook copies the local RPM to the target, installs it with `dnf5`, and enables `libvirtd`.
+The deploy playbook copies the local RPM, installs it with `dnf5`, creates the API token when absent, enables `libvirtd` and qtr, then waits for the health endpoint.
 
 ## External Storage
 

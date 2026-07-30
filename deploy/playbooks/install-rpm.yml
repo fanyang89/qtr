@@ -78,6 +78,45 @@
         enabled: true
         state: started
 
+    - name: Check qtr API token
+      ansible.builtin.stat:
+        path: /etc/qtr/api-token
+      register: qtr_api_token_file
+
+    - name: Generate qtr API token
+      ansible.builtin.command: openssl rand -hex 32
+      changed_when: true
+      no_log: true
+      register: qtr_generated_api_token
+      when: not qtr_api_token_file.stat.exists
+
+    - name: Install qtr API token
+      ansible.builtin.copy:
+        content: "{{ qtr_generated_api_token.stdout }}\n"
+        dest: /etc/qtr/api-token
+        owner: root
+        group: qtr
+        mode: "0640"
+      no_log: true
+      when: not qtr_api_token_file.stat.exists
+
+    - name: Enable and restart qtr
+      ansible.builtin.systemd_service:
+        name: qtr
+        enabled: true
+        state: restarted
+        daemon_reload: true
+
+    - name: Wait for qtr health endpoint
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/api/v1/health
+        return_content: true
+        status_code: 200
+      register: qtr_health
+      retries: 10
+      delay: 2
+      until: qtr_health.json.ok | default(false)
+
     - name: Verify qtr installation
       ansible.builtin.command: qtr --version
       changed_when: false

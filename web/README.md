@@ -35,7 +35,7 @@ pnpm build
 ```
 
 The dev server proxies `/api` and WebSocket traffic to `http://127.0.0.1:8080`.
-Set the Bearer token on `/settings`; it is kept in `sessionStorage` and sent to `/api/v1` endpoints. noVNC obtains a short-lived ticket before opening its WebSocket.
+Set the Bearer token on `/access`; it is kept in `sessionStorage` and sent to `/api/v1` endpoints. `/settings` rotates or clears the current tab token. noVNC obtains a short-lived ticket before opening its WebSocket.
 
 ## Routes
 

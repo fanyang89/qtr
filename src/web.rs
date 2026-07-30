@@ -400,16 +400,17 @@ impl CreateVmRequest {
 pub fn run(args: WebArgs) -> Result<()> {
     clear_error_callback();
     init_tracing();
+    let api_token = load_api_token(&args)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to build Tokio runtime")?;
 
-    runtime.block_on(run_async(args))
+    runtime.block_on(run_async(args, api_token))
 }
 
-async fn run_async(args: WebArgs) -> Result<()> {
+async fn run_async(args: WebArgs, api_token: String) -> Result<()> {
     let listen = args.listen;
     if !listen.ip().is_loopback() {
         let warning = format!(
@@ -428,7 +429,7 @@ async fn run_async(args: WebArgs) -> Result<()> {
     let app = app_with_iso_limit(
         args.connect_uri,
         args.web_dir,
-        args.api_token,
+        api_token,
         Some(jobs),
         args.max_iso_upload_bytes,
     );
@@ -441,6 +442,23 @@ async fn run_async(args: WebArgs) -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("web server failed")
+}
+
+fn load_api_token(args: &WebArgs) -> Result<String> {
+    let token = match (&args.api_token, &args.api_token_file) {
+        (Some(token), None) => token.clone(),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read API token file {}", path.display()))?,
+        _ => anyhow::bail!("configure exactly one of --api-token or --api-token-file"),
+    };
+    let token = token.trim();
+    if token.is_empty() {
+        anyhow::bail!("API token must not be empty");
+    }
+    if token.chars().any(char::is_whitespace) {
+        anyhow::bail!("API token must not contain whitespace");
+    }
+    Ok(token.to_string())
 }
 
 #[cfg(test)]
@@ -1524,6 +1542,40 @@ mod tests {
             max_iso_upload_bytes: 1024,
             iso_uploads: Arc::new(Semaphore::new(1)),
         }
+    }
+
+    fn web_args(api_token: Option<&str>, api_token_file: Option<PathBuf>) -> WebArgs {
+        WebArgs {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            connect_uri: "test:///default".to_string(),
+            web_dir: PathBuf::from("web/dist"),
+            api_token: api_token.map(str::to_string),
+            api_token_file,
+            state_dir: PathBuf::from(".qtr/server"),
+            image_root: PathBuf::from(".tmp/disks"),
+            media_root: PathBuf::from(".tmp/iso"),
+            log_root: PathBuf::from(".tmp/logs"),
+            max_iso_upload_bytes: 1024,
+        }
+    }
+
+    #[test]
+    fn loads_api_token_from_value_or_file() {
+        assert_eq!(
+            load_api_token(&web_args(Some("token"), None)).unwrap(),
+            "token"
+        );
+
+        let directory = std::env::temp_dir().join(format!("qtr-token-test-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("api-token");
+        std::fs::write(&path, "file-token\n").unwrap();
+        assert_eq!(
+            load_api_token(&web_args(None, Some(path))).unwrap(),
+            "file-token"
+        );
+        assert!(load_api_token(&web_args(Some("bad token"), None)).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

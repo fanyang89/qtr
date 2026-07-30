@@ -44,10 +44,16 @@ tasks:
     cmds:
       - cargo build --release
 
+  build:web:
+    desc: Build the qtr Web UI
+    cmds:
+      - pnpm -C web build
+
   package:rpm:
     desc: Build the qtr RPM package
     deps:
       - build
+      - build:web
     cmds:
       - mkdir -p dist
       - QTR_VERSION="{{.QTR_VERSION}}" {{.NFPM}} pkg --packager rpm --target dist/
