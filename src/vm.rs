@@ -3404,6 +3404,134 @@ pub fn managed_image_attachments(
     Ok(attachments.into_values().collect())
 }
 
+pub fn domains_using_image(connect_uri: &str, image: &Path) -> Result<Vec<String>> {
+    let root = image
+        .parent()
+        .with_context(|| format!("image {} has no parent directory", image.display()))?;
+    let image_id = image
+        .file_name()
+        .and_then(|value| value.to_str())
+        .with_context(|| format!("image {} has no valid file name", image.display()))?;
+    Ok(managed_image_attachments(connect_uri, root)?
+        .into_iter()
+        .filter(|attachment| attachment.image_id == image_id)
+        .map(|attachment| attachment.vm_name)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+pub fn active_domain_using_image(connect_uri: &str, image: &Path) -> Result<Option<String>> {
+    let root = image
+        .parent()
+        .with_context(|| format!("image {} has no parent directory", image.display()))?;
+    let image_id = image
+        .file_name()
+        .and_then(|value| value.to_str())
+        .with_context(|| format!("image {} has no valid file name", image.display()))?;
+    Ok(managed_image_attachments(connect_uri, root)?
+        .into_iter()
+        .find(|attachment| attachment.image_id == image_id && attachment.active)
+        .map(|attachment| attachment.vm_name))
+}
+
+pub fn attach_managed_image(
+    connect_uri: &str,
+    name: &str,
+    image: &Path,
+    format: DiskFormat,
+    bus: VmDiskBus,
+) -> VmApiResult<VmSummary> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    if domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
+    {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} is active; shut it down before attaching disks"
+        )));
+    }
+    let xml = domain
+        .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+        .with_context(|| format!("failed to read inactive domain XML for {name}"))
+        .map_err(VmApiError::Internal)?;
+    let mut manifest = manifest_from_domain_xml(&xml).map_err(VmApiError::Internal)?;
+    let canonical_image = image
+        .canonicalize()
+        .with_context(|| format!("failed to resolve image {}", image.display()))
+        .map_err(VmApiError::InvalidRequest)?;
+    if present_disks(&manifest.disks).any(|disk| {
+        disk.path
+            .canonicalize()
+            .is_ok_and(|path| path == canonical_image)
+    }) {
+        return domain_summary(&domain).map_err(VmApiError::Internal);
+    }
+    manifest.disks.push(VmDiskEntry::present(VmDisk {
+        id: Some(format!("image-{}", Uuid::new_v4().simple())),
+        disk_type: VmDiskType::File,
+        path: canonical_image,
+        format,
+        target: None,
+        bus,
+        cache: None,
+        io: None,
+        discard: None,
+        detect_zeroes: None,
+        readonly: None,
+        serial: Default::default(),
+        io_tune: Default::default(),
+    }));
+    apply_by_manifest(connect_uri, manifest)
+}
+
+pub fn detach_managed_image(connect_uri: &str, name: &str, image: &Path) -> VmApiResult<VmSummary> {
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    if domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?
+    {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} is active; shut it down before detaching disks"
+        )));
+    }
+    let xml = domain
+        .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+        .with_context(|| format!("failed to read inactive domain XML for {name}"))
+        .map_err(VmApiError::Internal)?;
+    let mut manifest = manifest_from_domain_xml(&xml).map_err(VmApiError::Internal)?;
+    let canonical_image = image
+        .canonicalize()
+        .with_context(|| format!("failed to resolve image {}", image.display()))
+        .map_err(VmApiError::InvalidRequest)?;
+    let matching = manifest
+        .disks
+        .iter()
+        .position(|entry| {
+            entry.as_present().is_some_and(|disk| {
+                disk.path
+                    .canonicalize()
+                    .is_ok_and(|path| path == canonical_image)
+            })
+        })
+        .ok_or_else(|| VmApiError::NotFound(format!("image is not attached to VM {name}")))?;
+    if present_disks(&manifest.disks).count() <= 1 {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "cannot detach the VM's last disk"
+        )));
+    }
+    let disk_id = manifest.disks[matching]
+        .id()
+        .expect("domain disks should have stable IDs")
+        .to_string();
+    manifest.disks[matching] = VmDiskEntry::absent(disk_id);
+    apply_by_manifest(connect_uri, manifest)
+}
+
 pub fn get_summary(connect_uri: &str, name: &str) -> VmApiResult<VmSummary> {
     let conn = connect_read_only(connect_uri).map_err(VmApiError::Internal)?;
     let domain = lookup_domain_api(&conn, name)?;

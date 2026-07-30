@@ -17,7 +17,7 @@ jobs:
       - name: Install libvirt dev headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvirt-dev pkg-config
+          sudo apt-get install -y libvirt-dev pkg-config qemu-utils
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

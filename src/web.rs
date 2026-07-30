@@ -43,8 +43,9 @@ use crate::config::GraphicsMode;
 use crate::{
     config::WebArgs,
     jobs::{
-        FedoraInstallRequest, ImageCreateOutcome, InstallJob, InstallJobCreateOutcome,
-        IsoDeleteOutcome, IsoPublishOutcome, JobRoots, JobService, ManagedImage, ManagedResource,
+        FedoraInstallRequest, ImageCreateOutcome, ImageDeleteOutcome, ImageResizeOutcome,
+        InstallJob, InstallJobCreateOutcome, IsoDeleteOutcome, IsoPublishOutcome, JobRoots,
+        JobService, ManagedImage, ManagedImageStatus, ManagedResource,
     },
     network, vm,
 };
@@ -247,6 +248,51 @@ struct CreateImageRequest {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AttachImageRequest {
+    #[serde(default)]
+    bus: vm::VmDiskBus,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResizeImageRequest {
+    size_bytes: u64,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ManagedImageResponse {
+    id: String,
+    size_bytes: u64,
+    virtual_size_bytes: Option<u64>,
+    modified_at_ms: Option<i64>,
+    format: Option<crate::config::DiskFormat>,
+    status: ManagedImageStatus,
+    attachments: Vec<vm::VmImageAttachment>,
+    reserved_by_job_id: Option<String>,
+}
+
+impl ManagedImageResponse {
+    fn new(
+        image: ManagedImage,
+        attachments: Vec<vm::VmImageAttachment>,
+        reserved_by_job_id: Option<String>,
+    ) -> Self {
+        Self {
+            id: image.id,
+            size_bytes: image.size_bytes,
+            virtual_size_bytes: image.virtual_size_bytes,
+            modified_at_ms: image.modified_at_ms,
+            format: image.format,
+            status: image.status,
+            attachments,
+            reserved_by_job_id,
+        }
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateVmRequest {
     name: String,
     #[schema(value_type = Option<Object>)]
@@ -339,12 +385,24 @@ impl CreateVmRequest {
             .disks
             .into_iter()
             .map(|disk| {
+                let image = jobs.inspect_image(&disk.image_id)?;
+                let format = image
+                    .format
+                    .with_context(|| format!("image {:?} is not a valid disk", disk.image_id))?;
+                if disk.format != format {
+                    anyhow::bail!(
+                        "image {:?} uses {} format, not {}",
+                        disk.image_id,
+                        format.as_qemu_arg(),
+                        disk.format.as_qemu_arg()
+                    );
+                }
                 let path = jobs.resolve_image(&disk.image_id)?;
                 Ok(vm::VmDiskEntry::present(vm::VmDisk {
-                    id: Some(disk.image_id),
+                    id: Some(format!("image-{}", Uuid::new_v4().simple())),
                     disk_type: vm::VmDiskType::File,
                     path,
-                    format: disk.format,
+                    format,
                     target: None,
                     bus: disk.bus,
                     cache: None,
@@ -516,6 +574,8 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(get_install_job))
         .routes(routes!(cancel_install_job))
         .routes(routes!(list_images, create_image))
+        .routes(routes!(resize_image, delete_image))
+        .routes(routes!(attach_image, detach_image))
         .routes(routes!(list_media))
         .routes(routes!(upload_iso, delete_iso))
         .routes(routes!(list_networks))
@@ -680,22 +740,14 @@ async fn create_vm(
             let network_id = manifest.network.clone().unwrap_or_default();
             network::ensure_active(&connect_uri, &network_id)
                 .map_err(vm::VmApiError::InvalidRequest)?;
-            let requested_paths = manifest
-                .disks
-                .iter()
-                .filter_map(vm::VmDiskEntry::as_present)
-                .map(|disk| disk.path.as_path())
-                .collect::<Vec<_>>();
-            for existing in vm::list_summaries(&connect_uri).map_err(vm::VmApiError::Internal)? {
-                if let Some(disk) = existing.disks.iter().flatten().find(|disk| {
-                    requested_paths
-                        .iter()
-                        .any(|requested| *requested == std::path::Path::new(&disk.path))
-                }) {
+            let attachments = vm::managed_image_attachments(&connect_uri, jobs.image_root())
+                .map_err(vm::VmApiError::Internal)?;
+            for attachment in attachments {
+                if image_ids.contains(&attachment.image_id) {
                     return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
                         "image {} is already attached to VM {}",
-                        disk.path,
-                        existing.name
+                        attachment.image_id,
+                        attachment.vm_name
                     )));
                 }
             }
@@ -741,6 +793,15 @@ async fn update_vm(
                     .map(|disk| disk.path.as_path()),
             )?;
             reject_active_install(&jobs, &vm_name, &image_ids)?;
+            for attachment in vm::managed_image_attachments(&connect_uri, jobs.image_root())? {
+                if attachment.vm_name != vm_name && image_ids.contains(&attachment.image_id) {
+                    return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
+                        "image {} is already attached to VM {}",
+                        attachment.image_id,
+                        attachment.vm_name
+                    )));
+                }
+            }
             vm::apply_by_manifest(&connect_uri, manifest)
         })
     })
@@ -981,13 +1042,42 @@ async fn cancel_install_job(
     tag = "resources",
     security(("bearerAuth" = [])),
     responses(
-        (status = OK, body = [ManagedImage]),
-        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
+        (status = OK, body = [ManagedImageResponse]),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
     )
 )]
-async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<ManagedImage>>> {
+async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<ManagedImageResponse>>> {
     let jobs = job_service(&state)?;
-    Ok(Json(run_job_store(move || jobs.list_images()).await?))
+    let inventory_jobs = jobs.clone();
+    let images = run_job_store(move || {
+        inventory_jobs
+            .list_images()?
+            .into_iter()
+            .map(|image| {
+                let reserved_by_job_id = inventory_jobs.active_image_user(&image.id)?;
+                Ok((image, reserved_by_job_id))
+            })
+            .collect::<Result<Vec<_>>>()
+    })
+    .await?;
+    let connect_uri = state.connect_uri;
+    let image_root = jobs.image_root().to_path_buf();
+    let attachments =
+        run_libvirt(move || vm::managed_image_attachments(&connect_uri, &image_root)).await?;
+    Ok(Json(
+        images
+            .into_iter()
+            .map(|(image, reserved_by_job_id)| {
+                let image_attachments = attachments
+                    .iter()
+                    .filter(|attachment| attachment.image_id == image.id)
+                    .cloned()
+                    .collect();
+                ManagedImageResponse::new(image, image_attachments, reserved_by_job_id)
+            })
+            .collect(),
+    ))
 }
 
 #[utoipa::path(
@@ -997,7 +1087,7 @@ async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<Manage
     security(("bearerAuth" = [])),
     request_body = CreateImageRequest,
     responses(
-        (status = CREATED, body = ManagedImage),
+        (status = CREATED, body = ManagedImageResponse),
         (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
         (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
         (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
@@ -1007,23 +1097,207 @@ async fn list_images(State(state): State<AppState>) -> AppResult<Json<Vec<Manage
 async fn create_image(
     State(state): State<AppState>,
     request: std::result::Result<Json<CreateImageRequest>, JsonRejection>,
-) -> AppResult<(StatusCode, Json<ManagedImage>)> {
+) -> AppResult<(StatusCode, Json<ManagedImageResponse>)> {
     let request = api_json(request)?;
     let jobs = job_service(&state)?;
     jobs.validate_image_id(&request.id, request.format)
         .map_err(AppError::BadRequest)?;
-    if request.size_bytes == 0 {
-        return Err(AppError::BadRequest(anyhow::anyhow!(
-            "sizeBytes must be greater than zero"
-        )));
-    }
+    jobs.validate_image_size(request.size_bytes)
+        .map_err(AppError::BadRequest)?;
     let outcome =
         run_job_store(move || jobs.create_image(&request.id, request.format, request.size_bytes))
             .await?;
     match outcome {
-        ImageCreateOutcome::Created(image) => Ok((StatusCode::CREATED, Json(image))),
+        ImageCreateOutcome::Created(image) => Ok((
+            StatusCode::CREATED,
+            Json(ManagedImageResponse::new(image, Vec::new(), None)),
+        )),
         ImageCreateOutcome::Conflict(detail) => Err(AppError::Conflict(detail)),
     }
+}
+
+#[utoipa::path(
+    post,
+    path = "/images/{id}/resize",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Managed image ID")),
+    request_body = ResizeImageRequest,
+    responses(
+        (status = OK, body = ManagedImageResponse),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn resize_image(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    request: std::result::Result<Json<ResizeImageRequest>, JsonRejection>,
+) -> AppResult<Json<ManagedImageResponse>> {
+    let request = api_json(request)?;
+    let jobs = job_service(&state)?;
+    jobs.validate_existing_image_id(&id)
+        .map_err(AppError::BadRequest)?;
+    jobs.validate_image_size(request.size_bytes)
+        .map_err(AppError::BadRequest)?;
+    let connect_uri = state.connect_uri;
+    let resize_jobs = jobs.clone();
+    let outcome = run_job_store(move || {
+        resize_jobs.resize_image(&id, request.size_bytes, |path| {
+            vm::active_domain_using_image(&connect_uri, path)
+        })
+    })
+    .await?;
+    match outcome {
+        ImageResizeOutcome::Resized(image) => {
+            Ok(Json(ManagedImageResponse::new(image, Vec::new(), None)))
+        }
+        ImageResizeOutcome::NotFound => Err(AppError::NotFound),
+        ImageResizeOutcome::InUse(detail) | ImageResizeOutcome::Conflict(detail) => {
+            Err(AppError::Conflict(detail))
+        }
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/images/{id}",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Managed image ID")),
+    responses(
+        (status = NO_CONTENT),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn delete_image(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
+    let jobs = job_service(&state)?;
+    jobs.validate_existing_image_id(&id)
+        .map_err(AppError::BadRequest)?;
+    let connect_uri = state.connect_uri;
+    let delete_jobs = jobs.clone();
+    let outcome = run_job_store(move || {
+        delete_jobs.delete_image(&id, |path| vm::domains_using_image(&connect_uri, path))
+    })
+    .await?;
+    match outcome {
+        ImageDeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        ImageDeleteOutcome::NotFound => Err(AppError::NotFound),
+        ImageDeleteOutcome::InUse(detail) => Err(AppError::Conflict(detail)),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/vms/{name}/disks/{image_id}",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(
+        ("name" = String, Path, description = "VM name"),
+        ("image_id" = String, Path, description = "Managed image ID")
+    ),
+    request_body = AttachImageRequest,
+    responses(
+        (status = OK, body = vm::VmSummary),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn attach_image(
+    State(state): State<AppState>,
+    Path((name, image_id)): Path<(String, String)>,
+    request: std::result::Result<Json<AttachImageRequest>, JsonRejection>,
+) -> AppResult<Json<vm::VmSummary>> {
+    let request = api_json(request)?;
+    let jobs = job_service(&state)?;
+    jobs.validate_existing_image_id(&image_id)
+        .map_err(AppError::BadRequest)?;
+    let connect_uri = state.connect_uri;
+    let summary = run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            if let Some(job_id) = jobs.active_image_user(&image_id)? {
+                return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
+                    "image is reserved by automated install job {job_id}"
+                )));
+            }
+            let image = jobs
+                .inspect_image(&image_id)
+                .map_err(vm::VmApiError::InvalidRequest)?;
+            let format = image.format.ok_or_else(|| {
+                vm::VmApiError::InvalidRequest(anyhow::anyhow!(
+                    "image {image_id:?} is not a valid disk"
+                ))
+            })?;
+            for attachment in vm::managed_image_attachments(&connect_uri, jobs.image_root())? {
+                if attachment.image_id == image_id && attachment.vm_name != name {
+                    return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
+                        "image is already attached to VM {}",
+                        attachment.vm_name
+                    )));
+                }
+            }
+            let path = jobs
+                .resolve_image(&image_id)
+                .map_err(vm::VmApiError::InvalidRequest)?;
+            vm::attach_managed_image(&connect_uri, &name, &path, format, request.bus)
+        })
+    })
+    .await?;
+    Ok(Json(summary))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/vms/{name}/disks/{image_id}",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(
+        ("name" = String, Path, description = "VM name"),
+        ("image_id" = String, Path, description = "Managed image ID")
+    ),
+    responses(
+        (status = OK, body = vm::VmSummary),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn detach_image(
+    State(state): State<AppState>,
+    Path((name, image_id)): Path<(String, String)>,
+) -> AppResult<Json<vm::VmSummary>> {
+    let jobs = job_service(&state)?;
+    jobs.validate_existing_image_id(&image_id)
+        .map_err(AppError::BadRequest)?;
+    let connect_uri = state.connect_uri;
+    let summary = run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            if let Some(job_id) = jobs.active_image_user(&image_id)? {
+                return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
+                    "image is reserved by automated install job {job_id}"
+                )));
+            }
+            let path = jobs
+                .resolve_image(&image_id)
+                .map_err(vm::VmApiError::InvalidRequest)?;
+            vm::detach_managed_image(&connect_uri, &name, &path)
+        })
+    })
+    .await?;
+    Ok(Json(summary))
 }
 
 #[utoipa::path(
@@ -1979,6 +2253,147 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    #[tokio::test]
+    async fn managed_image_lifecycle_is_safe_and_complete() {
+        let directory = std::env::temp_dir().join(format!("qtr-web-image-test-{}", Uuid::new_v4()));
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("isos"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        for id in ["root.qcow2", "data.qcow2"] {
+            assert!(matches!(
+                jobs.create_image(id, crate::config::DiskFormat::Qcow2, 1024 * 1024)
+                    .unwrap(),
+                ImageCreateOutcome::Created(_)
+            ));
+        }
+        let name = format!("qtr-image-test-{}", Uuid::new_v4());
+        let request: CreateVmRequest = serde_json::from_value(serde_json::json!({
+            "name": name,
+            "resources": { "vcpus": 1, "memoryMib": 512 },
+            "disks": [{
+                "imageId": "root.qcow2",
+                "format": "qcow2",
+                "bus": "virtio-blk"
+            }],
+            "networkId": "default",
+            "mediaId": null,
+            "console": { "graphics": "none", "serialLog": false }
+        }))
+        .unwrap();
+        vm::create_by_manifest("test:///default", request.into_manifest(&jobs).unwrap()).unwrap();
+        let router = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+        );
+
+        let attach = Request::put(format!("/api/v1/vms/{name}/disks/data.qcow2"))
+            .header(header::AUTHORIZATION, "Bearer test-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"bus":"virtio-blk"}"#))
+            .unwrap();
+        let response = router.clone().oneshot(attach).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/images")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let images: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let data = images
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|image| image["id"] == "data.qcow2")
+            .unwrap();
+        assert_eq!(data["format"], "qcow2");
+        assert_eq!(data["attachments"][0]["vmName"], name);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete("/api/v1/images/data.qcow2")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        vm::start_by_name("test:///default", &name).unwrap();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/images/data.qcow2/resize")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"sizeBytes":2097152}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        vm::destroy_by_name("test:///default", &name).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/images/data.qcow2/resize")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"sizeBytes":2097152}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/vms/{name}/disks/data.qcow2"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete("/api/v1/images/data.qcow2")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        vm::undefine_by_name("test:///default", &name).unwrap();
+        drop(router);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn committed_openapi_document_is_current() {
         let generated = format!(
@@ -2012,7 +2427,12 @@ mod tests {
         std::fs::create_dir_all(&media).unwrap();
         std::fs::create_dir_all(&images).unwrap();
         std::fs::write(media.join("installer.iso"), b"iso").unwrap();
-        std::fs::write(images.join("system.qcow2"), b"disk").unwrap();
+        crate::disk::create_image(
+            &images.join("system.qcow2"),
+            crate::config::DiskFormat::Qcow2,
+            "1048576",
+        )
+        .unwrap();
         let jobs = JobService::start(JobRoots {
             state: directory.join("state"),
             images: images.clone(),

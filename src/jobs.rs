@@ -89,7 +89,8 @@ impl FedoraInstallRequest {
     pub fn validate(&self) -> Result<()> {
         validate_id(&self.name, "VM name")?;
         validate_id(&self.media_id, "media ID")?;
-        validate_id(&self.image_id, "image ID")?;
+        validate_image_id(&self.image_id, DiskFormat::Qcow2)?;
+        validate_image_size(crate::vm::parse_disk_size_bytes(&self.disk_size)?)?;
         if self.ssh_authorized_key.trim().is_empty() {
             bail!("SSH authorized key must not be empty");
         }
@@ -161,6 +162,21 @@ pub enum ImageCreateOutcome {
     Created(ManagedImage),
     Conflict(String),
 }
+
+pub enum ImageDeleteOutcome {
+    Deleted,
+    NotFound,
+    InUse(String),
+}
+
+pub enum ImageResizeOutcome {
+    Resized(ManagedImage),
+    NotFound,
+    InUse(String),
+    Conflict(String),
+}
+
+pub const MAX_IMAGE_SIZE_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
 
 pub enum InstallJobCreateOutcome {
     Created(Box<InstallJob>),
@@ -478,12 +494,29 @@ impl JobService {
         resolve_resource(&self.roots.images, id, "image")
     }
 
+    pub fn image_root(&self) -> &Path {
+        &self.roots.images
+    }
+
+    pub fn inspect_image(&self, id: &str) -> Result<ManagedImage> {
+        validate_existing_image_id(id)?;
+        image_from_path(id, &self.resolve_image(id)?)
+    }
+
     pub fn resolve_media(&self, id: &str) -> Result<PathBuf> {
         resolve_resource(&self.roots.media, id, "media")
     }
 
     pub fn validate_image_id(&self, id: &str, format: DiskFormat) -> Result<()> {
         validate_image_id(id, format)
+    }
+
+    pub fn validate_existing_image_id(&self, id: &str) -> Result<()> {
+        validate_existing_image_id(id)
+    }
+
+    pub fn validate_image_size(&self, size_bytes: u64) -> Result<()> {
+        validate_image_size(size_bytes)
     }
 
     pub fn create_image(
@@ -494,9 +527,7 @@ impl JobService {
     ) -> Result<ImageCreateOutcome> {
         let _guard = self.lock_resources()?;
         validate_image_id(id, format)?;
-        if size_bytes == 0 {
-            bail!("image size must be greater than zero");
-        }
+        validate_image_size(size_bytes)?;
         if let Some(job_id) = self.store.active_resource_user("", &[id.to_string()])? {
             return Ok(ImageCreateOutcome::Conflict(format!(
                 "image is reserved by automated install job {job_id}"
@@ -542,6 +573,89 @@ impl JobService {
         image_ids: &[String],
     ) -> Result<Option<String>> {
         self.store.active_resource_user(vm_name, image_ids)
+    }
+
+    pub fn active_image_user(&self, id: &str) -> Result<Option<String>> {
+        self.store.active_resource_user("", &[id.to_string()])
+    }
+
+    pub fn delete_image<F>(&self, id: &str, vm_users: F) -> Result<ImageDeleteOutcome>
+    where
+        F: FnOnce(&Path) -> Result<Vec<String>>,
+    {
+        let _guard = self.lock_resources()?;
+        validate_existing_image_id(id)?;
+        let path = self.roots.images.join(id);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ImageDeleteOutcome::NotFound);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.file_type().is_file() {
+            bail!("image {id:?} is not a regular file");
+        }
+        if let Some(job_id) = self.active_image_user(id)? {
+            return Ok(ImageDeleteOutcome::InUse(format!(
+                "image is reserved by automated install job {job_id}"
+            )));
+        }
+        if let Some(vm_name) = vm_users(&path)?.into_iter().next() {
+            return Ok(ImageDeleteOutcome::InUse(format!(
+                "image is attached to VM {vm_name}"
+            )));
+        }
+        std::fs::remove_file(path)?;
+        Ok(ImageDeleteOutcome::Deleted)
+    }
+
+    pub fn resize_image<F>(
+        &self,
+        id: &str,
+        size_bytes: u64,
+        active_vm_user: F,
+    ) -> Result<ImageResizeOutcome>
+    where
+        F: FnOnce(&Path) -> Result<Option<String>>,
+    {
+        let _guard = self.lock_resources()?;
+        validate_existing_image_id(id)?;
+        validate_image_size(size_bytes)?;
+        let path = self.roots.images.join(id);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => bail!("image {id:?} is not a regular file"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ImageResizeOutcome::NotFound);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if let Some(job_id) = self.active_image_user(id)? {
+            return Ok(ImageResizeOutcome::InUse(format!(
+                "image is reserved by automated install job {job_id}"
+            )));
+        }
+        if let Some(vm_name) = active_vm_user(&path)? {
+            return Ok(ImageResizeOutcome::InUse(format!(
+                "image is attached to active VM {vm_name}"
+            )));
+        }
+        let image = image_from_path(id, &path)?;
+        let (Some(format), Some(current_size)) = (image.format, image.virtual_size_bytes) else {
+            return Ok(ImageResizeOutcome::Conflict(
+                "image format could not be verified".to_string(),
+            ));
+        };
+        if size_bytes < current_size {
+            return Ok(ImageResizeOutcome::Conflict(format!(
+                "refusing to shrink image from {current_size} to {size_bytes} bytes"
+            )));
+        }
+        if size_bytes > current_size {
+            disk::resize_image(&path, format, size_bytes)?;
+        }
+        Ok(ImageResizeOutcome::Resized(image_from_path(id, &path)?))
     }
 
     pub fn managed_image_ids<'a>(
@@ -878,6 +992,31 @@ fn validate_image_id(id: &str, format: DiskFormat) -> Result<()> {
     Ok(())
 }
 
+fn validate_existing_image_id(id: &str) -> Result<()> {
+    validate_id(id, "image ID")?;
+    if id.len() > 255 {
+        bail!("image ID must not exceed 255 bytes");
+    }
+    if id.starts_with('.') {
+        bail!("image ID must not start with a dot");
+    }
+    let id = id.to_ascii_lowercase();
+    if !id.ends_with(".raw") && !id.ends_with(".qcow2") {
+        bail!("image ID must end with .raw or .qcow2");
+    }
+    Ok(())
+}
+
+fn validate_image_size(size_bytes: u64) -> Result<()> {
+    if size_bytes == 0 {
+        bail!("image size must be greater than zero");
+    }
+    if size_bytes > MAX_IMAGE_SIZE_BYTES {
+        bail!("image size must not exceed {MAX_IMAGE_SIZE_BYTES} bytes");
+    }
+    Ok(())
+}
+
 fn resource_from_path(id: &str, path: &Path) -> Result<ManagedResource> {
     let metadata = path.symlink_metadata()?;
     if !metadata.file_type().is_file() {
@@ -1125,6 +1264,11 @@ mod tests {
         assert!(request.validate().is_err());
         request.media_id = "Fedora-Server.iso".to_string();
         assert!(request.validate().is_ok());
+        request.image_id = "fedora-test.raw".to_string();
+        assert!(request.validate().is_err());
+        request.image_id = "fedora-test.qcow2".to_string();
+        request.disk_size = (MAX_IMAGE_SIZE_BYTES + 1).to_string();
+        assert!(request.validate().is_err());
     }
 
     #[test]
