@@ -43,6 +43,9 @@ Set the Bearer token on `/access`; it is kept in `sessionStorage` and sent to `/
 - `/vms`: VM list
 - `/vms/$name`: VM detail
 - `/vms/$name/console`: noVNC console
+- `/installations`: automated Fedora installations
+- `/resources/disks`: managed raw and qcow2 disk lifecycle
+- `/resources/isos`: managed installation media
 - `/settings`: host and web settings
 
 ## Attribution

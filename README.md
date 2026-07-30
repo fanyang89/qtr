@@ -92,7 +92,9 @@ Fedora installations are persistent jobs under `/api/v1/install-jobs`. Requests 
 
 The ISOs page supports authenticated, streaming upload and protected deletion. Uploads are limited to 32 GiB by default; override the limit with `--max-iso-upload-bytes`. Existing ISO IDs are never overwritten, and deletion is blocked while an ISO is referenced by an automated install or VM CD-ROM.
 
-The Disks page creates blank managed raw and qcow2 images without host shell access. Image IDs must use the extension matching their format, and creation is rejected while an automated install reserves the same ID.
+The Disks page creates, expands, and deletes managed raw and qcow2 images without host shell access. It reports the detected format, virtual capacity, VM attachments, and automated-install reservations. Image IDs must use the extension matching their format. Deletion is blocked while an image is attached or reserved, and expansion only increases capacity and requires every attached VM to be powered off.
+
+Managed images can be attached to or detached from powered-off VMs on the VM detail page. A writable image can be attached to only one VM, and qtr refuses to detach a VM's last disk. Expanding virtual capacity does not resize guest partitions or filesystems.
 
 qtr serves plain HTTP. Keep the default loopback binding or put a TLS reverse proxy in front of qtr on trusted networks. The server logs a warning when plain HTTP listens on a non-loopback address.
 
