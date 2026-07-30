@@ -1,4 +1,6 @@
 allowBuilds:
   esbuild: true
 overrides:
+  # Keep emnapi 1 compatibility until 1.2.1 clears the release-age policy.
+  '@napi-rs/wasm-runtime': 1.1.6
   minimatch@9.0.9: 10.2.5
