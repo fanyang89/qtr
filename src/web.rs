@@ -208,7 +208,15 @@ struct CreateVmRequest {
     disks: Vec<CreateVmDisk>,
     network_id: String,
     media_id: Option<String>,
+    cdroms: Option<Vec<CreateVmCdrom>>,
     console: CreateVmConsole,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateVmCdrom {
+    id: String,
+    media_id: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -454,17 +462,40 @@ impl CreateVmRequest {
                 }))
             })
             .collect::<Result<Vec<_>>>()?;
+        if self.media_id.is_some() && self.cdroms.is_some() {
+            anyhow::bail!("mediaId and cdroms are mutually exclusive");
+        }
         let cdrom = self
             .media_id
             .as_deref()
-            .map(|id| jobs.resolve_media(id))
+            .map(|id| ready_iso_path(jobs, id))
+            .transpose()?;
+        let cdroms = self
+            .cdroms
+            .map(|cdroms| {
+                cdroms
+                    .into_iter()
+                    .map(|cdrom| {
+                        Ok(vm::VmCdromEntry::present(vm::VmCdrom {
+                            id: cdrom.id,
+                            media: cdrom
+                                .media_id
+                                .as_deref()
+                                .map(|id| ready_iso_path(jobs, id))
+                                .transpose()?,
+                            target: None,
+                        }))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
             .transpose()?;
         let serial_log = self
             .console
             .serial_log
             .then(|| jobs.serial_log_path(&self.name))
             .transpose()?;
-        let has_cdrom = cdrom.is_some();
+        let has_cdrom =
+            cdrom.is_some() || cdroms.as_deref().is_some_and(|cdroms| !cdroms.is_empty());
         Ok(vm::VmManifest {
             name: self.name,
             machine: None,
@@ -476,7 +507,7 @@ impl CreateVmRequest {
             io_threads: None,
             disks,
             cdrom,
-            cdroms: None,
+            cdroms,
             boot: Some(if has_cdrom {
                 vec!["cdrom".to_string(), "hd".to_string()]
             } else {
@@ -1734,6 +1765,14 @@ fn managed_iso_path(jobs: &JobService, id: &str) -> vm::VmApiResult<PathBuf> {
     jobs.resolve_media(id).map_err(vm::VmApiError::Internal)
 }
 
+fn ready_iso_path(jobs: &JobService, id: &str) -> Result<PathBuf> {
+    let iso = jobs.inspect_iso(id)?;
+    if iso.status != ManagedIsoStatus::Ready {
+        anyhow::bail!("managed ISO {id:?} is not a valid ISO9660 image");
+    }
+    jobs.resolve_media(id)
+}
+
 async fn run_job_store<T, F>(task: F) -> AppResult<T>
 where
     T: Send + 'static,
@@ -2822,7 +2861,11 @@ mod tests {
         let images = directory.join("images");
         std::fs::create_dir_all(&media).unwrap();
         std::fs::create_dir_all(&images).unwrap();
-        std::fs::write(media.join("installer.iso"), b"iso").unwrap();
+        for id in ["installer.iso", "tools.iso"] {
+            let mut iso = vec![0_u8; 32_774];
+            iso[32_769..32_774].copy_from_slice(b"CD001");
+            std::fs::write(media.join(id), iso).unwrap();
+        }
         crate::disk::create_image(
             &images.join("system.qcow2"),
             crate::config::DiskFormat::Qcow2,
@@ -2862,6 +2905,32 @@ mod tests {
             manifest.serial_log.unwrap(),
             directory.join("logs/managed-vm.serial.log")
         );
+
+        let request: CreateVmRequest = serde_json::from_value(serde_json::json!({
+            "name": "multi-media-vm",
+            "resources": { "vcpus": 2, "memoryMib": 1536 },
+            "disks": [{
+                "imageId": "system.qcow2",
+                "format": "qcow2",
+                "bus": "virtio-blk"
+            }],
+            "networkId": "default",
+            "cdroms": [
+                { "id": "installer", "mediaId": "installer.iso" },
+                { "id": "tools", "mediaId": null }
+            ],
+            "console": { "graphics": "vnc", "serialLog": false }
+        }))
+        .unwrap();
+        let manifest = request.into_manifest(&jobs).unwrap();
+        let cdroms = manifest.cdroms.unwrap();
+        assert_eq!(cdroms.len(), 2);
+        assert_eq!(cdroms[0].as_present().unwrap().id, "installer");
+        assert_eq!(
+            cdroms[0].as_present().unwrap().media.as_deref(),
+            Some(media.join("installer.iso").as_path())
+        );
+        assert!(cdroms[1].as_present().unwrap().media.is_none());
 
         drop(jobs);
         std::fs::remove_dir_all(directory).unwrap();

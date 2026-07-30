@@ -2063,6 +2063,24 @@
         },
         "additionalProperties": false
       },
+      "CreateVmCdrom": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "mediaId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateVmConsole": {
         "type": "object",
         "required": [
@@ -2107,6 +2125,15 @@
           "console"
         ],
         "properties": {
+          "cdroms": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CreateVmCdrom"
+            }
+          },
           "console": {
             "$ref": "#/components/schemas/CreateVmConsole"
           },
