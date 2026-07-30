@@ -11,7 +11,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 comfy-table = "7.2"
 duct = "1"
 futures-util = "0.3"
-if-addrs = "0.14"
+if-addrs = "0.15"
 nix = { version = "0.31", features = ["user"] }
 roxmltree = "0.20"
 rusqlite = { version = "0.40", features = ["bundled"] }
