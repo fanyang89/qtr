@@ -2787,6 +2787,33 @@ mod tests {
             )
             .await
             .unwrap();
+        let live_device_update_supported = response.status() == StatusCode::OK;
+        let response = if live_device_update_supported {
+            response
+        } else {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let detail = problem["detail"].as_str().unwrap();
+            assert!(detail.contains("virDomainUpdateDeviceFlags"), "{detail}");
+
+            // Older libvirt test drivers cannot update live devices. The API has
+            // already rolled back the persistent definition, so retry it inactive.
+            vm::destroy_by_name("test:///default", &name).unwrap();
+            router
+                .clone()
+                .oneshot(
+                    Request::put(format!("/api/v1/vms/{name}/cdroms/tools/media"))
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"mediaId":"second.iso"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -2813,7 +2840,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        vm::destroy_by_name("test:///default", &name).unwrap();
+        if live_device_update_supported {
+            vm::destroy_by_name("test:///default", &name).unwrap();
+        }
 
         let response = router
             .clone()
