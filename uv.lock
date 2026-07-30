@@ -339,7 +339,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ansible-core", specifier = ">=2.19,<2.21" }]
+requires-dist = [{ name = "ansible-core", specifier = ">=2.19.11,<2.21" }]
 
 [[package]]
 name = "resolvelib"
