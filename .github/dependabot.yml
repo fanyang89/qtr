@@ -5,8 +5,21 @@ updates:
     schedule:
       interval: weekly
     groups:
+      react:
+        patterns:
+          - react
+          - react-dom
+          - "@types/react"
+          - "@types/react-dom"
       web-development-dependencies:
         dependency-type: development
+    ignore:
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: cargo
     directory: /
