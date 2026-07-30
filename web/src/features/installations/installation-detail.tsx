@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowLeft, ExternalLink, X } from 'lucide-react'
@@ -41,6 +42,13 @@ export function InstallationDetail({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ['install-jobs'] })
     },
   })
+
+  useEffect(() => {
+    if (job.data && !['queued', 'running'].includes(job.data.status)) {
+      queryClient.invalidateQueries({ queryKey: ['resources', 'disks'] })
+      queryClient.invalidateQueries({ queryKey: ['vms'] })
+    }
+  }, [job.data, queryClient])
 
   if (job.isPending) return <DetailMessage>Loading installation…</DetailMessage>
   if (job.isError)

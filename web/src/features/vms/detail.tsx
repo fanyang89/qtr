@@ -1,10 +1,36 @@
 import { useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import axios from 'axios'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowLeft, MonitorPlay } from 'lucide-react'
-import { getVm } from '@/lib/api'
+import { ArrowLeft, MonitorPlay, Plus, Unplug } from 'lucide-react'
+import { toast } from 'sonner'
+import {
+  attachDisk,
+  detachDisk,
+  getDisks,
+  getVm,
+  type ManagedImage,
+  type VmDisk,
+} from '@/lib/api'
 import { formatBytes } from '@/lib/format'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { Search } from '@/components/search'
@@ -98,30 +124,7 @@ export function VmDetail({ name }: { name: string }) {
                   mono
                 />
               </Section>
-              <Section title='Storage'>
-                {vm.disks?.length ? (
-                  vm.disks.map((disk) => (
-                    <div
-                      key={`${disk.target}-${disk.path}`}
-                      className='border-b border-border px-4 py-3 last:border-b-0'
-                    >
-                      <div className='flex items-center justify-between gap-4'>
-                        <code className='font-mono text-xs'>
-                          {disk.target ?? 'disk'}
-                        </code>
-                        <span className='text-xs text-muted-foreground'>
-                          {disk.format}
-                        </span>
-                      </div>
-                      <p className='mt-1 truncate font-mono text-[0.6875rem] text-muted-foreground'>
-                        {disk.path}
-                      </p>
-                    </div>
-                  ))
-                ) : (
-                  <Value label='Disks' value='None reported' />
-                )}
-              </Section>
+              <VmStorage name={name} state={vm.state} disks={vm.disks ?? []} />
               <Section title='Configuration'>
                 <Value label='Boot' value={vm.boot?.join(' → ') ?? '—'} />
                 <Value label='CD-ROM' value={vm.cdrom ?? 'Not attached'} mono />
@@ -150,16 +153,228 @@ export function VmDetail({ name }: { name: string }) {
 function Section({
   title,
   children,
+  action,
 }: {
   title: string
   children: React.ReactNode
+  action?: React.ReactNode
 }) {
   return (
     <section>
-      <h2 className='mb-3 text-sm font-medium'>{title}</h2>
+      <div className='mb-3 flex min-h-8 items-center justify-between gap-3'>
+        <h2 className='text-sm font-medium'>{title}</h2>
+        {action}
+      </div>
       <div className='border border-border bg-card'>{children}</div>
     </section>
   )
+}
+
+export function VmStorage({
+  name,
+  state,
+  disks,
+}: {
+  name: string
+  state: string
+  disks: VmDisk[]
+}) {
+  const queryClient = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const [imageId, setImageId] = useState('')
+  const [bus, setBus] = useState<'virtio-blk' | 'virtio-scsi'>('virtio-blk')
+  const [detachImage, setDetachImage] = useState<ManagedImage | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const images = useQuery({
+    queryKey: ['resources', 'disks'],
+    queryFn: getDisks,
+  })
+  const refresh = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['vms', name] }),
+      queryClient.invalidateQueries({ queryKey: ['vms'] }),
+      queryClient.invalidateQueries({ queryKey: ['resources', 'disks'] }),
+    ])
+  }
+  const attach = useMutation({
+    mutationFn: () => attachDisk(name, imageId, bus),
+    onSuccess: async () => {
+      await refresh()
+      toast.success(`${imageId} attached`)
+      setOpen(false)
+      setImageId('')
+    },
+    onError: (attachError) =>
+      setError(errorDetail(attachError, 'Attach failed.')),
+  })
+  const detach = useMutation({
+    mutationFn: (image: ManagedImage) => detachDisk(name, image.id),
+    onSuccess: async (_, image) => {
+      await refresh()
+      toast.success(`${image.id} detached`)
+      setDetachImage(null)
+    },
+    onError: (detachError) =>
+      setError(errorDetail(detachError, 'Detach failed.')),
+  })
+  const inactive = state === 'shutoff'
+  const available = (images.data ?? []).filter(
+    (image) =>
+      image.status === 'ready' &&
+      image.attachments.length === 0 &&
+      !image.reservedByJobId
+  )
+
+  return (
+    <Section
+      title='Storage'
+      action={
+        <Button
+          size='sm'
+          variant='outline'
+          disabled={!inactive || available.length === 0}
+          title={inactive ? 'Attach managed disk' : 'Shut down the VM first'}
+          onClick={() => {
+            setError(null)
+            setOpen(true)
+          }}
+        >
+          <Plus className='size-4' /> Attach Disk
+        </Button>
+      }
+    >
+      {disks.length ? (
+        disks.map((disk) => {
+          const image = images.data?.find((candidate) =>
+            candidate.attachments.some(
+              (attachment) =>
+                attachment.vmName === name && attachment.target === disk.target
+            )
+          )
+          return (
+            <div
+              key={`${disk.target}-${disk.path}`}
+              className='flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0'
+            >
+              <div className='min-w-0 flex-1'>
+                <div className='flex items-center gap-3'>
+                  <code className='font-mono text-xs'>
+                    {disk.target ?? 'disk'}
+                  </code>
+                  <span className='text-xs text-muted-foreground'>
+                    {disk.format}
+                  </span>
+                </div>
+                <p className='mt-1 truncate font-mono text-[0.6875rem] text-muted-foreground'>
+                  {image?.id ?? disk.path}
+                </p>
+              </div>
+              {image && (
+                <Button
+                  variant='ghost'
+                  size='icon'
+                  aria-label={`Detach ${image.id}`}
+                  disabled={!inactive || disks.length <= 1}
+                  title={inactive ? 'Detach disk' : 'Shut down the VM first'}
+                  onClick={() => {
+                    setError(null)
+                    setDetachImage(image)
+                  }}
+                >
+                  <Unplug className='size-4 text-muted-foreground' />
+                </Button>
+              )}
+            </div>
+          )
+        })
+      ) : (
+        <Value label='Disks' value='None reported' />
+      )}
+      {error && (
+        <p className='border-t border-border px-4 py-3 text-sm text-destructive'>
+          {error}
+        </p>
+      )}
+      <Dialog
+        open={open}
+        onOpenChange={(next) => !attach.isPending && setOpen(next)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Attach managed disk</DialogTitle>
+            <DialogDescription>
+              Add an available disk to this powered-off VM.
+            </DialogDescription>
+          </DialogHeader>
+          <div className='grid gap-4'>
+            <div className='grid gap-2'>
+              <Label>Managed disk</Label>
+              <Select value={imageId} onValueChange={setImageId}>
+                <SelectTrigger className='w-full'>
+                  <SelectValue placeholder='Select disk' />
+                </SelectTrigger>
+                <SelectContent>
+                  {available.map((image) => (
+                    <SelectItem key={image.id} value={image.id}>
+                      {image.id} ·{' '}
+                      {formatBytes(image.virtualSizeBytes ?? image.sizeBytes)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className='grid gap-2'>
+              <Label>Bus</Label>
+              <Select
+                value={bus}
+                onValueChange={(value) => setBus(value as typeof bus)}
+              >
+                <SelectTrigger className='w-full'>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value='virtio-blk'>VirtIO block</SelectItem>
+                  <SelectItem value='virtio-scsi'>VirtIO SCSI</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          {error && <p className='text-sm text-destructive'>{error}</p>}
+          <DialogFooter>
+            <Button
+              variant='ghost'
+              disabled={attach.isPending}
+              onClick={() => setOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={!imageId || attach.isPending}
+              onClick={() => attach.mutate()}
+            >
+              {attach.isPending ? 'Attaching…' : 'Attach Disk'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <ConfirmDialog
+        open={detachImage != null}
+        onOpenChange={(next) => !next && setDetachImage(null)}
+        title={`Detach ${detachImage?.id ?? 'disk'}?`}
+        desc='The disk remains in managed storage.'
+        confirmText='Detach'
+        isLoading={detach.isPending}
+        handleConfirm={() => detachImage && detach.mutate(detachImage)}
+      >
+        {error && <p className='text-sm text-destructive'>{error}</p>}
+      </ConfirmDialog>
+    </Section>
+  )
+}
+
+function errorDetail(error: unknown, fallback: string): string {
+  const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null
+  return typeof detail === 'string' ? detail : fallback
 }
 
 function Value({

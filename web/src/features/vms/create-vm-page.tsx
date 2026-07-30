@@ -413,9 +413,12 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
                             value={field.value}
                             onValueChange={(value) => {
                               field.onChange(value)
+                              const image = managedDisks.data?.find(
+                                (disk) => disk.id === value
+                              )
                               form.setValue(
                                 `disks.${index}.format`,
-                                value.endsWith('.raw') ? 'raw' : 'qcow2'
+                                image?.format ?? 'qcow2'
                               )
                             }}
                           >
@@ -436,11 +439,17 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
                                   key={disk.id}
                                   value={disk.id}
                                   disabled={
-                                    selectedDiskIds.has(disk.id) &&
-                                    disk.id !== field.value
+                                    disk.status !== 'ready' ||
+                                    disk.attachments.length > 0 ||
+                                    Boolean(disk.reservedByJobId) ||
+                                    (selectedDiskIds.has(disk.id) &&
+                                      disk.id !== field.value)
                                   }
                                 >
-                                  {disk.id} · {formatBytes(disk.sizeBytes)}
+                                  {disk.id} ·{' '}
+                                  {formatBytes(
+                                    disk.virtualSizeBytes ?? disk.sizeBytes
+                                  )}
                                 </SelectItem>
                               ))}
                             </SelectContent>
@@ -456,10 +465,7 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
                         render={({ field }) => (
                           <FormItem>
                             <FormLabel>Format</FormLabel>
-                            <Select
-                              value={field.value}
-                              onValueChange={field.onChange}
-                            >
+                            <Select value={field.value} disabled>
                               <FormControl>
                                 <SelectTrigger>
                                   <SelectValue />
@@ -519,16 +525,35 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
                 >
                   <Plus className='size-4' /> Add Disk
                 </Button>
-                {!managedDisks.isPending && !managedDisks.data?.length && (
-                  <Alert>
+                {managedDisks.isError && (
+                  <Alert variant='destructive'>
                     <HardDrive className='size-4' />
-                    <AlertTitle>No managed disks</AlertTitle>
+                    <AlertTitle>Disks unavailable</AlertTitle>
                     <AlertDescription>
-                      Add a disk to the configured disk root or run an automated
-                      Fedora install first.
+                      The managed disk inventory could not be loaded.
+                      <Button
+                        type='button'
+                        variant='link'
+                        className='ms-1 h-auto p-0'
+                        onClick={() => managedDisks.refetch()}
+                      >
+                        Retry
+                      </Button>
                     </AlertDescription>
                   </Alert>
                 )}
+                {!managedDisks.isPending &&
+                  !managedDisks.isError &&
+                  !managedDisks.data?.length && (
+                    <Alert>
+                      <HardDrive className='size-4' />
+                      <AlertTitle>No managed disks</AlertTitle>
+                      <AlertDescription>
+                        Add a disk to the configured disk root or run an
+                        automated Fedora install first.
+                      </AlertDescription>
+                    </Alert>
+                  )}
               </div>
             </FormSection>
 

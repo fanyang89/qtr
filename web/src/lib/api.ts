@@ -127,6 +127,21 @@ export const managedResourceSchema = z.object({
   modifiedAtMs: z.number().nullish(),
 })
 
+export const imageAttachmentSchema = z.object({
+  imageId: z.string(),
+  vmName: z.string(),
+  vmState: vmStateSchema,
+  target: z.string(),
+  active: z.boolean(),
+})
+
+export const managedImageSchema = managedResourceSchema.extend({
+  format: z.enum(['raw', 'qcow2']).nullish(),
+  status: z.enum(['ready', 'invalid']),
+  attachments: z.array(imageAttachmentSchema),
+  reservedByJobId: z.string().nullish(),
+})
+
 export const networkSummarySchema = z.object({
   id: z.string(),
   active: z.boolean(),
@@ -136,6 +151,7 @@ export const networkSummarySchema = z.object({
 
 const installJobArraySchema = z.array(installJobSchema)
 const managedResourceArraySchema = z.array(managedResourceSchema)
+const managedImageArraySchema = z.array(managedImageSchema)
 const networkSummaryArraySchema = z.array(networkSummarySchema)
 
 export type VmState = z.infer<typeof vmStateSchema>
@@ -148,6 +164,7 @@ export type JobStatus = z.infer<typeof jobStatusSchema>
 export type FedoraInstallRequest = z.infer<typeof fedoraInstallRequestSchema>
 export type InstallJob = z.infer<typeof installJobSchema>
 export type ManagedResource = z.infer<typeof managedResourceSchema>
+export type ManagedImage = z.infer<typeof managedImageSchema>
 export type NetworkSummary = z.infer<typeof networkSummarySchema>
 
 export type ImageCreateInput = {
@@ -290,14 +307,54 @@ export async function cancelInstallJob(id: string): Promise<InstallJob> {
   )
 }
 
-export async function getDisks(): Promise<ManagedResource[]> {
-  return parseResponse(apiClient.get('/images'), managedResourceArraySchema)
+export async function getDisks(): Promise<ManagedImage[]> {
+  return parseResponse(apiClient.get('/images'), managedImageArraySchema)
 }
 
 export async function createDisk(
   input: ImageCreateInput
-): Promise<ManagedResource> {
-  return parseResponse(apiClient.post('/images', input), managedResourceSchema)
+): Promise<ManagedImage> {
+  return parseResponse(apiClient.post('/images', input), managedImageSchema)
+}
+
+export async function resizeDisk(
+  id: string,
+  sizeBytes: number
+): Promise<ManagedImage> {
+  return parseResponse(
+    apiClient.post(`/images/${encodeURIComponent(id)}/resize`, { sizeBytes }),
+    managedImageSchema
+  )
+}
+
+export async function deleteDisk(id: string): Promise<void> {
+  await apiClient.delete(`/images/${encodeURIComponent(id)}`)
+}
+
+export async function attachDisk(
+  name: string,
+  imageId: string,
+  bus: 'virtio-blk' | 'virtio-scsi'
+): Promise<VmSummary> {
+  return parseResponse(
+    apiClient.put(
+      `/vms/${encodeURIComponent(name)}/disks/${encodeURIComponent(imageId)}`,
+      { bus }
+    ),
+    vmSummarySchema
+  )
+}
+
+export async function detachDisk(
+  name: string,
+  imageId: string
+): Promise<VmSummary> {
+  return parseResponse(
+    apiClient.delete(
+      `/vms/${encodeURIComponent(name)}/disks/${encodeURIComponent(imageId)}`
+    ),
+    vmSummarySchema
+  )
 }
 
 export async function getIsos(): Promise<ManagedResource[]> {

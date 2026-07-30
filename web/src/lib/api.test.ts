@@ -4,6 +4,7 @@ import {
   API_TOKEN_STORAGE_KEY,
   getApiToken,
   installJobSchema,
+  managedImageSchema,
   managedResourceSchema,
   networkSummarySchema,
   setApiToken,
@@ -98,6 +99,26 @@ describe('VM API contract', () => {
         modifiedAtMs: null,
       }).modifiedAtMs
     ).toBeNull()
+    expect(
+      managedImageSchema.parse({
+        id: 'data.qcow2',
+        sizeBytes: 196608,
+        virtualSizeBytes: 8 * 1024 ** 3,
+        modifiedAtMs: null,
+        format: 'qcow2',
+        status: 'ready',
+        attachments: [
+          {
+            imageId: 'data.qcow2',
+            vmName: 'fedora',
+            vmState: 'shutoff',
+            target: 'vdb',
+            active: false,
+          },
+        ],
+        reservedByJobId: null,
+      }).attachments[0].vmName
+    ).toBe('fedora')
   })
 
   test('parses network inventory records', () => {
