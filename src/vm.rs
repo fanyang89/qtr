@@ -111,11 +111,21 @@ pub struct VmSummary {
     pub network: Option<String>,
     pub disks: Option<Vec<VmSummaryDisk>>,
     pub cdrom: Option<String>,
+    pub cdroms: Vec<VmSummaryCdrom>,
     pub boot: Option<Vec<String>>,
     pub graphics: String,
     pub vnc_listen: Option<String>,
     pub vnc_port: Option<u16>,
     pub metrics: Option<VmMetrics>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VmSummaryCdrom {
+    pub id: String,
+    pub target: String,
+    pub media_id: Option<String>,
+    pub source_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
@@ -139,6 +149,18 @@ pub struct VmImageAttachment {
     pub vm_state: &'static str,
     pub target: String,
     pub active: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VmIsoAttachment {
+    pub media_id: String,
+    pub vm_name: String,
+    pub vm_state: &'static str,
+    pub tray_id: String,
+    pub target: String,
+    pub live: bool,
+    pub persistent: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -3404,6 +3426,94 @@ pub fn managed_image_attachments(
     Ok(attachments.into_values().collect())
 }
 
+pub fn managed_iso_attachments(
+    connect_uri: &str,
+    media_root: &Path,
+) -> Result<Vec<VmIsoAttachment>> {
+    let root = media_root.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve managed media root {}",
+            media_root.display()
+        )
+    })?;
+    let connection = connect_read_only(connect_uri)?;
+    let mut attachments = BTreeMap::new();
+    for domain in connection
+        .list_all_domains(0)
+        .context("failed to list domains while checking ISO references")?
+    {
+        let vm_name = domain.get_name().context("failed to read domain name")?;
+        let (state, _) = domain
+            .get_state()
+            .with_context(|| format!("failed to query domain {vm_name} state"))?;
+        let active = domain
+            .is_active()
+            .with_context(|| format!("failed to query domain {vm_name} state"))?;
+        let mut documents = vec![(
+            domain
+                .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+                .with_context(|| format!("failed to read inactive domain XML for {vm_name}"))?,
+            false,
+        )];
+        if active {
+            documents.push((
+                domain
+                    .get_xml_desc(0)
+                    .with_context(|| format!("failed to read active domain XML for {vm_name}"))?,
+                true,
+            ));
+        }
+        for (xml, live) in documents {
+            let document = Document::parse(&xml)
+                .with_context(|| format!("failed to parse domain XML for {vm_name}"))?;
+            let devices = required_child(document.root_element(), "devices")?;
+            for entry in cdroms_from_domain_xml(devices)? {
+                let Some(cdrom) = entry.as_present() else {
+                    continue;
+                };
+                let Some(source) = cdrom.media.as_deref() else {
+                    continue;
+                };
+                let Ok(source) = source.canonicalize() else {
+                    continue;
+                };
+                if source.parent() != Some(root.as_path()) {
+                    continue;
+                }
+                let Some(media_id) = source
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let target = cdrom.target.clone().unwrap_or_default();
+                let key = (
+                    media_id.clone(),
+                    vm_name.clone(),
+                    cdrom.id.clone(),
+                    target.clone(),
+                );
+                let attachment = attachments.entry(key).or_insert(VmIsoAttachment {
+                    media_id,
+                    vm_name: vm_name.clone(),
+                    vm_state: domain_state_name(state),
+                    tray_id: cdrom.id.clone(),
+                    target,
+                    live: false,
+                    persistent: false,
+                });
+                if live {
+                    attachment.live = true;
+                } else {
+                    attachment.persistent = true;
+                }
+            }
+        }
+    }
+    Ok(attachments.into_values().collect())
+}
+
 pub fn domains_using_image(connect_uri: &str, image: &Path) -> Result<Vec<String>> {
     let root = image
         .parent()
@@ -3551,7 +3661,7 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
     let vnc_endpoint = parse_vnc_endpoint(&xml, "127.0.0.1").map(|endpoint| endpoint.display());
     let serial_log = parse_serial_log(&xml);
     let (memory_mib, vcpus, network) = parse_summary_resources(&xml);
-    let (disks, io_threads, cdrom, boot, graphics, vnc_listen, vnc_port) =
+    let (disks, io_threads, cdrom, cdroms, boot, graphics, vnc_listen, vnc_port) =
         parse_summary_definition(&xml).unwrap_or_default();
     let metrics = domain_metrics(domain, &xml);
 
@@ -3568,6 +3678,7 @@ fn domain_summary(domain: &Domain) -> Result<VmSummary> {
         network,
         disks,
         cdrom,
+        cdroms,
         boot,
         graphics,
         vnc_listen,
@@ -3683,6 +3794,7 @@ fn parse_summary_definition(
     Option<Vec<VmSummaryDisk>>,
     Option<VmIoThreads>,
     Option<String>,
+    Vec<VmSummaryCdrom>,
     Option<Vec<String>>,
     String,
     Option<String>,
@@ -3712,6 +3824,17 @@ fn parse_summary_definition(
         .ok()
         .flatten()
         .map(|path| path.display().to_string());
+    let cdroms = cdroms_from_domain_xml(devices)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| entry.as_present().cloned())
+        .map(|cdrom| VmSummaryCdrom {
+            id: cdrom.id,
+            target: cdrom.target.unwrap_or_default(),
+            media_id: None,
+            source_path: cdrom.media.map(|path| path.display().to_string()),
+        })
+        .collect();
     let boot = boot_order(domain).ok();
     let (graphics, vnc_listen, vnc_port) = graphics_config(devices)?;
     let graphics = match graphics {
@@ -3723,6 +3846,7 @@ fn parse_summary_definition(
         disks,
         io_threads,
         cdrom,
+        cdroms,
         boot,
         graphics.to_string(),
         Some(vnc_listen),

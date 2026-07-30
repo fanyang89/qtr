@@ -147,6 +147,22 @@ pub struct ManagedImage {
     pub status: ManagedImageStatus,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ManagedIsoStatus {
+    Ready,
+    Invalid,
+}
+
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedIso {
+    pub id: String,
+    pub size_bytes: u64,
+    pub modified_at_ms: Option<i64>,
+    pub status: ManagedIsoStatus,
+}
+
 pub enum IsoDeleteOutcome {
     Deleted,
     NotFound,
@@ -154,7 +170,7 @@ pub enum IsoDeleteOutcome {
 }
 
 pub enum IsoPublishOutcome {
-    Created(ManagedResource),
+    Created(ManagedIso),
     Exists,
 }
 
@@ -275,12 +291,13 @@ impl JobStore {
             .map_err(Into::into)
     }
 
-    fn active_media_user(&self, media_id: &str) -> Result<Option<String>> {
+    fn active_media_users(&self, media_id: &str) -> Result<Vec<String>> {
         Ok(self
             .list()?
             .into_iter()
-            .find(|job| job.request.media_id == media_id && job.status.reserves_resources())
-            .map(|job| job.id))
+            .filter(|job| job.request.media_id == media_id && job.status.reserves_resources())
+            .map(|job| job.id)
+            .collect())
     }
 
     fn active_resource_user(&self, vm_name: &str, image_ids: &[String]) -> Result<Option<String>> {
@@ -486,8 +503,8 @@ impl JobService {
         list_images(&self.roots.images)
     }
 
-    pub fn list_media(&self) -> Result<Vec<ManagedResource>> {
-        list_resources(&self.roots.media)
+    pub fn list_media(&self) -> Result<Vec<ManagedIso>> {
+        list_isos(&self.roots.media)
     }
 
     pub fn resolve_image(&self, id: &str) -> Result<PathBuf> {
@@ -505,6 +522,33 @@ impl JobService {
 
     pub fn resolve_media(&self, id: &str) -> Result<PathBuf> {
         resolve_resource(&self.roots.media, id, "media")
+    }
+
+    pub fn media_root(&self) -> &Path {
+        &self.roots.media
+    }
+
+    pub fn active_media_users(&self, id: &str) -> Result<Vec<String>> {
+        self.store.active_media_users(id)
+    }
+
+    pub fn managed_media_id(&self, path: &Path) -> Result<Option<String>> {
+        let root = self.roots.media.canonicalize().with_context(|| {
+            format!(
+                "failed to resolve managed media root {}",
+                self.roots.media.display()
+            )
+        })?;
+        let Ok(path) = path.canonicalize() else {
+            return Ok(None);
+        };
+        if path.parent() != Some(root.as_path()) {
+            return Ok(None);
+        }
+        Ok(path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned))
     }
 
     pub fn validate_image_id(&self, id: &str, format: DiskFormat) -> Result<()> {
@@ -711,10 +755,7 @@ impl JobService {
             Err(error) => return Err(error.into()),
         }
         std::fs::remove_file(staging)?;
-        Ok(IsoPublishOutcome::Created(resource_from_path(
-            id,
-            &destination,
-        )?))
+        Ok(IsoPublishOutcome::Created(iso_from_path(id, &destination)?))
     }
 
     pub fn delete_iso<F>(&self, id: &str, vm_users: F) -> Result<IsoDeleteOutcome>
@@ -734,7 +775,7 @@ impl JobService {
         if !metadata.file_type().is_file() {
             bail!("ISO {id:?} is not a regular file");
         }
-        if let Some(job_id) = self.store.active_media_user(id)? {
+        if let Some(job_id) = self.store.active_media_users(id)?.into_iter().next() {
             return Ok(IsoDeleteOutcome::InUse(format!(
                 "ISO is referenced by automated install job {job_id}"
             )));
@@ -874,36 +915,6 @@ fn prepare_roots(roots: &JobRoots) -> Result<()> {
     Ok(())
 }
 
-fn list_resources(root: &Path) -> Result<Vec<ManagedResource>> {
-    let mut resources = Vec::new();
-    for entry in std::fs::read_dir(root)
-        .with_context(|| format!("failed to read resource root {}", root.display()))?
-    {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_file() {
-            continue;
-        }
-        let metadata = entry.metadata()?;
-        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let modified_at_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-            .and_then(|value| value.as_millis().try_into().ok());
-        resources.push(ManagedResource {
-            id,
-            size_bytes: metadata.len(),
-            virtual_size_bytes: None,
-            modified_at_ms,
-        });
-    }
-    resources.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(resources)
-}
-
 fn list_images(root: &Path) -> Result<Vec<ManagedImage>> {
     let mut images = Vec::new();
     for entry in std::fs::read_dir(root)
@@ -920,6 +931,48 @@ fn list_images(root: &Path) -> Result<Vec<ManagedImage>> {
     }
     images.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(images)
+}
+
+fn list_isos(root: &Path) -> Result<Vec<ManagedIso>> {
+    let mut isos = Vec::new();
+    for entry in std::fs::read_dir(root)
+        .with_context(|| format!("failed to read media root {}", root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        isos.push(iso_from_path(&id, &entry.path())?);
+    }
+    isos.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(isos)
+}
+
+fn iso_from_path(id: &str, path: &Path) -> Result<ManagedIso> {
+    let resource = resource_from_path(id, path)?;
+    let status = (|| -> std::io::Result<bool> {
+        use std::io::{Read, Seek};
+
+        let mut file = std::fs::File::open(path)?;
+        file.seek(std::io::SeekFrom::Start(32_769))?;
+        let mut signature = [0_u8; 5];
+        file.read_exact(&mut signature)?;
+        Ok(&signature == b"CD001")
+    })()
+    .is_ok_and(|valid| valid);
+    Ok(ManagedIso {
+        id: resource.id,
+        size_bytes: resource.size_bytes,
+        modified_at_ms: resource.modified_at_ms,
+        status: if status {
+            ManagedIsoStatus::Ready
+        } else {
+            ManagedIsoStatus::Invalid
+        },
+    })
 }
 
 fn image_from_path(id: &str, path: &Path) -> Result<ManagedImage> {
@@ -1126,8 +1179,8 @@ mod tests {
         assert_eq!(job.status, JobStatus::Queued);
         assert_eq!(store.list().unwrap().len(), 1);
         assert_eq!(
-            store.active_media_user("Fedora-Server.iso").unwrap(),
-            Some(job.id.clone())
+            store.active_media_users("Fedora-Server.iso").unwrap(),
+            vec![job.id.clone()]
         );
 
         let cancelled = store.request_cancel(&job.id).unwrap().unwrap();
@@ -1136,9 +1189,9 @@ mod tests {
         assert!(cancelled.finished_at_ms.is_some());
         assert!(
             store
-                .active_media_user("Fedora-Server.iso")
+                .active_media_users("Fedora-Server.iso")
                 .unwrap()
-                .is_none()
+                .is_empty()
         );
         assert!(store.claim(&job.id).unwrap().is_none());
         std::fs::remove_dir_all(directory).unwrap();
@@ -1280,10 +1333,11 @@ mod tests {
         std::fs::create_dir(directory.join("ignored")).unwrap();
         std::os::unix::fs::symlink(directory.join("a.iso"), directory.join("linked.iso")).unwrap();
 
-        let resources = list_resources(&directory).unwrap();
+        let resources = list_isos(&directory).unwrap();
         assert_eq!(resources.len(), 2);
         assert_eq!(resources[0].id, "a.iso");
         assert_eq!(resources[0].size_bytes, 1);
+        assert_eq!(resources[0].status, ManagedIsoStatus::Invalid);
         assert_eq!(resources[1].id, "b.iso");
         assert!(resolve_resource(&directory, "linked.iso", "ISO").is_err());
         std::fs::remove_dir_all(directory).unwrap();

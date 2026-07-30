@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -45,7 +45,7 @@ use crate::{
     jobs::{
         FedoraInstallRequest, ImageCreateOutcome, ImageDeleteOutcome, ImageResizeOutcome,
         InstallJob, InstallJobCreateOutcome, IsoDeleteOutcome, IsoPublishOutcome, JobRoots,
-        JobService, ManagedImage, ManagedImageStatus, ManagedResource,
+        JobService, ManagedImage, ManagedImageStatus, ManagedIso, ManagedIsoStatus,
     },
     network, vm,
 };
@@ -270,6 +270,34 @@ struct ManagedImageResponse {
     status: ManagedImageStatus,
     attachments: Vec<vm::VmImageAttachment>,
     reserved_by_job_id: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ManagedIsoResponse {
+    id: String,
+    size_bytes: u64,
+    modified_at_ms: Option<i64>,
+    status: ManagedIsoStatus,
+    attachments: Vec<vm::VmIsoAttachment>,
+    reserved_by_job_ids: Vec<String>,
+}
+
+impl ManagedIsoResponse {
+    fn new(
+        iso: ManagedIso,
+        attachments: Vec<vm::VmIsoAttachment>,
+        reserved_by_job_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            id: iso.id,
+            size_bytes: iso.size_bytes,
+            modified_at_ms: iso.modified_at_ms,
+            status: iso.status,
+            attachments,
+            reserved_by_job_ids,
+        }
+    }
 }
 
 impl ManagedImageResponse {
@@ -656,8 +684,15 @@ async fn session() -> StatusCode {
     )
 )]
 async fn list_vms(State(state): State<AppState>) -> AppResult<Json<Vec<vm::VmSummary>>> {
+    let jobs = job_service(&state)?;
     let connect_uri = state.connect_uri;
-    let vms = run_libvirt(move || vm::list_summaries(&connect_uri)).await?;
+    let vms = run_libvirt(move || {
+        vm::list_summaries(&connect_uri)?
+            .into_iter()
+            .map(|summary| managed_vm_summary(&jobs, summary))
+            .collect::<Result<Vec<_>>>()
+    })
+    .await?;
     Ok(Json(vms))
 }
 
@@ -696,8 +731,13 @@ async fn get_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<vm::VmSummary>> {
+    let jobs = job_service(&state)?;
     let connect_uri = state.connect_uri;
-    let vm = run_libvirt(move || vm::get_summary(&connect_uri, &name)).await?;
+    let vm = run_libvirt(move || {
+        let summary = vm::get_summary(&connect_uri, &name).map_err(anyhow::Error::new)?;
+        managed_vm_summary(&jobs, summary)
+    })
+    .await?;
     Ok(Json(vm))
 }
 
@@ -751,7 +791,8 @@ async fn create_vm(
                     )));
                 }
             }
-            vm::create_by_manifest(&connect_uri, manifest)
+            let summary = vm::create_by_manifest(&connect_uri, manifest)?;
+            managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
         })
     })
     .await?;
@@ -802,7 +843,8 @@ async fn update_vm(
                     )));
                 }
             }
-            vm::apply_by_manifest(&connect_uri, manifest)
+            let summary = vm::apply_by_manifest(&connect_uri, manifest)?;
+            managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
         })
     })
     .await?;
@@ -1251,7 +1293,9 @@ async fn attach_image(
             let path = jobs
                 .resolve_image(&image_id)
                 .map_err(vm::VmApiError::InvalidRequest)?;
-            vm::attach_managed_image(&connect_uri, &name, &path, format, request.bus)
+            let summary =
+                vm::attach_managed_image(&connect_uri, &name, &path, format, request.bus)?;
+            managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
         })
     })
     .await?;
@@ -1293,7 +1337,8 @@ async fn detach_image(
             let path = jobs
                 .resolve_image(&image_id)
                 .map_err(vm::VmApiError::InvalidRequest)?;
-            vm::detach_managed_image(&connect_uri, &name, &path)
+            let summary = vm::detach_managed_image(&connect_uri, &name, &path)?;
+            managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
         })
     })
     .await?;
@@ -1306,13 +1351,41 @@ async fn detach_image(
     tag = "resources",
     security(("bearerAuth" = [])),
     responses(
-        (status = OK, body = [ManagedResource]),
-        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json")
+        (status = OK, body = [ManagedIsoResponse]),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
     )
 )]
-async fn list_media(State(state): State<AppState>) -> AppResult<Json<Vec<ManagedResource>>> {
+async fn list_media(State(state): State<AppState>) -> AppResult<Json<Vec<ManagedIsoResponse>>> {
     let jobs = job_service(&state)?;
-    Ok(Json(run_job_store(move || jobs.list_media()).await?))
+    let inventory_jobs = jobs.clone();
+    let isos = run_job_store(move || {
+        inventory_jobs
+            .list_media()?
+            .into_iter()
+            .map(|iso| {
+                let reservations = inventory_jobs.active_media_users(&iso.id)?;
+                Ok((iso, reservations))
+            })
+            .collect::<Result<Vec<_>>>()
+    })
+    .await?;
+    let connect_uri = state.connect_uri;
+    let media_root = jobs.media_root().to_path_buf();
+    let attachments =
+        run_libvirt(move || vm::managed_iso_attachments(&connect_uri, &media_root)).await?;
+    Ok(Json(
+        isos.into_iter()
+            .map(|(iso, reservations)| {
+                let iso_attachments = attachments
+                    .iter()
+                    .filter(|attachment| attachment.media_id == iso.id)
+                    .cloned()
+                    .collect();
+                ManagedIsoResponse::new(iso, iso_attachments, reservations)
+            })
+            .collect(),
+    ))
 }
 
 struct PartialUpload(PathBuf);
@@ -1331,7 +1404,7 @@ impl Drop for PartialUpload {
     params(("id" = String, Path, description = "ISO ID")),
     request_body(content = Vec<u8>, content_type = "application/octet-stream"),
     responses(
-        (status = CREATED, body = ManagedResource),
+        (status = CREATED, body = ManagedIsoResponse),
         (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
         (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
         (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
@@ -1344,7 +1417,7 @@ async fn upload_iso(
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Body,
-) -> AppResult<(StatusCode, Json<ManagedResource>)> {
+) -> AppResult<(StatusCode, Json<ManagedIsoResponse>)> {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -1427,7 +1500,10 @@ async fn upload_iso(
         }
     };
     drop(partial);
-    Ok((StatusCode::CREATED, Json(resource)))
+    Ok((
+        StatusCode::CREATED,
+        Json(ManagedIsoResponse::new(resource, Vec::new(), Vec::new())),
+    ))
 }
 
 #[utoipa::path(
@@ -1467,6 +1543,16 @@ fn job_service(state: &AppState) -> AppResult<JobService> {
         .jobs
         .clone()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("install job service is not configured")))
+}
+
+fn managed_vm_summary(jobs: &JobService, mut summary: vm::VmSummary) -> Result<vm::VmSummary> {
+    for cdrom in &mut summary.cdroms {
+        let Some(source) = cdrom.source_path.as_deref() else {
+            continue;
+        };
+        cdrom.media_id = jobs.managed_media_id(FsPath::new(source))?;
+    }
+    Ok(summary)
 }
 
 async fn run_job_store<T, F>(task: F) -> AppResult<T>

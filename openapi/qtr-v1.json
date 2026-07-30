@@ -572,13 +572,23 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/ManagedResource"
+                    "$ref": "#/components/schemas/ManagedIsoResponse"
                   }
                 }
               }
             }
           },
           "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
             "description": "",
             "content": {
               "application/problem+json": {
@@ -634,7 +644,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ManagedResource"
+                  "$ref": "#/components/schemas/ManagedIsoResponse"
                 }
               }
             }
@@ -1968,13 +1978,22 @@
           "invalid"
         ]
       },
-      "ManagedResource": {
+      "ManagedIsoResponse": {
         "type": "object",
         "required": [
           "id",
-          "sizeBytes"
+          "sizeBytes",
+          "status",
+          "attachments",
+          "reservedByJobIds"
         ],
         "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VmIsoAttachment"
+            }
+          },
           "id": {
             "type": "string"
           },
@@ -1985,20 +2004,28 @@
             ],
             "format": "int64"
           },
+          "reservedByJobIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "sizeBytes": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
           },
-          "virtualSizeBytes": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
+          "status": {
+            "$ref": "#/components/schemas/ManagedIsoStatus"
           }
         }
+      },
+      "ManagedIsoStatus": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "invalid"
+        ]
       },
       "NetworkSummary": {
         "type": "object",
@@ -2253,6 +2280,41 @@
         },
         "additionalProperties": false
       },
+      "VmIsoAttachment": {
+        "type": "object",
+        "required": [
+          "mediaId",
+          "vmName",
+          "vmState",
+          "trayId",
+          "target",
+          "live",
+          "persistent"
+        ],
+        "properties": {
+          "live": {
+            "type": "boolean"
+          },
+          "mediaId": {
+            "type": "string"
+          },
+          "persistent": {
+            "type": "boolean"
+          },
+          "target": {
+            "type": "string"
+          },
+          "trayId": {
+            "type": "string"
+          },
+          "vmName": {
+            "type": "string"
+          },
+          "vmState": {
+            "type": "string"
+          }
+        }
+      },
       "VmMetrics": {
         "type": "object",
         "required": [
@@ -2302,6 +2364,7 @@
           "name",
           "state",
           "vnc",
+          "cdroms",
           "graphics"
         ],
         "properties": {
@@ -2319,6 +2382,12 @@
               "string",
               "null"
             ]
+          },
+          "cdroms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VmSummaryCdrom"
+            }
           },
           "disks": {
             "type": [
@@ -2414,6 +2483,33 @@
             ],
             "format": "int32",
             "minimum": 0
+          }
+        }
+      },
+      "VmSummaryCdrom": {
+        "type": "object",
+        "required": [
+          "id",
+          "target"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "mediaId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sourcePath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "type": "string"
           }
         }
       },
