@@ -179,9 +179,7 @@ impl IntoResponse for AppError {
         let (title, detail) = match &self {
             Self::Vm(vm::VmApiError::InvalidRequest(error)) => ("Bad Request", error.to_string()),
             Self::BadRequest(error) => ("Bad Request", error.to_string()),
-            Self::Vm(vm::VmApiError::NotFound(_)) => {
-                ("Not Found", "The VM was not found.".to_string())
-            }
+            Self::Vm(vm::VmApiError::NotFound(detail)) => ("Not Found", detail.clone()),
             Self::NotFound => ("Not Found", "The resource was not found.".to_string()),
             Self::Conflict(detail) => ("Conflict", detail.clone()),
             Self::PayloadTooLarge => (
@@ -251,6 +249,19 @@ struct CreateImageRequest {
 struct AttachImageRequest {
     #[serde(default)]
     bus: vm::VmDiskBus,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AddCdromTrayRequest {
+    id: String,
+    media_id: Option<String>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetCdromMediaRequest {
+    media_id: String,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -604,6 +615,9 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(list_images, create_image))
         .routes(routes!(resize_image, delete_image))
         .routes(routes!(attach_image, detach_image))
+        .routes(routes!(add_cdrom_tray))
+        .routes(routes!(set_cdrom_media, eject_cdrom_media))
+        .routes(routes!(remove_cdrom_tray))
         .routes(routes!(list_media))
         .routes(routes!(upload_iso, delete_iso))
         .routes(routes!(list_networks))
@@ -1346,6 +1360,158 @@ async fn detach_image(
 }
 
 #[utoipa::path(
+    post,
+    path = "/vms/{name}/cdroms",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    request_body = AddCdromTrayRequest,
+    responses(
+        (status = CREATED, body = vm::VmSummary),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn add_cdrom_tray(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    request: std::result::Result<Json<AddCdromTrayRequest>, JsonRejection>,
+) -> AppResult<(StatusCode, Json<vm::VmSummary>)> {
+    let request = api_json(request)?;
+    let jobs = job_service(&state)?;
+    if let Some(media_id) = request.media_id.as_deref() {
+        jobs.validate_iso_id(media_id)
+            .map_err(AppError::BadRequest)?;
+    }
+    let connect_uri = state.connect_uri;
+    let summary = run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            let media = request
+                .media_id
+                .as_deref()
+                .map(|id| managed_iso_path(&jobs, id))
+                .transpose()?;
+            let summary =
+                vm::add_managed_cdrom(&connect_uri, &name, &request.id, media.as_deref())?;
+            managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
+        })
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(summary)))
+}
+
+#[utoipa::path(
+    put,
+    path = "/vms/{name}/cdroms/{tray_id}/media",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(
+        ("name" = String, Path, description = "VM name"),
+        ("tray_id" = String, Path, description = "Stable CD-ROM tray ID")
+    ),
+    request_body = SetCdromMediaRequest,
+    responses(
+        (status = OK, body = vm::VmSummary),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn set_cdrom_media(
+    State(state): State<AppState>,
+    Path((name, tray_id)): Path<(String, String)>,
+    request: std::result::Result<Json<SetCdromMediaRequest>, JsonRejection>,
+) -> AppResult<Json<vm::VmSummary>> {
+    let request = api_json(request)?;
+    let jobs = job_service(&state)?;
+    jobs.validate_iso_id(&request.media_id)
+        .map_err(AppError::BadRequest)?;
+    let connect_uri = state.connect_uri;
+    let summary = run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            let media = managed_iso_path(&jobs, &request.media_id)?;
+            let summary = vm::set_managed_cdrom_media(&connect_uri, &name, &tray_id, Some(&media))?;
+            managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
+        })
+    })
+    .await?;
+    Ok(Json(summary))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/vms/{name}/cdroms/{tray_id}/media",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(
+        ("name" = String, Path, description = "VM name"),
+        ("tray_id" = String, Path, description = "Stable CD-ROM tray ID")
+    ),
+    responses(
+        (status = OK, body = vm::VmSummary),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn eject_cdrom_media(
+    State(state): State<AppState>,
+    Path((name, tray_id)): Path<(String, String)>,
+) -> AppResult<Json<vm::VmSummary>> {
+    let jobs = job_service(&state)?;
+    let connect_uri = state.connect_uri;
+    let summary = run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            let summary = vm::set_managed_cdrom_media(&connect_uri, &name, &tray_id, None)?;
+            managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
+        })
+    })
+    .await?;
+    Ok(Json(summary))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/vms/{name}/cdroms/{tray_id}",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(
+        ("name" = String, Path, description = "VM name"),
+        ("tray_id" = String, Path, description = "Stable CD-ROM tray ID")
+    ),
+    responses(
+        (status = OK, body = vm::VmSummary),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn remove_cdrom_tray(
+    State(state): State<AppState>,
+    Path((name, tray_id)): Path<(String, String)>,
+) -> AppResult<Json<vm::VmSummary>> {
+    let jobs = job_service(&state)?;
+    let connect_uri = state.connect_uri;
+    let summary = run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            let summary = vm::remove_managed_cdrom(&connect_uri, &name, &tray_id)?;
+            managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
+        })
+    })
+    .await?;
+    Ok(Json(summary))
+}
+
+#[utoipa::path(
     get,
     path = "/media",
     tag = "resources",
@@ -1525,6 +1691,7 @@ async fn delete_iso(
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     let jobs = job_service(&state)?;
+    jobs.validate_iso_id(&id).map_err(AppError::BadRequest)?;
     let connect_uri = state.connect_uri;
     let delete_jobs = jobs.clone();
     let outcome = run_job_store(move || {
@@ -1553,6 +1720,18 @@ fn managed_vm_summary(jobs: &JobService, mut summary: vm::VmSummary) -> Result<v
         cdrom.media_id = jobs.managed_media_id(FsPath::new(source))?;
     }
     Ok(summary)
+}
+
+fn managed_iso_path(jobs: &JobService, id: &str) -> vm::VmApiResult<PathBuf> {
+    let iso = jobs
+        .inspect_iso(id)
+        .map_err(|_| vm::VmApiError::NotFound(format!("managed ISO {id:?} was not found")))?;
+    if iso.status != ManagedIsoStatus::Ready {
+        return Err(vm::VmApiError::InvalidRequest(anyhow::anyhow!(
+            "managed ISO {id:?} is not a valid ISO9660 image"
+        )));
+    }
+    jobs.resolve_media(id).map_err(vm::VmApiError::Internal)
 }
 
 async fn run_job_store<T, F>(task: F) -> AppResult<T>
@@ -2474,6 +2653,137 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        vm::undefine_by_name("test:///default", &name).unwrap();
+        drop(router);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_cdrom_lifecycle_supports_multiple_trays() {
+        let directory = std::env::temp_dir().join(format!("qtr-web-cdrom-test-{}", Uuid::new_v4()));
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("isos"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        assert!(matches!(
+            jobs.create_image("root.qcow2", crate::config::DiskFormat::Qcow2, 1024 * 1024)
+                .unwrap(),
+            ImageCreateOutcome::Created(_)
+        ));
+        for id in ["first.iso", "second.iso"] {
+            let mut iso = vec![0_u8; 32_774];
+            iso[32_769..32_774].copy_from_slice(b"CD001");
+            std::fs::write(jobs.media_root().join(id), iso).unwrap();
+        }
+        let name = format!("qtr-cdrom-test-{}", Uuid::new_v4());
+        let request: CreateVmRequest = serde_json::from_value(serde_json::json!({
+            "name": name,
+            "resources": { "vcpus": 1, "memoryMib": 512 },
+            "disks": [{
+                "imageId": "root.qcow2",
+                "format": "qcow2",
+                "bus": "virtio-blk"
+            }],
+            "networkId": "default",
+            "mediaId": null,
+            "console": { "graphics": "none", "serialLog": false }
+        }))
+        .unwrap();
+        vm::create_by_manifest("test:///default", request.into_manifest(&jobs).unwrap()).unwrap();
+        let router = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+        );
+
+        for (id, media_id) in [("installer", Some("first.iso")), ("tools", None)] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(format!("/api/v1/vms/{name}/cdroms"))
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "id": id, "mediaId": media_id }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        vm::start_by_name("test:///default", &name).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/vms/{name}/cdroms"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"id":"running-add","mediaId":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::put(format!("/api/v1/vms/{name}/cdroms/tools/media"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"mediaId":"second.iso"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let summary: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(summary["cdroms"].as_array().unwrap().len(), 2);
+        assert!(
+            summary["cdroms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|cdrom| { cdrom["id"] == "tools" && cdrom["mediaId"] == "second.iso" })
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/vms/{name}/cdroms/tools/media"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        vm::destroy_by_name("test:///default", &name).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/vms/{name}/cdroms/installer"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
 
         vm::undefine_by_name("test:///default", &name).unwrap();
         drop(router);

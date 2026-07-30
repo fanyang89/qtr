@@ -524,6 +524,11 @@ impl JobService {
         resolve_resource(&self.roots.media, id, "media")
     }
 
+    pub fn inspect_iso(&self, id: &str) -> Result<ManagedIso> {
+        validate_iso_id(id)?;
+        iso_from_path(id, &self.resolve_media(id)?)
+    }
+
     pub fn media_root(&self) -> &Path {
         &self.roots.media
     }

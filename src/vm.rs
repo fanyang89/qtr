@@ -3642,6 +3642,260 @@ pub fn detach_managed_image(connect_uri: &str, name: &str, image: &Path) -> VmAp
     apply_by_manifest(connect_uri, manifest)
 }
 
+pub fn add_managed_cdrom(
+    connect_uri: &str,
+    name: &str,
+    id: &str,
+    media: Option<&Path>,
+) -> VmApiResult<VmSummary> {
+    validate_cdrom_id(id).map_err(VmApiError::InvalidRequest)?;
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    ensure_cdrom_topology_mutable(&domain, name)?;
+    let xml = domain
+        .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+        .with_context(|| format!("failed to read inactive domain XML for {name}"))
+        .map_err(VmApiError::Internal)?;
+    let mut manifest = manifest_from_domain_xml(&xml).map_err(VmApiError::Internal)?;
+    let cdroms = manifest.cdroms.get_or_insert_with(Vec::new);
+    if present_cdroms(cdroms).any(|cdrom| cdrom.id == id) {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "CD-ROM tray {id:?} already exists on VM {name}"
+        )));
+    }
+    cdroms.push(VmCdromEntry::present(VmCdrom {
+        id: id.to_string(),
+        media: canonical_cdrom_media(media)?,
+        target: None,
+    }));
+    apply_by_manifest(connect_uri, manifest)
+}
+
+pub fn remove_managed_cdrom(connect_uri: &str, name: &str, id: &str) -> VmApiResult<VmSummary> {
+    validate_cdrom_id(id).map_err(VmApiError::InvalidRequest)?;
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    ensure_cdrom_topology_mutable(&domain, name)?;
+    let xml = domain
+        .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+        .with_context(|| format!("failed to read inactive domain XML for {name}"))
+        .map_err(VmApiError::Internal)?;
+    let mut manifest = manifest_from_domain_xml(&xml).map_err(VmApiError::Internal)?;
+    let cdroms = manifest.cdroms.get_or_insert_with(Vec::new);
+    let Some(index) = cdroms
+        .iter()
+        .position(|entry| entry.as_present().is_some_and(|cdrom| cdrom.id == id))
+    else {
+        return Err(VmApiError::NotFound(format!(
+            "CD-ROM tray {id:?} was not found on VM {name}"
+        )));
+    };
+    cdroms[index] = VmCdromEntry::absent(id);
+    apply_by_manifest(connect_uri, manifest)
+}
+
+pub fn set_managed_cdrom_media(
+    connect_uri: &str,
+    name: &str,
+    id: &str,
+    media: Option<&Path>,
+) -> VmApiResult<VmSummary> {
+    validate_cdrom_id(id).map_err(VmApiError::InvalidRequest)?;
+    let media = canonical_cdrom_media(media)?;
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    let (state, _) = domain
+        .get_state()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?;
+    if state == sys::VIR_DOMAIN_SHUTOFF {
+        ensure_no_managed_save(&domain, name)?;
+        return set_inactive_cdrom_media(connect_uri, &domain, name, id, media);
+    }
+    if !matches!(
+        state,
+        sys::VIR_DOMAIN_RUNNING | sys::VIR_DOMAIN_BLOCKED | sys::VIR_DOMAIN_PAUSED
+    ) {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} is {}; wait for a stable running or shutoff state",
+            domain_state_name(state)
+        )));
+    }
+
+    let inactive_xml = domain
+        .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+        .with_context(|| format!("failed to read inactive domain XML for {name}"))
+        .map_err(VmApiError::Internal)?;
+    let live_xml = domain
+        .get_xml_desc(0)
+        .with_context(|| format!("failed to read live domain XML for {name}"))
+        .map_err(VmApiError::Internal)?;
+    let (inactive_cdrom, updated_inactive_xml) =
+        patched_cdrom_domain_xml(&inactive_xml, id, media.as_deref())?;
+    let (live_cdrom, live_device_xml) = updated_cdrom_device_xml(&live_xml, id, media.as_deref())?;
+    if inactive_cdrom.target != live_cdrom.target {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "CD-ROM tray {id:?} differs between live and persistent VM definitions"
+        )));
+    }
+
+    Domain::define_xml_flags(
+        &conn,
+        &updated_inactive_xml,
+        sys::VIR_DOMAIN_DEFINE_VALIDATE,
+    )
+    .with_context(|| format!("failed to update persistent CD-ROM tray {id:?} on VM {name}"))
+    .map_err(VmApiError::Internal)?;
+    if let Err(error) =
+        domain.update_device_flags(&live_device_xml, sys::VIR_DOMAIN_DEVICE_MODIFY_LIVE)
+    {
+        let rollback =
+            Domain::define_xml_flags(&conn, &inactive_xml, sys::VIR_DOMAIN_DEFINE_VALIDATE);
+        return match rollback {
+            Ok(_) => Err(VmApiError::Conflict(anyhow::anyhow!(
+                "failed to update live CD-ROM tray {id:?} on VM {name}: {error}"
+            ))),
+            Err(rollback_error) => Err(VmApiError::Internal(anyhow::anyhow!(
+                "failed to update live CD-ROM tray {id:?} on VM {name}: {error}; failed to restore persistent definition: {rollback_error}"
+            ))),
+        };
+    }
+    domain_summary(&domain).map_err(VmApiError::Internal)
+}
+
+fn canonical_cdrom_media(media: Option<&Path>) -> VmApiResult<Option<PathBuf>> {
+    media
+        .map(|path| {
+            path.canonicalize()
+                .with_context(|| format!("failed to resolve ISO {}", path.display()))
+                .map_err(VmApiError::InvalidRequest)
+        })
+        .transpose()
+}
+
+fn ensure_no_managed_save(domain: &Domain, name: &str) -> VmApiResult<()> {
+    if domain
+        .has_managed_save(0)
+        .with_context(|| format!("failed to query saved state for domain {name}"))
+        .map_err(VmApiError::Internal)?
+    {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} has saved state; restore or remove it before changing CD-ROM devices"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_cdrom_topology_mutable(domain: &Domain, name: &str) -> VmApiResult<()> {
+    let (state, _) = domain
+        .get_state()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?;
+    if state != sys::VIR_DOMAIN_SHUTOFF {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} must be shut off before adding or removing CD-ROM trays"
+        )));
+    }
+    ensure_no_managed_save(domain, name)
+}
+
+fn set_inactive_cdrom_media(
+    connect_uri: &str,
+    domain: &Domain,
+    name: &str,
+    id: &str,
+    media: Option<PathBuf>,
+) -> VmApiResult<VmSummary> {
+    let xml = domain
+        .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
+        .with_context(|| format!("failed to read inactive domain XML for {name}"))
+        .map_err(VmApiError::Internal)?;
+    let mut manifest = manifest_from_domain_xml(&xml).map_err(VmApiError::Internal)?;
+    let Some(cdrom) = manifest
+        .cdroms
+        .get_or_insert_with(Vec::new)
+        .iter_mut()
+        .filter_map(VmCdromEntry::as_present_mut)
+        .find(|cdrom| cdrom.id == id)
+    else {
+        return Err(VmApiError::NotFound(format!(
+            "CD-ROM tray {id:?} was not found on VM {name}"
+        )));
+    };
+    cdrom.media = media;
+    apply_by_manifest(connect_uri, manifest)
+}
+
+fn patched_cdrom_domain_xml(
+    xml: &str,
+    id: &str,
+    media: Option<&Path>,
+) -> VmApiResult<(VmCdrom, String)> {
+    let mut manifest = manifest_from_domain_xml(xml).map_err(VmApiError::Internal)?;
+    let Some(cdrom) = manifest
+        .cdroms
+        .get_or_insert_with(Vec::new)
+        .iter_mut()
+        .filter_map(VmCdromEntry::as_present_mut)
+        .find(|cdrom| cdrom.id == id)
+    else {
+        return Err(VmApiError::NotFound(format!(
+            "CD-ROM tray {id:?} was not found"
+        )));
+    };
+    cdrom.media = media.map(Path::to_path_buf);
+    let cdrom = cdrom.clone();
+    let boot = manifest_boot_order(&manifest);
+    let boot_devices = parse_boot_devices(&boot).map_err(VmApiError::InvalidRequest)?;
+    let updated =
+        patch_domain_xml(xml, &manifest, &boot_devices).map_err(VmApiError::InvalidRequest)?;
+    Ok((cdrom, updated))
+}
+
+fn updated_cdrom_device_xml(
+    xml: &str,
+    id: &str,
+    media: Option<&Path>,
+) -> VmApiResult<(VmCdrom, String)> {
+    let document = Document::parse(xml)
+        .context("failed to parse live domain XML")
+        .map_err(VmApiError::Internal)?;
+    let devices =
+        required_child(document.root_element(), "devices").map_err(VmApiError::Internal)?;
+    let nodes = devices
+        .children()
+        .filter(|node| node.has_tag_name("disk") && node.attribute("device") == Some("cdrom"))
+        .collect::<Vec<_>>();
+    let cdroms = cdroms_from_domain_xml(devices).map_err(VmApiError::Internal)?;
+    let mut matches = nodes.into_iter().zip(cdroms).filter_map(|(node, entry)| {
+        entry
+            .as_present()
+            .filter(|cdrom| cdrom.id == id)
+            .map(|cdrom| (node, cdrom.clone()))
+    });
+    let Some((node, mut cdrom)) = matches.next() else {
+        return Err(VmApiError::NotFound(format!(
+            "CD-ROM tray {id:?} was not found in the live VM definition"
+        )));
+    };
+    if matches.next().is_some() {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "live VM definition contains duplicate CD-ROM tray {id:?}"
+        )));
+    }
+    cdrom.media = media.map(Path::to_path_buf);
+    let target = cdrom
+        .target
+        .as_deref()
+        .ok_or_else(|| VmApiError::Internal(anyhow::anyhow!("CD-ROM tray {id:?} has no target")))?;
+    let desired = domain_xml::build_cdrom_xml(&domain_xml::VmLaunchCdromSpec {
+        id: &cdrom.id,
+        media,
+        target,
+    });
+    Ok((cdrom, vm_reconcile::merge_cdrom_xml(xml, node, &desired)))
+}
+
 pub fn get_summary(connect_uri: &str, name: &str) -> VmApiResult<VmSummary> {
     let conn = connect_read_only(connect_uri).map_err(VmApiError::Internal)?;
     let domain = lookup_domain_api(&conn, name)?;
