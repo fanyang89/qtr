@@ -351,10 +351,10 @@ impl JobStore {
         connection.execute(
             "UPDATE install_jobs
              SET cancel_requested = 1,
-                 status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END,
-                 phase = CASE WHEN status = 'queued' THEN 'cancelled' ELSE phase END,
-                 finished_at_ms = CASE WHEN status = 'queued' THEN ?2 ELSE finished_at_ms END
-             WHERE id = ?1 AND status IN ('queued', 'running')",
+                  status = CASE WHEN status IN ('queued', 'interrupted') THEN 'cancelled' ELSE status END,
+                  phase = CASE WHEN status IN ('queued', 'interrupted') THEN 'cancelled' ELSE phase END,
+                  finished_at_ms = CASE WHEN status IN ('queued', 'interrupted') THEN ?2 ELSE finished_at_ms END
+              WHERE id = ?1 AND status IN ('queued', 'running', 'interrupted')",
             params![id, now_ms()],
         )?;
         drop(connection);
@@ -1209,6 +1209,20 @@ mod tests {
         assert_eq!(interrupted.status, JobStatus::Interrupted);
         assert_eq!(interrupted.phase, "interrupted");
         assert!(interrupted.finished_at_ms.is_some());
+        assert_eq!(
+            reopened.active_media_users("Fedora-Server.iso").unwrap(),
+            vec![job.id.clone()]
+        );
+
+        let cancelled = reopened.request_cancel(&job.id).unwrap().unwrap();
+        assert_eq!(cancelled.status, JobStatus::Cancelled);
+        assert!(cancelled.cancel_requested);
+        assert!(
+            reopened
+                .active_media_users("Fedora-Server.iso")
+                .unwrap()
+                .is_empty()
+        );
         drop(reopened);
         std::fs::remove_dir_all(directory).unwrap();
     }
