@@ -1749,6 +1749,9 @@ fn managed_vm_summary(jobs: &JobService, mut summary: vm::VmSummary) -> Result<v
             continue;
         };
         cdrom.media_id = jobs.managed_media_id(FsPath::new(source))?;
+        if cdrom.media_id.is_some() {
+            cdrom.source_path = None;
+        }
     }
     Ok(summary)
 }

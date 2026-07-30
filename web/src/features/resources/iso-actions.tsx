@@ -3,7 +3,7 @@ import axios from 'axios'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Disc3, Trash2, Upload, X } from 'lucide-react'
 import { toast } from 'sonner'
-import { deleteIso, uploadIso, type ManagedResource } from '@/lib/api'
+import { deleteIso, uploadIso, type ManagedIso } from '@/lib/api'
 import { formatBytes } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import {
@@ -221,15 +221,28 @@ export function IsoUploadButton() {
   )
 }
 
-export function DeleteIsoButton({ iso }: { iso: ManagedResource }) {
+export function DeleteIsoButton({ iso }: { iso: ManagedIso }) {
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  let blocker: string | null = null
+  if (iso.reservedByJobIds.length) {
+    blocker = 'Reserved by an install job'
+  } else if (iso.attachments.length) {
+    blocker = `Attached to ${iso.attachments[0].vmName}`
+  }
   const remove = useMutation({
     mutationFn: () => deleteIso(iso.id),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['resources', 'isos'] })
       toast.success(`${iso.id} deleted`)
       setOpen(false)
+    },
+    onError: (removeError) => {
+      const detail = axios.isAxiosError(removeError)
+        ? removeError.response?.data?.detail
+        : null
+      setError(typeof detail === 'string' ? detail : 'Delete failed.')
     },
   })
 
@@ -239,7 +252,12 @@ export function DeleteIsoButton({ iso }: { iso: ManagedResource }) {
         variant='ghost'
         size='icon'
         aria-label={`Delete ${iso.id}`}
-        onClick={() => setOpen(true)}
+        disabled={blocker != null}
+        title={blocker ?? `Delete ${iso.id}`}
+        onClick={() => {
+          setError(null)
+          setOpen(true)
+        }}
       >
         <Trash2 className='size-4 text-muted-foreground' />
       </Button>
@@ -252,7 +270,13 @@ export function DeleteIsoButton({ iso }: { iso: ManagedResource }) {
         destructive
         isLoading={remove.isPending}
         handleConfirm={() => remove.mutate()}
-      />
+      >
+        {error && (
+          <p role='alert' className='text-sm text-destructive'>
+            {error}
+          </p>
+        )}
+      </ConfirmDialog>
     </>
   )
 }

@@ -2,15 +2,22 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowLeft, MonitorPlay, Plus, Unplug } from 'lucide-react'
+import { ArrowLeft, Disc3, MonitorPlay, Plus, Unplug } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   attachDisk,
+  addCdromTray,
   detachDisk,
+  ejectCdromMedia,
   getDisks,
+  getIsos,
   getVm,
+  removeCdromTray,
+  setCdromMedia,
   type ManagedImage,
+  type VmCdrom,
   type VmDisk,
+  type VmSummary,
 } from '@/lib/api'
 import { formatBytes } from '@/lib/format'
 import { Button } from '@/components/ui/button'
@@ -22,6 +29,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
   Select,
@@ -125,9 +133,9 @@ export function VmDetail({ name }: { name: string }) {
                 />
               </Section>
               <VmStorage name={name} state={vm.state} disks={vm.disks ?? []} />
+              <VmCdroms name={name} state={vm.state} cdroms={vm.cdroms} />
               <Section title='Configuration'>
                 <Value label='Boot' value={vm.boot?.join(' → ') ?? '—'} />
-                <Value label='CD-ROM' value={vm.cdrom ?? 'Not attached'} mono />
                 <Value label='Graphics' value={vm.graphics ?? '—'} />
                 <Value
                   label='Serial log'
@@ -148,6 +156,341 @@ export function VmDetail({ name }: { name: string }) {
       </Main>
     </>
   )
+}
+
+export function VmCdroms({
+  name,
+  state,
+  cdroms,
+}: {
+  name: string
+  state: string
+  cdroms: VmCdrom[]
+}) {
+  const queryClient = useQueryClient()
+  const [addOpen, setAddOpen] = useState(false)
+  const [trayId, setTrayId] = useState('')
+  const [addMediaId, setAddMediaId] = useState('none')
+  const [changeTray, setChangeTray] = useState<VmCdrom | null>(null)
+  const [mediaId, setMediaId] = useState('')
+  const [ejectTray, setEjectTray] = useState<VmCdrom | null>(null)
+  const [removeTray, setRemoveTray] = useState<VmCdrom | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const isos = useQuery({
+    queryKey: ['resources', 'isos'],
+    queryFn: getIsos,
+  })
+  const applySummary = async (summary: VmSummary) => {
+    queryClient.setQueryData(['vms', name], summary)
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['vms'] }),
+      queryClient.invalidateQueries({ queryKey: ['resources', 'isos'] }),
+    ])
+  }
+  const add = useMutation({
+    mutationFn: () =>
+      addCdromTray(name, trayId, addMediaId === 'none' ? null : addMediaId),
+    onSuccess: async (summary) => {
+      await applySummary(summary)
+      toast.success(`${trayId} added`)
+      setAddOpen(false)
+      setTrayId('')
+      setAddMediaId('none')
+    },
+    onError: (addError) => setError(errorDetail(addError, 'Add failed.')),
+  })
+  const change = useMutation({
+    mutationFn: () => setCdromMedia(name, changeTray!.id, mediaId),
+    onSuccess: async (summary) => {
+      await applySummary(summary)
+      toast.success(`${mediaId} loaded`)
+      setChangeTray(null)
+      setMediaId('')
+    },
+    onError: (changeError) =>
+      setError(errorDetail(changeError, 'Media change failed.')),
+  })
+  const eject = useMutation({
+    mutationFn: (tray: VmCdrom) => ejectCdromMedia(name, tray.id),
+    onSuccess: async (summary, tray) => {
+      await applySummary(summary)
+      toast.success(`${tray.id} ejected`)
+      setEjectTray(null)
+    },
+    onError: (ejectError) => setError(errorDetail(ejectError, 'Eject failed.')),
+  })
+  const remove = useMutation({
+    mutationFn: (tray: VmCdrom) => removeCdromTray(name, tray.id),
+    onSuccess: async (summary, tray) => {
+      await applySummary(summary)
+      toast.success(`${tray.id} removed`)
+      setRemoveTray(null)
+    },
+    onError: (removeError) =>
+      setError(errorDetail(removeError, 'Remove failed.')),
+  })
+  const topologyMutable = state === 'shutoff'
+  const mediaMutable = ['running', 'blocked', 'paused', 'shutoff'].includes(
+    state
+  )
+  const readyIsos = (isos.data ?? []).filter((iso) => iso.status === 'ready')
+  const availableMedia = readyIsos.filter(
+    (iso) => iso.id !== changeTray?.mediaId
+  )
+  const pending =
+    add.isPending || change.isPending || eject.isPending || remove.isPending
+
+  return (
+    <Section
+      title='Optical Media'
+      action={
+        <Button
+          size='sm'
+          variant='outline'
+          disabled={!topologyMutable || pending}
+          onClick={() => {
+            setError(null)
+            setAddOpen(true)
+          }}
+        >
+          <Plus className='size-4' /> Add Tray
+        </Button>
+      }
+    >
+      {cdroms.length ? (
+        cdroms.map((cdrom) => (
+          <div
+            key={cdrom.id}
+            className='flex flex-col gap-3 border-b border-border px-4 py-3 last:border-b-0 sm:flex-row sm:items-center'
+          >
+            <Disc3 className='size-4 shrink-0 text-muted-foreground' />
+            <div className='min-w-0 flex-1'>
+              <div className='flex items-center gap-3'>
+                <code className='font-mono text-xs'>{cdrom.id}</code>
+                <span className='font-mono text-[0.6875rem] text-muted-foreground'>
+                  {cdrom.target}
+                </span>
+              </div>
+              <p className='mt-1 truncate font-mono text-[0.6875rem] text-muted-foreground'>
+                {cdrom.mediaId ?? cdrom.sourcePath ?? 'Empty'}
+              </p>
+            </div>
+            <div className='flex flex-wrap gap-1'>
+              <Button
+                size='sm'
+                variant='ghost'
+                disabled={
+                  !mediaMutable || availableMedia.length === 0 || pending
+                }
+                onClick={() => {
+                  setError(null)
+                  setMediaId('')
+                  setChangeTray(cdrom)
+                }}
+              >
+                {cdromHasMedia(cdrom) ? 'Change ISO' : 'Insert ISO'}
+              </Button>
+              {cdromHasMedia(cdrom) && (
+                <Button
+                  size='sm'
+                  variant='ghost'
+                  disabled={!mediaMutable || pending}
+                  onClick={() => {
+                    setError(null)
+                    setEjectTray(cdrom)
+                  }}
+                >
+                  Eject
+                </Button>
+              )}
+              <Button
+                size='sm'
+                variant='ghost'
+                disabled={!topologyMutable || pending}
+                onClick={() => {
+                  setError(null)
+                  setRemoveTray(cdrom)
+                }}
+              >
+                Remove
+              </Button>
+            </div>
+          </div>
+        ))
+      ) : (
+        <Value label='Trays' value='None configured' />
+      )}
+      {!topologyMutable && (
+        <p className='border-t border-border px-4 py-3 text-xs text-muted-foreground'>
+          Shut down the VM to add or remove trays.
+        </p>
+      )}
+      {error && (
+        <p
+          role='alert'
+          className='border-t border-border px-4 py-3 text-sm text-destructive'
+        >
+          {error}
+        </p>
+      )}
+
+      <Dialog
+        open={addOpen}
+        onOpenChange={(open) => !add.isPending && setAddOpen(open)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add CD-ROM tray</DialogTitle>
+            <DialogDescription>
+              Add an optical drive to this VM.
+            </DialogDescription>
+          </DialogHeader>
+          <div className='grid gap-4'>
+            <div className='grid gap-2'>
+              <Label htmlFor='cdrom-tray-id'>Tray ID</Label>
+              <Input
+                id='cdrom-tray-id'
+                value={trayId}
+                maxLength={48}
+                onChange={(event) => setTrayId(event.target.value)}
+              />
+            </div>
+            <div className='grid gap-2'>
+              <Label htmlFor='cdrom-initial-media'>Initial ISO</Label>
+              <Select value={addMediaId} onValueChange={setAddMediaId}>
+                <SelectTrigger id='cdrom-initial-media' className='w-full'>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value='none'>Empty</SelectItem>
+                  {readyIsos.map((iso) => (
+                    <SelectItem key={iso.id} value={iso.id}>
+                      {iso.id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          {error && (
+            <p role='alert' className='text-sm text-destructive'>
+              {error}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant='ghost'
+              disabled={add.isPending}
+              onClick={() => setAddOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={!isValidTrayId(trayId) || add.isPending}
+              onClick={() => add.mutate()}
+            >
+              {add.isPending ? 'Adding…' : 'Add Tray'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={changeTray != null}
+        onOpenChange={(open) =>
+          !open && !change.isPending && setChangeTray(null)
+        }
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {changeTray && cdromHasMedia(changeTray)
+                ? 'Change ISO'
+                : 'Insert ISO'}
+            </DialogTitle>
+            <DialogDescription>
+              {changeTray?.id ?? 'CD-ROM tray'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className='grid gap-2'>
+            <Label htmlFor='cdrom-media'>Managed ISO</Label>
+            <Select value={mediaId} onValueChange={setMediaId}>
+              <SelectTrigger id='cdrom-media' className='w-full'>
+                <SelectValue placeholder='Select ISO' />
+              </SelectTrigger>
+              <SelectContent>
+                {availableMedia.map((iso) => (
+                  <SelectItem key={iso.id} value={iso.id}>
+                    {iso.id}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {error && (
+            <p role='alert' className='text-sm text-destructive'>
+              {error}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant='ghost'
+              disabled={change.isPending}
+              onClick={() => setChangeTray(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={!mediaId || change.isPending}
+              onClick={() => change.mutate()}
+            >
+              {change.isPending ? 'Updating…' : 'Load ISO'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={ejectTray != null}
+        onOpenChange={(open) => !open && setEjectTray(null)}
+        title={`Eject ${ejectTray?.mediaId ?? 'media'}?`}
+        desc='The tray remains attached to the VM.'
+        confirmText='Eject'
+        isLoading={eject.isPending}
+        handleConfirm={() => ejectTray && eject.mutate(ejectTray)}
+      >
+        {error && (
+          <p role='alert' className='text-sm text-destructive'>
+            {error}
+          </p>
+        )}
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={removeTray != null}
+        onOpenChange={(open) => !open && setRemoveTray(null)}
+        title={`Remove ${removeTray?.id ?? 'tray'}?`}
+        desc='The ISO remains in managed storage.'
+        confirmText='Remove'
+        destructive
+        isLoading={remove.isPending}
+        handleConfirm={() => removeTray && remove.mutate(removeTray)}
+      >
+        {error && (
+          <p role='alert' className='text-sm text-destructive'>
+            {error}
+          </p>
+        )}
+      </ConfirmDialog>
+    </Section>
+  )
+}
+
+function isValidTrayId(value: string): boolean {
+  return /^[a-zA-Z0-9._-]{1,48}$/.test(value)
+}
+
+function cdromHasMedia(cdrom: VmCdrom): boolean {
+  return cdrom.mediaId != null || cdrom.sourcePath != null
 }
 
 function Section({

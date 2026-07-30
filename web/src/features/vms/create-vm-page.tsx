@@ -72,7 +72,25 @@ const createVmSchema = z.object({
       'Each disk can only be attached once'
     ),
   networkId: z.string().min(1, 'Select a network'),
-  mediaId: z.string().nullable(),
+  cdroms: z
+    .array(
+      z.object({
+        id: z
+          .string()
+          .min(1, 'Enter a tray ID')
+          .max(48)
+          .regex(
+            /^[a-zA-Z0-9._-]+$/,
+            'Use letters, numbers, dot, underscore, or hyphen'
+          ),
+        mediaId: z.string().nullable(),
+      })
+    )
+    .refine(
+      (cdroms) =>
+        new Set(cdroms.map((cdrom) => cdrom.id)).size === cdroms.length,
+      'Each tray ID must be unique'
+    ),
   graphics: z.enum(['vnc', 'none']),
   serialLog: z.boolean(),
 })
@@ -86,7 +104,7 @@ const defaultValues: CreateVmFormInput = {
   memoryMib: 4096,
   disks: [{ imageId: '', format: 'qcow2', bus: 'virtio-blk' }],
   networkId: 'default',
-  mediaId: null,
+  cdroms: [{ id: 'installer', mediaId: null }],
   graphics: 'vnc',
   serialLog: true,
 }
@@ -225,6 +243,7 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
     defaultValues,
   })
   const disks = useFieldArray({ control: form.control, name: 'disks' })
+  const cdroms = useFieldArray({ control: form.control, name: 'cdroms' })
   const values = useWatch({ control: form.control })
   const managedDisks = useQuery({
     queryKey: ['resources', 'disks'],
@@ -259,7 +278,7 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
       resources: { vcpus: values.vcpus, memoryMib: values.memoryMib },
       disks: values.disks,
       networkId: values.networkId,
-      mediaId: values.mediaId,
+      cdroms: values.cdroms,
       console: { graphics: values.graphics, serialLog: values.serialLog },
     }
     create.mutate(input)
@@ -637,39 +656,96 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
                     </FormItem>
                   )}
                 />
-                <FormField
-                  control={form.control}
-                  name='mediaId'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Installation ISO</FormLabel>
-                      <Select
-                        value={field.value ?? 'none'}
-                        onValueChange={(value) =>
-                          field.onChange(value === 'none' ? null : value)
-                        }
+                <div className='grid gap-3'>
+                  <div className='flex items-center justify-between gap-3'>
+                    <div>
+                      <p className='text-sm font-medium'>CD-ROM trays</p>
+                      <p className='text-sm text-muted-foreground'>
+                        Loaded media boots before disks.
+                      </p>
+                    </div>
+                    <Button
+                      type='button'
+                      size='sm'
+                      variant='outline'
+                      onClick={() =>
+                        cdroms.append({
+                          id: `cdrom-${cdroms.fields.length + 1}`,
+                          mediaId: null,
+                        })
+                      }
+                    >
+                      <Plus className='size-4' /> Add Tray
+                    </Button>
+                  </div>
+                  {cdroms.fields.map((cdrom, index) => (
+                    <div
+                      key={cdrom.id}
+                      className='grid gap-3 border border-border p-4 sm:grid-cols-[1fr_1.4fr_auto] sm:items-start'
+                    >
+                      <FormField
+                        control={form.control}
+                        name={`cdroms.${index}.id`}
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Tray ID</FormLabel>
+                            <FormControl>
+                              <Input {...field} />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                      <FormField
+                        control={form.control}
+                        name={`cdroms.${index}.mediaId`}
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>ISO</FormLabel>
+                            <Select
+                              value={field.value ?? 'none'}
+                              onValueChange={(value) =>
+                                field.onChange(value === 'none' ? null : value)
+                              }
+                            >
+                              <FormControl>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                              </FormControl>
+                              <SelectContent>
+                                <SelectItem value='none'>Empty</SelectItem>
+                                {isos.data
+                                  ?.filter(
+                                    (resource) => resource.status === 'ready'
+                                  )
+                                  .map((resource) => (
+                                    <SelectItem
+                                      key={resource.id}
+                                      value={resource.id}
+                                    >
+                                      {resource.id}
+                                    </SelectItem>
+                                  ))}
+                              </SelectContent>
+                            </Select>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='icon'
+                        className='sm:mt-7'
+                        aria-label={`Remove CD-ROM tray ${index + 1}`}
+                        onClick={() => cdroms.remove(index)}
                       >
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          <SelectItem value='none'>No ISO</SelectItem>
-                          {isos.data?.map((resource) => (
-                            <SelectItem key={resource.id} value={resource.id}>
-                              {resource.id}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <FormDescription>
-                        An attached ISO changes boot order to CD-ROM, then disk.
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                        <Trash2 className='size-4' />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
                 <FormField
                   control={form.control}
                   name='serialLog'
@@ -729,7 +805,14 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
                 label='Graphics'
                 value={values.graphics === 'vnc' ? 'Browser console' : 'None'}
               />
-              <ReviewValue label='ISO' value={values.mediaId || 'None'} mono />
+              <ReviewValue
+                label='CD-ROMs'
+                value={
+                  values.cdroms?.length
+                    ? `${values.cdroms.length} tray(s)`
+                    : 'None'
+                }
+              />
               <div className='grid gap-2 border-t border-border p-4'>
                 <Button
                   type='submit'

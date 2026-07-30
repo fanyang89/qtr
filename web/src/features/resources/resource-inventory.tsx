@@ -2,7 +2,12 @@ import { useDeferredValue, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Disc3, HardDrive, RefreshCw, Search as SearchIcon } from 'lucide-react'
-import { getDisks, getIsos, type ManagedImage } from '@/lib/api'
+import {
+  getDisks,
+  getIsos,
+  type ManagedImage,
+  type ManagedIso,
+} from '@/lib/api'
 import { formatBytes, formatTimestamp } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -21,13 +26,19 @@ import { DeleteIsoButton, IsoUploadButton } from './iso-actions'
 export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
   const [search, setSearch] = useState('')
   const deferredSearch = useDeferredValue(search.trim().toLowerCase())
-  const query = useQuery({
+  const query = useQuery<Array<ManagedImage | ManagedIso>>({
     queryKey: ['resources', kind],
     queryFn: kind === 'disks' ? getDisks : getIsos,
   })
-  const resources = (query.data ?? []).filter((resource) =>
-    resource.id.toLowerCase().includes(deferredSearch)
-  )
+  const resources = (query.data ?? []).filter((resource) => {
+    if (resource.id.toLowerCase().includes(deferredSearch)) return true
+    return (
+      kind === 'isos' &&
+      (resource as ManagedIso).attachments.some((attachment) =>
+        attachment.vmName.toLowerCase().includes(deferredSearch)
+      )
+    )
+  })
   const Icon = kind === 'disks' ? HardDrive : Disc3
   const title = kind === 'disks' ? 'Disks' : 'ISOs'
   const singular = kind === 'disks' ? 'Disk' : 'ISO'
@@ -120,22 +131,31 @@ export function ResourceInventory({ kind }: { kind: 'disks' | 'isos' }) {
                     <code className='block truncate font-mono text-xs'>
                       {resource.id}
                     </code>
-                    {kind === 'disks' && (
+                    {kind === 'disks' ? (
                       <span className='mt-1 block truncate text-[0.6875rem] text-muted-foreground'>
                         {imageStatus(resource as ManagedImage)}
+                      </span>
+                    ) : (
+                      <span className='mt-1 block truncate text-[0.6875rem] text-muted-foreground'>
+                        {isoStatus(resource as ManagedIso)}
                       </span>
                     )}
                   </span>
                 </span>
                 <span className='font-mono text-xs tabular-nums'>
-                  {formatBytes(resource.virtualSizeBytes ?? resource.sizeBytes)}
+                  {formatBytes(
+                    kind === 'disks'
+                      ? ((resource as ManagedImage).virtualSizeBytes ??
+                          resource.sizeBytes)
+                      : resource.sizeBytes
+                  )}
                 </span>
                 <span className='hidden text-sm text-muted-foreground sm:block'>
                   {formatTimestamp(resource.modifiedAtMs)}
                 </span>
                 <span className='flex justify-end'>
                   {kind === 'isos' ? (
-                    <DeleteIsoButton iso={resource} />
+                    <DeleteIsoButton iso={resource as ManagedIso} />
                   ) : (
                     <>
                       <ResizeDiskButton disk={resource as ManagedImage} />
@@ -164,6 +184,24 @@ function imageStatus(image: ManagedImage): string {
       .join(', ')
   }
   return `${image.format ?? 'unknown'} · Available`
+}
+
+function isoStatus(iso: ManagedIso): string {
+  if (iso.status === 'invalid') return 'Invalid ISO'
+  if (iso.reservedByJobIds.length) {
+    return `Reserved by ${iso.reservedByJobIds.length} job${iso.reservedByJobIds.length === 1 ? '' : 's'}`
+  }
+  if (iso.attachments.length) {
+    return iso.attachments
+      .map((attachment) => {
+        let scope = 'live only'
+        if (attachment.live && attachment.persistent) scope = attachment.vmState
+        else if (attachment.persistent) scope = 'next start'
+        return `${attachment.vmName} · ${attachment.trayId} · ${scope}`
+      })
+      .join(', ')
+  }
+  return 'Available'
 }
 
 function ResourceMessage({ children }: { children: React.ReactNode }) {

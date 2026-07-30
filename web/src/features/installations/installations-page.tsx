@@ -234,11 +234,13 @@ function InstallFedoraDialog({
                 />
               </SelectTrigger>
               <SelectContent>
-                {isos.data?.map((resource) => (
-                  <SelectItem key={resource.id} value={resource.id}>
-                    {resource.id}
-                  </SelectItem>
-                ))}
+                {isos.data
+                  ?.filter((resource) => resource.status === 'ready')
+                  .map((resource) => (
+                    <SelectItem key={resource.id} value={resource.id}>
+                      {resource.id}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
           </Field>
@@ -309,7 +311,10 @@ function InstallFedoraDialog({
             </Button>
             <Button
               type='submit'
-              disabled={create.isPending || !isos.data?.length}
+              disabled={
+                create.isPending ||
+                !isos.data?.some((resource) => resource.status === 'ready')
+              }
             >
               {create.isPending ? 'Creating' : 'Create Job'}
             </Button>

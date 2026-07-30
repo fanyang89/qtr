@@ -5,6 +5,7 @@ import {
   getApiToken,
   installJobSchema,
   managedImageSchema,
+  managedIsoSchema,
   managedResourceSchema,
   networkSummarySchema,
   setApiToken,
@@ -61,6 +62,23 @@ describe('VM API contract', () => {
 
     expect(vm.memoryMib).toBe(4096)
     expect(vm.metrics?.memoryUsedMib).toBe(1024)
+    expect(
+      vmSummarySchema.parse({
+        name: 'media-vm',
+        state: 'shutoff',
+        id: null,
+        vnc: false,
+        cdroms: [
+          {
+            id: 'installer',
+            target: 'sda',
+            mediaId: 'Fedora.iso',
+            sourcePath: '/var/lib/qtr/media/Fedora.iso',
+          },
+          { id: 'tools', target: 'sdb', mediaId: null, sourcePath: null },
+        ],
+      }).cdroms[1].mediaId
+    ).toBeNull()
   })
 
   test('parses install jobs and managed resources', () => {
@@ -119,6 +137,26 @@ describe('VM API contract', () => {
         reservedByJobId: null,
       }).attachments[0].vmName
     ).toBe('fedora')
+    expect(
+      managedIsoSchema.parse({
+        id: 'Fedora.iso',
+        sizeBytes: 42,
+        modifiedAtMs: null,
+        status: 'ready',
+        attachments: [
+          {
+            mediaId: 'Fedora.iso',
+            vmName: 'fedora',
+            vmState: 'running',
+            trayId: 'installer',
+            target: 'sda',
+            live: true,
+            persistent: true,
+          },
+        ],
+        reservedByJobIds: ['job-id'],
+      }).attachments[0].trayId
+    ).toBe('installer')
   })
 
   test('parses network inventory records', () => {

@@ -50,6 +50,13 @@ const vmDiskSchema = z.object({
   io: vmDiskIoSchema.optional(),
 })
 
+export const vmCdromSchema = z.object({
+  id: z.string(),
+  target: z.string(),
+  mediaId: z.string().nullish(),
+  sourcePath: z.string().nullish(),
+})
+
 export const vmSummarySchema = z.object({
   name: z.string(),
   state: vmStateSchema,
@@ -63,6 +70,7 @@ export const vmSummarySchema = z.object({
   network: z.string().nullish(),
   disks: z.array(vmDiskSchema).nullish(),
   cdrom: z.string().nullish(),
+  cdroms: z.array(vmCdromSchema).default([]),
   boot: z.array(z.string()).nullish(),
   graphics: z.enum(['vnc', 'none']).nullish(),
   vncListen: z.string().nullish(),
@@ -142,6 +150,25 @@ export const managedImageSchema = managedResourceSchema.extend({
   reservedByJobId: z.string().nullish(),
 })
 
+export const isoAttachmentSchema = z.object({
+  mediaId: z.string(),
+  vmName: z.string(),
+  vmState: vmStateSchema,
+  trayId: z.string(),
+  target: z.string(),
+  live: z.boolean(),
+  persistent: z.boolean(),
+})
+
+export const managedIsoSchema = z.object({
+  id: z.string(),
+  sizeBytes: z.number(),
+  modifiedAtMs: z.number().nullish(),
+  status: z.enum(['ready', 'invalid']),
+  attachments: z.array(isoAttachmentSchema),
+  reservedByJobIds: z.array(z.string()),
+})
+
 export const networkSummarySchema = z.object({
   id: z.string(),
   active: z.boolean(),
@@ -150,13 +177,14 @@ export const networkSummarySchema = z.object({
 })
 
 const installJobArraySchema = z.array(installJobSchema)
-const managedResourceArraySchema = z.array(managedResourceSchema)
 const managedImageArraySchema = z.array(managedImageSchema)
+const managedIsoArraySchema = z.array(managedIsoSchema)
 const networkSummaryArraySchema = z.array(networkSummarySchema)
 
 export type VmState = z.infer<typeof vmStateSchema>
 export type VmMetrics = z.infer<typeof vmMetricsSchema>
 export type VmDisk = z.infer<typeof vmDiskSchema>
+export type VmCdrom = z.infer<typeof vmCdromSchema>
 export type VmSummary = z.infer<typeof vmSummarySchema>
 export type HealthStatus = z.infer<typeof healthStatusSchema>
 export type VncTicket = z.infer<typeof vncTicketSchema>
@@ -165,6 +193,7 @@ export type FedoraInstallRequest = z.infer<typeof fedoraInstallRequestSchema>
 export type InstallJob = z.infer<typeof installJobSchema>
 export type ManagedResource = z.infer<typeof managedResourceSchema>
 export type ManagedImage = z.infer<typeof managedImageSchema>
+export type ManagedIso = z.infer<typeof managedIsoSchema>
 export type NetworkSummary = z.infer<typeof networkSummarySchema>
 
 export type ImageCreateInput = {
@@ -185,7 +214,8 @@ export type VmCreateInput = {
     bus: 'virtio-blk' | 'virtio-scsi'
   }>
   networkId: string
-  mediaId: string | null
+  mediaId?: string | null
+  cdroms?: Array<{ id: string; mediaId: string | null }>
   console: {
     graphics: 'vnc' | 'none'
     serialLog: boolean
@@ -357,8 +387,8 @@ export async function detachDisk(
   )
 }
 
-export async function getIsos(): Promise<ManagedResource[]> {
-  return parseResponse(apiClient.get('/media'), managedResourceArraySchema)
+export async function getIsos(): Promise<ManagedIso[]> {
+  return parseResponse(apiClient.get('/media'), managedIsoArraySchema)
 }
 
 export async function uploadIso(
@@ -368,7 +398,7 @@ export async function uploadIso(
     signal?: AbortSignal
     onProgress?: (loaded: number, total: number) => void
   } = {}
-): Promise<ManagedResource> {
+): Promise<ManagedIso> {
   return parseResponse(
     apiClient.put(`/media/${encodeURIComponent(id)}`, file, {
       headers: { 'Content-Type': 'application/octet-stream' },
@@ -376,12 +406,61 @@ export async function uploadIso(
       onUploadProgress: (event) =>
         options.onProgress?.(event.loaded, file.size),
     }),
-    managedResourceSchema
+    managedIsoSchema
   )
 }
 
 export async function deleteIso(id: string): Promise<void> {
   await apiClient.delete(`/media/${encodeURIComponent(id)}`)
+}
+
+export async function addCdromTray(
+  name: string,
+  id: string,
+  mediaId: string | null
+): Promise<VmSummary> {
+  return parseResponse(
+    apiClient.post(`/vms/${encodeURIComponent(name)}/cdroms`, { id, mediaId }),
+    vmSummarySchema
+  )
+}
+
+export async function setCdromMedia(
+  name: string,
+  trayId: string,
+  mediaId: string
+): Promise<VmSummary> {
+  return parseResponse(
+    apiClient.put(
+      `/vms/${encodeURIComponent(name)}/cdroms/${encodeURIComponent(trayId)}/media`,
+      { mediaId }
+    ),
+    vmSummarySchema
+  )
+}
+
+export async function ejectCdromMedia(
+  name: string,
+  trayId: string
+): Promise<VmSummary> {
+  return parseResponse(
+    apiClient.delete(
+      `/vms/${encodeURIComponent(name)}/cdroms/${encodeURIComponent(trayId)}/media`
+    ),
+    vmSummarySchema
+  )
+}
+
+export async function removeCdromTray(
+  name: string,
+  trayId: string
+): Promise<VmSummary> {
+  return parseResponse(
+    apiClient.delete(
+      `/vms/${encodeURIComponent(name)}/cdroms/${encodeURIComponent(trayId)}`
+    ),
+    vmSummarySchema
+  )
 }
 
 export async function getNetworks(): Promise<NetworkSummary[]> {

@@ -10,6 +10,9 @@ vi.mock('@/lib/api', () => ({
     id,
     sizeBytes: file.size,
     modifiedAtMs: 1,
+    status: 'ready' as const,
+    attachments: [],
+    reservedByJobIds: [],
   })),
   deleteIso: vi.fn(async () => undefined),
 }))
@@ -49,7 +52,14 @@ describe('ISO actions', () => {
     const screen = await render(
       wrapper(
         <DeleteIsoButton
-          iso={{ id: 'Fedora.iso', sizeBytes: 3, modifiedAtMs: 1 }}
+          iso={{
+            id: 'Fedora.iso',
+            sizeBytes: 3,
+            modifiedAtMs: 1,
+            status: 'ready',
+            attachments: [],
+            reservedByJobIds: [],
+          }}
         />
       )
     )
@@ -64,5 +74,36 @@ describe('ISO actions', () => {
     )
 
     expect(vi.mocked(deleteIso)).toHaveBeenCalledWith('Fedora.iso')
+  })
+
+  test('disables deletion while an ISO is attached', async () => {
+    const screen = await render(
+      wrapper(
+        <DeleteIsoButton
+          iso={{
+            id: 'Fedora.iso',
+            sizeBytes: 3,
+            modifiedAtMs: 1,
+            status: 'ready',
+            attachments: [
+              {
+                mediaId: 'Fedora.iso',
+                vmName: 'fedora',
+                vmState: 'running',
+                trayId: 'installer',
+                target: 'sda',
+                live: true,
+                persistent: true,
+              },
+            ],
+            reservedByJobIds: [],
+          }}
+        />
+      )
+    )
+
+    await expect
+      .element(screen.getByRole('button', { name: 'Delete Fedora.iso' }))
+      .toBeDisabled()
   })
 })
