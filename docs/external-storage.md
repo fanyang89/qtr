@@ -43,13 +43,14 @@ The planned Zettide backend makes a stable Zettide Volume ID the storage source
 of truth instead of exposing an operator-selected `/dev/...` path in the VM
 definition. Its managed lifecycle is:
 
-1. Request an idempotent publication for a Volume and qtr host.
-2. Receive the target portal, IQN, LUN, and publication identity.
-3. Discover and log in through the host iSCSI initiator.
-4. Wait for and validate the stable Linux device identity.
-5. Attach the device to the intended libvirt disk.
-6. Persist enough state to reconcile publication, session, device, and libvirt attachment after restart.
-7. On detach, remove the libvirt attachment before releasing the session and publication.
+1. Persist attachment intent, the stable operation ID, and the desired host before any external side effect.
+2. Request an idempotent publication for the Volume and qtr host.
+3. Receive the publication identity, access generation, target portal, IQN, and LUN.
+4. Discover and log in through the host iSCSI initiator.
+5. Wait for and validate the stable Linux device identity.
+6. Attach the device to the intended libvirt disk.
+7. Reconcile publication, session, device, and libvirt attachment from the persisted intent after restart.
+8. On detach, persist the detaching intent before removing the libvirt attachment, session, and publication in that order.
 
 The backend must treat every step as retryable. A lost response cannot imply
 that publication or login failed, and a stale local device path cannot replace
