@@ -54,6 +54,26 @@ cargo run -- vm --help
 
 The frontend-specific development notes are in [`web/README.md`](web/README.md). The committed OpenAPI 3.1 document is [`openapi/qtr-v1.json`](openapi/qtr-v1.json).
 
+## Zettide Storage Direction
+
+The current storage commands discover iSCSI targets, log the host in or out,
+and report the resulting Linux block devices. VM definitions still refer to a
+local file or block-device path, so this is a manual external-storage workflow,
+not a managed attachment lifecycle.
+
+The target Zettide integration adds a managed backend keyed by stable Zettide
+Volume IDs. qtr will publish a Volume for the selected host, establish and
+persist the iSCSI session, resolve its stable device path, attach it to libvirt,
+and reconcile those steps after restart. Detach will remove the VM attachment
+before releasing the session and publication. This backend and its VM schema do
+not exist yet.
+
+The first integration targets a single Zettide storage node. A later
+distributed tier keeps the same qtr identity and attachment contract while
+Zettide handles storage failover and allows the Volume to be republished to a
+specified qtr host. VM scheduling and automatic VM restart remain separate
+compute-layer concerns.
+
 ## Development
 
 Run the complete local verification suite:

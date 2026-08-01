@@ -95,6 +95,25 @@ disks:
 
 Detach updates only the inactive libvirt domain definition. It never deletes the disk file, block device, or storage volume. Omitting an existing disk without `state: absent` remains an error.
 
+### Planned Managed Storage Sources
+
+Current VM disks use a file or host block-device path. The planned Zettide
+backend will instead let a disk reference a stable Zettide backend and Volume
+identity. qtr will resolve that identity through the managed publication and
+iSCSI lifecycle before generating libvirt XML; a transient `/dev/...` path will
+remain an implementation detail rather than persisted user configuration.
+
+The future schema must preserve `disks[].id` as the stable guest-device
+identity while storing the storage Volume identity separately. Applying an
+absent tombstone will detach the guest disk before qtr releases the host session
+and Zettide publication. Restart reconciliation will compare all four states:
+the VM definition, the Zettide publication, the iSCSI session/device, and the
+libvirt attachment.
+
+No managed-storage fields are accepted by the current schema. Continue using a
+file or block path and the manual external-storage workflow documented in
+[External Storage](external-storage.md).
+
 ## CD-ROM Trays
 
 Multiple CD-ROM trays are supported. Set `media: null` to keep an empty tray, change `media` to swap media, or use `state: absent` with the stable ID to remove the tray from the persistent definition. Existing version 1 definitions using the single `cdrom` field remain supported.
