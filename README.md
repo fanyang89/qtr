@@ -63,10 +63,10 @@ not a managed attachment lifecycle.
 
 The target Zettide integration adds a managed backend keyed by stable Zettide
 Volume IDs. qtr will publish a Volume for the selected host, establish and
-persist the iSCSI session, resolve its stable device path, attach it to libvirt,
-and reconcile those steps after restart. Detach will remove the VM attachment
-before releasing the session and publication. This backend and its VM schema do
-not exist yet.
+persist the iSCSI session, validate its expected SCSI serial or WWID, resolve
+the current device path, attach it to libvirt, and reconcile those steps after
+restart. Detach will remove the VM attachment before releasing the session and
+publication. This backend and its VM schema do not exist yet.
 
 The first integration targets a single Zettide storage node. A later
 distributed tier keeps the same qtr identity and attachment contract while
