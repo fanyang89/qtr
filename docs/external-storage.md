@@ -45,7 +45,7 @@ definition. Its managed lifecycle is:
 
 1. Persist attachment intent, the stable operation ID, and the desired host before any external side effect.
 2. Request an idempotent publication for the Volume and qtr host.
-3. Receive the publication identity, access generation, target portal, IQN, and LUN.
+3. Receive and persist the publication identity, access generation, target portal, IQN, LUN, and expected SCSI serial or WWID.
 4. Discover and log in through the host iSCSI initiator.
 5. Wait for and validate the stable Linux device identity.
 6. Attach the device to the intended libvirt disk.
