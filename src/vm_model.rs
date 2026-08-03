@@ -53,8 +53,7 @@ pub struct VmInterface {
     pub id: String,
     #[serde(rename = "type")]
     pub interface_type: VmInterfaceType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
+    pub source: String,
     #[serde(default = "default_vm_interface_model")]
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,7 +74,6 @@ pub enum VmInterfaceType {
     Network,
     Bridge,
     Direct,
-    User,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -120,7 +118,6 @@ impl VmInterfaceType {
             Self::Network => "network",
             Self::Bridge => "bridge",
             Self::Direct => "direct",
-            Self::User => "user",
         }
     }
 
@@ -129,7 +126,6 @@ impl VmInterfaceType {
             Self::Network => "network",
             Self::Bridge => "bridge",
             Self::Direct => "dev",
-            Self::User => unreachable!("user-mode interfaces use QEMU command-line passthrough"),
         }
     }
 }

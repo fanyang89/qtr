@@ -2115,19 +2115,13 @@
         },
         "additionalProperties": false
       },
-      "CreateVmMachineType": {
-        "type": "string",
-        "enum": [
-          "standard",
-          "microvm"
-        ]
-      },
       "CreateVmRequest": {
         "type": "object",
         "required": [
           "name",
           "resources",
           "disks",
+          "networkId",
           "console"
         ],
         "properties": {
@@ -2149,9 +2143,6 @@
               "$ref": "#/components/schemas/CreateVmDisk"
             }
           },
-          "machineType": {
-            "$ref": "#/components/schemas/CreateVmMachineType"
-          },
           "mediaId": {
             "type": [
               "string",
@@ -2162,10 +2153,7 @@
             "type": "string"
           },
           "networkId": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "resources": {
             "$ref": "#/components/schemas/CreateVmResources"
