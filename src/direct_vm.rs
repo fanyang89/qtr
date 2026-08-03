@@ -3,14 +3,13 @@ use std::{
     fmt,
     fs::{self, DirBuilder, File, OpenOptions},
     io::{Read, Write},
-    net::Shutdown,
     os::unix::{
         ffi::OsStrExt,
         fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt},
         net::UnixStream,
     },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -287,23 +286,29 @@ fn start(root: &Path, executable: &Path, args: DirectVmNameArgs) -> Result<()> {
     }
 
     let deadline = Instant::now() + START_TIMEOUT;
+    let mut last_api_error = None;
     loop {
         let socket_ready = match socket_ready(&paths.socket) {
             Ok(ready) => ready,
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_spawned_child(&mut child, &paths.socket);
                 remove_stale_runtime(&paths)?;
                 return Err(error);
             }
         };
-        if socket_ready && vm_is_running(&paths.socket).unwrap_or(false) {
-            eprintln!(
-                "[qtr] started direct VM {} as PID {}",
-                args.name,
-                child.id()
-            );
-            return Ok(());
+        if socket_ready {
+            match vm_is_running(&paths.socket) {
+                Ok(true) => {
+                    eprintln!(
+                        "[qtr] started direct VM {} as PID {}",
+                        args.name,
+                        child.id()
+                    );
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(error) => last_api_error = Some(error),
+            }
         }
         if let Some(status) = child
             .try_wait()
@@ -317,17 +322,34 @@ fn start(root: &Path, executable: &Path, args: DirectVmNameArgs) -> Result<()> {
             );
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_spawned_child(&mut child, &paths.socket);
             remove_stale_runtime(&paths)?;
+            let api_error = last_api_error
+                .map(|error| format!("; last API error: {error:#}"))
+                .unwrap_or_default();
             bail!(
-                "timed out waiting for Cloud Hypervisor API socket {}; see {}",
+                "timed out waiting for Cloud Hypervisor API socket {}{api_error}; see {}",
                 paths.socket.display(),
                 paths.vmm_log.display()
             );
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn stop_spawned_child(child: &mut Child, socket: &Path) {
+    if socket_ready(socket).unwrap_or(false) {
+        let _ = api_request(socket, "PUT", "vmm.shutdown");
+        let deadline = Instant::now() + FORCE_STOP_TIMEOUT;
+        while Instant::now() < deadline {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn stop(root: &Path, args: DirectVmStopArgs) -> Result<()> {
@@ -772,11 +794,25 @@ fn api_request(socket: &Path, method: &str, endpoint: &str) -> Result<String> {
         stream,
         "{method} /api/v1/{endpoint} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     )?;
-    stream.shutdown(Shutdown::Write)?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .context("failed to read Cloud Hypervisor API response")?;
+    let mut response = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .context("failed to read Cloud Hypervisor API response")?;
+        if read == 0 {
+            break;
+        }
+        response.extend_from_slice(&buffer[..read]);
+        if response.len() > 16 * 1024 * 1024 {
+            bail!("Cloud Hypervisor API response is too large");
+        }
+        if expected_http_response_len(&response)?.is_some_and(|length| response.len() >= length) {
+            break;
+        }
+    }
+    let response = String::from_utf8(response)
+        .context("Cloud Hypervisor returned a non-UTF-8 HTTP response")?;
     let status = response.lines().next().unwrap_or("invalid response");
     if !status.starts_with("HTTP/1.1 2") && !status.starts_with("HTTP/1.0 2") {
         bail!("Cloud Hypervisor API request {endpoint} failed: {status}");
@@ -785,6 +821,26 @@ fn api_request(socket: &Path, method: &str, endpoint: &str) -> Result<String> {
         .split_once("\r\n\r\n")
         .context("Cloud Hypervisor returned an invalid HTTP response")?;
     Ok(body.to_string())
+}
+
+fn expected_http_response_len(response: &[u8]) -> Result<Option<usize>> {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Ok(None);
+    };
+    let headers = std::str::from_utf8(&response[..header_end])
+        .context("Cloud Hypervisor returned non-UTF-8 HTTP headers")?;
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim())
+    });
+    let Some(content_length) = content_length else {
+        return Ok(None);
+    };
+    let content_length = content_length
+        .parse::<usize>()
+        .context("Cloud Hypervisor returned an invalid Content-Length header")?;
+    Ok(Some(header_end + 4 + content_length))
 }
 
 #[cfg(test)]
@@ -958,6 +1014,34 @@ mod tests {
         });
 
         assert_eq!(runtime_status(&paths).unwrap(), RuntimeStatus::Untracked);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn reads_api_response_without_waiting_for_connection_close() {
+        use std::{os::unix::net::UnixListener, sync::mpsc};
+
+        let directory = TestDirectory::new();
+        let socket = directory.0.join("api.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 256];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 19\r\n\r\n{\"state\":\"Running\"}",
+                )
+                .unwrap();
+            release_rx.recv().unwrap();
+        });
+
+        assert_eq!(
+            api_request(&socket, "GET", "vm.info").unwrap(),
+            "{\"state\":\"Running\"}"
+        );
+        release_tx.send(()).unwrap();
         server.join().unwrap();
     }
 
