@@ -27,8 +27,69 @@ pub enum Command {
     #[command(about = "Manage regular QEMU virtual machines")]
     Vm(VmArgs),
 
+    #[command(about = "Manage direct Cloud Hypervisor virtual machines")]
+    DirectVm(DirectVmArgs),
+
     #[command(about = "Serve the qtr Web UI and API")]
     Web(WebArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DirectVmArgs {
+    /// Directory containing direct VM definitions and runtime state.
+    #[arg(long, default_value = ".qtr/direct-vms")]
+    pub state_dir: PathBuf,
+
+    /// Cloud Hypervisor executable.
+    #[arg(long, default_value = "cloud-hypervisor")]
+    pub cloud_hypervisor: PathBuf,
+
+    #[command(subcommand)]
+    pub command: DirectVmCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DirectVmCommand {
+    #[command(about = "Define a direct VM from YAML")]
+    Define(DirectVmDefineArgs),
+
+    #[command(about = "List direct VM definitions")]
+    List,
+
+    #[command(about = "Print a direct VM definition")]
+    Show(DirectVmNameArgs),
+
+    #[command(about = "Start a direct VM")]
+    Start(DirectVmNameArgs),
+
+    #[command(about = "Stop a direct VM")]
+    Stop(DirectVmStopArgs),
+
+    #[command(name = "rm", about = "Remove a stopped direct VM definition")]
+    Remove(DirectVmNameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DirectVmDefineArgs {
+    /// Direct VM YAML definition.
+    #[arg(short, long, value_name = "FILE")]
+    pub file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct DirectVmNameArgs {
+    /// Direct VM name.
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct DirectVmStopArgs {
+    /// Direct VM name.
+    pub name: String,
+
+    /// Stop the VMM without requesting guest shutdown.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]

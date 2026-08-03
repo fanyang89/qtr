@@ -48,6 +48,7 @@ cargo run -- vm --help
 | [Getting started](docs/getting-started.md) | Fedora dependencies, libvirt access, and local development |
 | [Web UI and API](docs/web-api.md) | Authentication, managed resources, server state, and OpenAPI |
 | [VM configuration](docs/vm-configuration.md) | Declarative schema, lifecycle, disks, networking, and guest operations |
+| [Direct VMs](docs/direct-vm.md) | Experimental Cloud Hypervisor lifecycle without libvirt |
 | [Automated Fedora installation](docs/fedora-installation.md) | Build a Fedora VM from a local DVD ISO |
 | [External storage](docs/external-storage.md) | Register, scan, and connect iSCSI-backed volumes |
 | [Deployment](docs/deployment.md) | Build and deploy the RPM with systemd and Ansible |

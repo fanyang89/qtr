@@ -5,6 +5,7 @@
 - [Getting started](getting-started.md): prepare a Fedora host and run qtr locally.
 - [Web UI and API](web-api.md): operate the authenticated server and managed resources.
 - [VM configuration](vm-configuration.md): define and manage virtual machines with YAML and the CLI.
+- [Direct VMs](direct-vm.md): run experimental Cloud Hypervisor VMs without libvirt.
 
 ## Operations
 
