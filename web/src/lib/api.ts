@@ -204,6 +204,7 @@ export type ImageCreateInput = {
 
 export type VmCreateInput = {
   name: string
+  machineType: 'standard' | 'microvm'
   resources: {
     vcpus: number
     memoryMib: number
@@ -213,7 +214,7 @@ export type VmCreateInput = {
     format: 'raw' | 'qcow2'
     bus: 'virtio-blk' | 'virtio-scsi'
   }>
-  networkId: string
+  networkId?: string
   mediaId?: string | null
   cdroms?: Array<{ id: string; mediaId: string | null }>
   console: {

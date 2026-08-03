@@ -17,7 +17,7 @@ Serial console file output is disabled by default. Configure `serialLog` in the 
 
 ## Schema and Capabilities
 
-VM YAML emitted by qtr includes `schemaVersion: 3`. Existing unversioned, version 1, and version 2 definitions remain supported.
+VM YAML emitted by qtr includes `schemaVersion: 4`. Existing unversioned and version 1 through 3 definitions remain supported.
 
 Query the VM features reported by the current libvirt/QEMU host before using host-specific machine, firmware, CPU or device options:
 
@@ -38,7 +38,7 @@ Edit `cdroms[].media` to point at the installer ISO. Create or resize disks with
 The generated YAML is an installer-oriented template:
 
 ```yaml
-schemaVersion: 3
+schemaVersion: 4
 name: install-os
 machine:
   type: q35
@@ -73,6 +73,36 @@ vncListen: 127.0.0.1
 `machine.type` is optional; omit it to let libvirt select the machine type. CPU configuration accepts `host-passthrough`, `host-model`, or `custom`. A custom CPU requires `model`. Set either `cpu.vcpus` or `cpu.topology`, but not both.
 
 `memory.sizeMiB` is the current guest memory allocation and optional `memory.maxMiB` sets the maximum allocation. Legacy `vcpus` and `memoryGiB` remain supported for existing definitions but cannot be mixed with their structured replacements.
+
+### MicroVM
+
+Set `machine.type: microvm` for QEMU's minimal x86 machine. The host must provide `/usr/share/edk2/ovmf/MICROVM.fd`, installed by Fedora's `edk2-ovmf` package.
+
+```yaml
+schemaVersion: 4
+name: edge-worker
+machine:
+  type: microvm
+cpu:
+  mode: host-passthrough
+  vcpus: 2
+memory:
+  sizeMiB: 1024
+disks:
+- id: root
+  path: .tmp/disks/edge-worker.qcow2
+  format: qcow2
+  bus: virtio-blk
+interfaces:
+- id: primary
+  type: user
+graphics: vnc
+boot: [hd]
+```
+
+A microvm requires exactly one `user` interface. qtr assigns a stable MAC when `mac` is omitted and configures QEMU user-mode NAT for outbound access. `source`, `mode`, `vlan`, `mtu`, and `link` are not supported on this interface.
+
+MicroVM disks and controllers use VirtIO MMIO. CD-ROM trays use VirtIO SCSI, VNC uses RAMFB, and boot uses EFI. Standard VMs and microVMs cannot be converted in place. Shut down a microvm before changing its CD-ROM or user-network configuration.
 
 ## Disks
 
@@ -118,11 +148,13 @@ file or block path and the manual external-storage workflow documented in
 
 Multiple CD-ROM trays are supported. Set `media: null` to keep an empty tray, change `media` to swap media, or use `state: absent` with the stable ID to remove the tray from the persistent definition. Existing version 1 definitions using the single `cdrom` field remain supported.
 
-CLI `vm apply` changes remain persistent-only while a VM is active; use the [Web API tray operations](web-api.md#installation-media) for live media changes.
+CLI `vm apply` changes remain persistent-only while a standard VM is active; use the [Web API tray operations](web-api.md#installation-media) for live media changes. MicroVM media changes require shutdown.
 
 ## Network Interfaces
 
 Version 3 supports multiple `interfaces`. Each NIC has a stable ID, `network` or `bridge` type, source, model, and optional MAC. IDs are written as `ua-qtr-nic-*` aliases. Use `state: absent` to remove a NIC from the persistent definition. Legacy `network: default` definitions remain supported and only update the first libvirt network interface, leaving additional NICs untouched.
+
+Version 4 adds `type: user` for the microvm profile. This interface is emitted through a qtr-managed QEMU command line because libvirt cannot attach an x86 microvm VirtIO NIC through its standard interface XML.
 
 Interfaces also support a single `vlan` tag, `mtu`, and `link: up|down`. VLAN configuration requires `type: bridge` and a VLAN ID from 1 through 4094. Omit these fields to preserve existing XML or set any field to `null` to remove its element.
 
@@ -169,7 +201,7 @@ cargo run -- vm dump install-os --xml > vm.xml
 
 `vm dump` writes the supported VM fields from the inactive libvirt domain XML. Use `--xml` to print the raw inactive libvirt domain XML. `vm apply` updates existing VM definitions in place when possible, preserving libvirt-managed XML fields. Added disks are appended without recreating the VM, and existing disk paths keep their target device when `target` is omitted.
 
-If the VM is already running, changes take effect on the next start. Relative paths are resolved from the YAML file directory. Use `--dry-run` to print the libvirt domain XML diff without applying it. Diff color defaults to `auto`; use `--color always` or `--color never` to override it.
+If a standard VM is already running, changes take effect on the next start. A running microvm rejects CD-ROM and user-network changes. Relative paths are resolved from the YAML file directory. Use `--dry-run` to print the libvirt domain XML diff without applying it. Diff color defaults to `auto`; use `--color always` or `--color never` to override it.
 
 ## Guest Agent Commands
 

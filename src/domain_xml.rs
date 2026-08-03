@@ -7,6 +7,7 @@ use crate::config::{DiskFormat, GraphicsMode};
 pub struct VmLaunchDomainSpec<'a> {
     pub name: &'a str,
     pub machine: Option<&'a str>,
+    pub microvm: bool,
     pub memory: VmLaunchMemorySpec,
     pub vcpus: u32,
     pub cpu: Option<VmLaunchCpuSpec<'a>>,
@@ -16,7 +17,14 @@ pub struct VmLaunchDomainSpec<'a> {
     pub serial_log: Option<&'a Path>,
     pub boot_devices: &'a [BootDevice],
     pub interfaces: &'a [VmLaunchInterfaceSpec<'a>],
+    pub user_interfaces: &'a [VmLaunchUserInterfaceSpec<'a>],
     pub graphics: GraphicsSpec<'a>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VmLaunchUserInterfaceSpec<'a> {
+    pub id: &'a str,
+    pub mac: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +46,7 @@ pub struct VmLaunchCdromSpec<'a> {
     pub id: &'a str,
     pub media: Option<&'a Path>,
     pub target: &'a str,
+    pub bus: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +84,7 @@ pub struct VmLaunchDiskSpec<'a> {
     pub serial: Option<&'a str>,
     pub io_tune: Option<VmLaunchDiskIoTuneSpec>,
     pub io_threads: Option<VmLaunchIoThreadsSpec>,
+    pub virtio_mmio: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,10 +161,15 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         .io_threads
         .map(build_domain_iothreads_xml)
         .unwrap_or_default();
-    let scsi_controller_xml = build_scsi_controller_xml(spec.disks);
+    let scsi_controller_xml = build_scsi_controller_xml(
+        spec.disks,
+        spec.microvm && !spec.cdroms.is_empty(),
+        spec.microvm,
+    );
     let cdroms_xml = spec.cdroms.iter().map(build_cdrom_xml).collect::<String>();
     let console_xml = build_console_xml(spec.serial_log);
-    let graphics_xml = build_graphics_xml(spec.graphics);
+    let usb_tablet = spec.microvm && spec.graphics.mode == GraphicsMode::Vnc;
+    let graphics_xml = build_graphics_xml(spec.graphics, spec.microvm);
     let interfaces_xml = spec
         .interfaces
         .iter()
@@ -166,14 +181,26 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         .unwrap_or_default();
     let max_memory_mib = spec.memory.max_mib.unwrap_or(spec.memory.size_mib);
     let cpu_xml = spec.cpu.map(build_cpu_xml).unwrap_or_default();
+    let domain_namespace = if spec.microvm {
+        " xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'"
+    } else {
+        ""
+    };
+    let os_firmware = if spec.microvm { " firmware='efi'" } else { "" };
+    let virtio_serial_controller_xml = if spec.microvm {
+        "    <controller type='virtio-serial' index='0'>\n      <address type='virtio-mmio'/>\n    </controller>\n"
+    } else {
+        ""
+    };
+    let qemu_commandline_xml = build_qemu_commandline_xml(spec.user_interfaces, usb_tablet);
 
     format!(
-        r#"<domain type='kvm'>
+        r#"<domain type='kvm'{domain_namespace}>
   <name>{name}</name>
   <memory unit='MiB'>{max_memory_mib}</memory>
   <currentMemory unit='MiB'>{memory_mib}</currentMemory>
   <vcpu placement='static'>{vcpus}</vcpu>
-{io_threads_xml}  <os>
+{io_threads_xml}  <os{os_firmware}>
     <type arch='x86_64'{machine}>hvm</type>
 {boot_xml}  </os>
   <features>
@@ -181,27 +208,64 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
     <apic/>
   </features>
 {cpu_xml}  <devices>
-{disks_xml}{scsi_controller_xml}{cdroms_xml}{interfaces_xml}    <channel type='unix'>
+{disks_xml}{scsi_controller_xml}{cdroms_xml}{interfaces_xml}{virtio_serial_controller_xml}    <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>
 {console_xml}{graphics_xml}  </devices>
-</domain>
+{qemu_commandline_xml}</domain>
 "#,
         name = escape_xml(spec.name),
         max_memory_mib = max_memory_mib,
         memory_mib = spec.memory.size_mib,
         vcpus = spec.vcpus,
         machine = machine,
+        domain_namespace = domain_namespace,
+        os_firmware = os_firmware,
         cpu_xml = cpu_xml,
         io_threads_xml = io_threads_xml,
         boot_xml = boot_xml,
         disks_xml = disks_xml,
         scsi_controller_xml = scsi_controller_xml,
         interfaces_xml = interfaces_xml,
+        virtio_serial_controller_xml = virtio_serial_controller_xml,
         cdroms_xml = cdroms_xml,
         console_xml = console_xml,
         graphics_xml = graphics_xml,
+        qemu_commandline_xml = qemu_commandline_xml,
     )
+}
+
+fn build_qemu_commandline_xml(
+    interfaces: &[VmLaunchUserInterfaceSpec<'_>],
+    usb_tablet: bool,
+) -> String {
+    if interfaces.is_empty() && !usb_tablet {
+        return String::new();
+    }
+
+    let mut xml = "  <qemu:commandline>\n".to_string();
+    if usb_tablet {
+        xml.push_str("    <qemu:arg value='-machine'/>\n");
+        xml.push_str("    <qemu:arg value='usb=on'/>\n");
+        xml.push_str("    <qemu:arg value='-device'/>\n");
+        xml.push_str("    <qemu:arg value='usb-tablet'/>\n");
+    }
+    for interface in interfaces {
+        let id = format!("qtr-net-{}", interface.id);
+        xml.push_str("    <qemu:arg value='-netdev'/>\n");
+        xml.push_str(&format!(
+            "    <qemu:arg value='user,id={}'/>\n",
+            escape_xml(&id)
+        ));
+        xml.push_str("    <qemu:arg value='-device'/>\n");
+        xml.push_str(&format!(
+            "    <qemu:arg value='virtio-net-device,netdev={id},id={id},mac={mac}'/>\n",
+            id = escape_xml(&id),
+            mac = escape_xml(&interface.mac),
+        ));
+    }
+    xml.push_str("  </qemu:commandline>\n");
+    xml
 }
 
 pub fn build_interface_xml(spec: &VmLaunchInterfaceSpec<'_>) -> String {
@@ -276,30 +340,50 @@ fn build_domain_iothreads_xml(spec: VmLaunchIoThreadsSpec) -> String {
 }
 
 pub fn build_virtio_scsi_controller_xml(spec: Option<VmLaunchIoThreadsSpec>) -> String {
+    build_virtio_scsi_controller_xml_for_machine(spec, false)
+}
+
+pub fn build_virtio_scsi_controller_xml_for_machine(
+    spec: Option<VmLaunchIoThreadsSpec>,
+    virtio_mmio: bool,
+) -> String {
+    let address = if virtio_mmio {
+        "      <address type='virtio-mmio'/>\n"
+    } else {
+        ""
+    };
     match spec {
         Some(spec) => format!(
             r#"    <controller type='scsi' index='0' model='virtio-scsi'>
       <driver queues='{queues}'>
 {mapping}      </driver>
-    </controller>
+{address}    </controller>
 "#,
             queues = spec.queues,
             mapping = build_iothreads_mapping_xml(spec, "        "),
+            address = address,
+        ),
+        None if virtio_mmio => format!(
+            "    <controller type='scsi' index='0' model='virtio-scsi'>\n{address}    </controller>\n"
         ),
         None => "    <controller type='scsi' index='0' model='virtio-scsi'/>\n".to_string(),
     }
 }
 
-fn build_scsi_controller_xml(disks: &[VmLaunchDiskSpec<'_>]) -> String {
-    let Some(_) = disks.iter().find(|disk| disk.bus == "scsi") else {
+fn build_scsi_controller_xml(
+    disks: &[VmLaunchDiskSpec<'_>],
+    needed_for_cdrom: bool,
+    virtio_mmio: bool,
+) -> String {
+    if !needed_for_cdrom && !disks.iter().any(|disk| disk.bus == "scsi") {
         return String::new();
-    };
+    }
     let io_threads = disks
         .iter()
         .find(|disk| disk.bus == "scsi" && disk.io == Some("threads"))
         .and_then(|disk| disk.io_threads);
 
-    build_virtio_scsi_controller_xml(io_threads)
+    build_virtio_scsi_controller_xml_for_machine(io_threads, virtio_mmio)
 }
 
 pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
@@ -361,12 +445,17 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         .map(|serial| format!("      <serial>{}</serial>\n", escape_xml(serial)))
         .unwrap_or_default();
     let io_tune = disk.io_tune.map(build_disk_iotune_xml).unwrap_or_default();
+    let address = if disk.virtio_mmio {
+        "      <address type='virtio-mmio'/>\n"
+    } else {
+        ""
+    };
 
     format!(
         r#"    <disk type='{disk_type}' device='disk'>
 {driver}      <source {source_attr}='{path}'/>
       <target dev='{target}' bus='{bus}'/>
-{io_tune}{readonly}{serial}{alias}    </disk>
+{io_tune}{readonly}{serial}{alias}{address}    </disk>
 "#,
         disk_type = disk_type,
         driver = driver,
@@ -378,6 +467,7 @@ pub fn build_disk_xml(disk: &VmLaunchDiskSpec<'_>) -> String {
         readonly = readonly,
         serial = serial,
         alias = alias,
+        address = address,
     )
 }
 
@@ -451,13 +541,14 @@ pub fn build_cdrom_xml(cdrom: &VmLaunchCdromSpec<'_>) -> String {
     format!(
         r#"    <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
-{source}      <target dev='{target}' bus='sata'/>
+{source}      <target dev='{target}' bus='{bus}'/>
       <readonly/>
       <alias name='ua-qtr-cdrom-{id}'/>
     </disk>
 "#,
         source = source,
         target = escape_xml(cdrom.target),
+        bus = escape_xml(cdrom.bus),
         id = escape_xml(cdrom.id),
     )
 }
@@ -480,7 +571,7 @@ fn build_console_xml(serial_log: Option<&Path>) -> String {
     }
 }
 
-fn build_graphics_xml(spec: GraphicsSpec<'_>) -> String {
+fn build_graphics_xml(spec: GraphicsSpec<'_>, microvm: bool) -> String {
     match spec.mode {
         GraphicsMode::None => String::new(),
         GraphicsMode::Vnc => {
@@ -490,16 +581,21 @@ fn build_graphics_xml(spec: GraphicsSpec<'_>) -> String {
                 .unwrap_or_else(|| "-1".to_string());
             let autoport = if spec.vnc_port.is_some() { "no" } else { "yes" };
 
+            let video = if microvm {
+                "    <video>\n      <model type='ramfb'/>\n    </video>"
+            } else {
+                "    <controller type='usb' model='qemu-xhci'/>\n    <input type='tablet' bus='usb'/>"
+            };
             format!(
                 r#"    <graphics type='vnc' port='{port}' autoport='{autoport}'>
       <listen type='address' address='{listen}'/>
     </graphics>
-    <controller type='usb' model='qemu-xhci'/>
-    <input type='tablet' bus='usb'/>
+{video}
 "#,
                 port = port,
                 autoport = autoport,
                 listen = escape_xml(spec.vnc_listen),
+                video = video,
             )
         }
     }
@@ -534,6 +630,7 @@ mod tests {
             serial: None,
             io_tune: None,
             io_threads: None,
+            virtio_mmio: false,
         }
     }
 
@@ -726,6 +823,7 @@ mod tests {
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "test",
             machine: None,
+            microvm: false,
             memory: VmLaunchMemorySpec {
                 size_mib: 1024,
                 max_mib: None,
@@ -738,6 +836,7 @@ mod tests {
             serial_log: None,
             boot_devices: &boot_devices,
             interfaces: &[],
+            user_interfaces: &[],
             graphics: GraphicsSpec {
                 mode: GraphicsMode::None,
                 vnc_listen: "127.0.0.1",
@@ -750,6 +849,7 @@ mod tests {
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "test",
             machine: None,
+            microvm: false,
             memory: VmLaunchMemorySpec {
                 size_mib: 1024,
                 max_mib: None,
@@ -762,6 +862,7 @@ mod tests {
             serial_log: None,
             boot_devices: &boot_devices,
             interfaces: &[],
+            user_interfaces: &[],
             graphics: GraphicsSpec {
                 mode: GraphicsMode::None,
                 vnc_listen: "127.0.0.1",
@@ -777,11 +878,13 @@ mod tests {
             id: "installer",
             media: Some(Path::new("/isos/os&tools.iso")),
             target: "sda",
+            bus: "sata",
         });
         let empty = build_cdrom_xml(&VmLaunchCdromSpec {
             id: "tools",
             media: None,
             target: "sdb",
+            bus: "sata",
         });
 
         assert!(loaded.contains("<source file='/isos/os&amp;tools.iso'/>"));
@@ -800,6 +903,7 @@ mod tests {
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "test",
             machine: Some("pc-q35-10.0"),
+            microvm: false,
             memory: VmLaunchMemorySpec {
                 size_mib: 4096,
                 max_mib: Some(8192),
@@ -820,6 +924,7 @@ mod tests {
             serial_log: None,
             boot_devices: &boot_devices,
             interfaces: &[],
+            user_interfaces: &[],
             graphics: GraphicsSpec {
                 mode: GraphicsMode::None,
                 vnc_listen: "127.0.0.1",
@@ -837,13 +942,66 @@ mod tests {
     }
 
     #[test]
+    fn builds_microvm_devices_and_user_network() {
+        let boot_devices = [BootDevice::Cdrom, BootDevice::Hd];
+        let mut disk = disk_spec("vda", "virtio");
+        disk.virtio_mmio = true;
+        let disks = [disk];
+        let cdroms = [VmLaunchCdromSpec {
+            id: "installer",
+            media: Some(Path::new("/isos/os.iso")),
+            target: "sda",
+            bus: "scsi",
+        }];
+        let interfaces = [VmLaunchUserInterfaceSpec {
+            id: "primary",
+            mac: "52:54:00:12:34:56".to_string(),
+        }];
+        let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
+            name: "tiny",
+            machine: Some("microvm"),
+            microvm: true,
+            memory: VmLaunchMemorySpec {
+                size_mib: 512,
+                max_mib: None,
+            },
+            vcpus: 1,
+            cpu: None,
+            io_threads: None,
+            disks: &disks,
+            cdroms: &cdroms,
+            serial_log: None,
+            boot_devices: &boot_devices,
+            interfaces: &[],
+            user_interfaces: &interfaces,
+            graphics: GraphicsSpec {
+                mode: GraphicsMode::Vnc,
+                vnc_listen: "127.0.0.1",
+                vnc_port: None,
+            },
+        });
+
+        assert!(xml.contains("xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'"));
+        assert!(xml.contains("<os firmware='efi'>"));
+        assert!(xml.contains("<address type='virtio-mmio'/>"));
+        assert!(xml.contains("<target dev='sda' bus='scsi'/>"));
+        assert!(xml.contains("<model type='ramfb'/>"));
+        assert!(xml.contains("<qemu:arg value='user,id=qtr-net-primary'/>"));
+        assert!(xml.contains(
+            "<qemu:arg value='virtio-net-device,netdev=qtr-net-primary,id=qtr-net-primary,mac=52:54:00:12:34:56'/>"
+        ));
+        assert!(xml.contains("<qemu:arg value='usb=on'/>"));
+        assert!(xml.contains("<qemu:arg value='usb-tablet'/>"));
+    }
+
+    #[test]
     fn graphics_xml_sets_autoport_only_without_explicit_port() {
         let spec = GraphicsSpec {
             mode: GraphicsMode::Vnc,
             vnc_listen: "127.0.0.1",
             vnc_port: None,
         };
-        let xml = build_graphics_xml(spec);
+        let xml = build_graphics_xml(spec, false);
         assert!(xml.contains("port='-1' autoport='yes'"));
 
         let spec = GraphicsSpec {
@@ -851,7 +1009,7 @@ mod tests {
             vnc_listen: "127.0.0.1",
             vnc_port: Some(5901),
         };
-        let xml = build_graphics_xml(spec);
+        let xml = build_graphics_xml(spec, false);
         assert!(xml.contains("port='5901' autoport='no'"));
 
         let spec = GraphicsSpec {
@@ -859,6 +1017,6 @@ mod tests {
             vnc_listen: "127.0.0.1",
             vnc_port: None,
         };
-        assert!(build_graphics_xml(spec).is_empty());
+        assert!(build_graphics_xml(spec, false).is_empty());
     }
 }

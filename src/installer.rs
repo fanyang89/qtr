@@ -574,7 +574,7 @@ fn fedora_manifest(args: &VmInstallFedoraArgs, disk: &Path, serial_log: &Path) -
         interfaces: Some(vec![VmInterfaceEntry::present(VmInterface {
             id: "primary".to_string(),
             interface_type: VmInterfaceType::Network,
-            source: args.network.clone(),
+            source: Some(args.network.clone()),
             model: "virtio".to_string(),
             mac: None,
             mode: VmOptionalValue::default(),

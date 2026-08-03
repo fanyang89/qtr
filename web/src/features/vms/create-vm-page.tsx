@@ -55,6 +55,7 @@ const createVmSchema = z.object({
       /^[a-zA-Z0-9-_.]+$/,
       'Use only letters, numbers, hyphens, underscores, and dots'
     ),
+  machineType: z.enum(['standard', 'microvm']),
   vcpus: z.coerce.number<string | number>().int().min(1).max(128),
   memoryMib: z.coerce.number<string | number>().int().min(256).max(524_288),
   disks: z
@@ -100,6 +101,7 @@ type CreateVmFormValues = z.output<typeof createVmSchema>
 
 const defaultValues: CreateVmFormInput = {
   name: '',
+  machineType: 'standard',
   vcpus: 2,
   memoryMib: 4096,
   disks: [{ imageId: '', format: 'qcow2', bus: 'virtio-blk' }],
@@ -275,9 +277,11 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
     const values: CreateVmFormValues = createVmSchema.parse(rawValues)
     const input: VmCreateInput = {
       name: values.name,
+      machineType: values.machineType,
       resources: { vcpus: values.vcpus, memoryMib: values.memoryMib },
       disks: values.disks,
-      networkId: values.networkId,
+      networkId:
+        values.machineType === 'standard' ? values.networkId : undefined,
       cdroms: values.cdroms,
       console: { graphics: values.graphics, serialLog: values.serialLog },
     }
@@ -348,6 +352,30 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
                     </FormControl>
                     <FormDescription>
                       Letters, numbers, dots, underscores, and hyphens.
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='machineType'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Machine profile</FormLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value='standard'>Standard VM</SelectItem>
+                        <SelectItem value='microvm'>MicroVM</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <FormDescription>
+                      MicroVM uses a minimal QEMU machine and user-mode NAT.
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -582,42 +610,54 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
               title='Network'
               description='Connect the primary VirtIO interface.'
             >
-              <FormField
-                control={form.control}
-                name='networkId'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Libvirt network</FormLabel>
-                    <Select value={field.value} onValueChange={field.onChange}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue
-                            placeholder={
-                              networks.isPending
-                                ? 'Loading networks…'
-                                : 'Select network'
-                            }
-                          />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        {networks.data?.map((network) => (
-                          <SelectItem
-                            key={network.id}
-                            value={network.id}
-                            disabled={!network.active}
-                          >
-                            {network.id}
-                            {network.bridge ? ` · ${network.bridge}` : ''}
-                            {!network.active ? ' · inactive' : ''}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+              {values.machineType === 'microvm' ? (
+                <div className='border border-border bg-card p-4'>
+                  <p className='text-sm font-medium'>User-mode NAT</p>
+                  <p className='mt-1 text-sm text-muted-foreground'>
+                    Outbound networking without a host bridge.
+                  </p>
+                </div>
+              ) : (
+                <FormField
+                  control={form.control}
+                  name='networkId'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Libvirt network</FormLabel>
+                      <Select
+                        value={field.value}
+                        onValueChange={field.onChange}
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue
+                              placeholder={
+                                networks.isPending
+                                  ? 'Loading networks…'
+                                  : 'Select network'
+                              }
+                            />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {networks.data?.map((network) => (
+                            <SelectItem
+                              key={network.id}
+                              value={network.id}
+                              disabled={!network.active}
+                            >
+                              {network.id}
+                              {network.bridge ? ` · ${network.bridge}` : ''}
+                              {!network.active ? ' · inactive' : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
             </FormSection>
 
             <FormSection
@@ -785,6 +825,12 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
               </div>
               <ReviewValue label='Name' value={values.name || 'Not set'} mono />
               <ReviewValue
+                label='Machine'
+                value={
+                  values.machineType === 'microvm' ? 'MicroVM' : 'Standard VM'
+                }
+              />
+              <ReviewValue
                 label='Compute'
                 value={`${values.vcpus ?? 2} CPU · ${formatMemory(Number(values.memoryMib ?? 4096))}`}
               />
@@ -798,7 +844,11 @@ function ManagedDiskForm({ onBack }: { onBack: () => void }) {
               />
               <ReviewValue
                 label='Network'
-                value={values.networkId || 'Not set'}
+                value={
+                  values.machineType === 'microvm'
+                    ? 'User-mode NAT'
+                    : values.networkId || 'Not set'
+                }
                 mono
               />
               <ReviewValue

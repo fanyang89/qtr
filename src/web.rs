@@ -204,12 +204,22 @@ impl IntoResponse for AppError {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmRequest {
     name: String,
+    #[serde(default)]
+    machine_type: CreateVmMachineType,
     resources: CreateVmResources,
     disks: Vec<CreateVmDisk>,
-    network_id: String,
+    network_id: Option<String>,
     media_id: Option<String>,
     cdroms: Option<Vec<CreateVmCdrom>>,
     console: CreateVmConsole,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+enum CreateVmMachineType {
+    #[default]
+    Standard,
+    Microvm,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -358,8 +368,9 @@ struct UpdateVmRequest {
     memory_gib: u64,
     #[serde(default = "default_vcpus")]
     vcpus: u32,
-    #[serde(default = "default_network")]
-    network: String,
+    network: Option<String>,
+    #[schema(value_type = Option<Vec<Object>>)]
+    interfaces: Option<Vec<vm::VmInterface>>,
     #[serde(default = "default_graphics")]
     graphics: GraphicsMode,
     #[serde(default = "default_vnc_listen")]
@@ -387,8 +398,13 @@ impl UpdateVmRequest {
             boot: self.boot,
             memory_gib: self.memory_gib,
             vcpus: self.vcpus,
-            network: Some(self.network),
-            interfaces: None,
+            network: self.network,
+            interfaces: self.interfaces.map(|interfaces| {
+                interfaces
+                    .into_iter()
+                    .map(vm::VmInterfaceEntry::present)
+                    .collect()
+            }),
             graphics: self.graphics,
             vnc_listen: self.vnc_listen,
             vnc_port: self.vnc_port,
@@ -403,10 +419,6 @@ fn default_memory_gib() -> u64 {
 
 fn default_vcpus() -> u32 {
     2
-}
-
-fn default_network() -> String {
-    "default".to_string()
 }
 
 fn default_graphics() -> GraphicsMode {
@@ -496,9 +508,40 @@ impl CreateVmRequest {
             .transpose()?;
         let has_cdrom =
             cdrom.is_some() || cdroms.as_deref().is_some_and(|cdroms| !cdroms.is_empty());
+        let (machine, network, interfaces) = match self.machine_type {
+            CreateVmMachineType::Standard => {
+                let network = self
+                    .network_id
+                    .filter(|network| !network.trim().is_empty())
+                    .context("networkId is required for a standard VM")?;
+                (None, Some(network), None)
+            }
+            CreateVmMachineType::Microvm => {
+                if self.network_id.is_some() {
+                    anyhow::bail!("networkId is not accepted for a microvm");
+                }
+                (
+                    Some(vm::VmMachine {
+                        machine_type: "microvm".to_string(),
+                    }),
+                    None,
+                    Some(vec![vm::VmInterfaceEntry::present(vm::VmInterface {
+                        id: "primary".to_string(),
+                        interface_type: vm::VmInterfaceType::User,
+                        source: None,
+                        model: "virtio".to_string(),
+                        mac: None,
+                        mode: vm::VmOptionalValue::default(),
+                        vlan: vm::VmOptionalValue::default(),
+                        mtu: vm::VmOptionalValue::default(),
+                        link: vm::VmOptionalValue::default(),
+                    })]),
+                )
+            }
+        };
         Ok(vm::VmManifest {
             name: self.name,
-            machine: None,
+            machine,
             cpu: None,
             memory: Some(vm::VmMemory {
                 size_mib: self.resources.memory_mib,
@@ -515,8 +558,8 @@ impl CreateVmRequest {
             }),
             memory_gib: self.resources.memory_mib.div_ceil(1024),
             vcpus: self.resources.vcpus,
-            network: Some(self.network_id),
-            interfaces: None,
+            network,
+            interfaces,
             graphics: self.console.graphics,
             vnc_listen: "127.0.0.1".to_string(),
             vnc_port: None,
@@ -822,9 +865,10 @@ async fn create_vm(
             let manifest = request
                 .into_manifest(&jobs)
                 .map_err(vm::VmApiError::InvalidRequest)?;
-            let network_id = manifest.network.clone().unwrap_or_default();
-            network::ensure_active(&connect_uri, &network_id)
-                .map_err(vm::VmApiError::InvalidRequest)?;
+            if let Some(network_id) = manifest.network.as_deref() {
+                network::ensure_active(&connect_uri, network_id)
+                    .map_err(vm::VmApiError::InvalidRequest)?;
+            }
             let attachments = vm::managed_image_attachments(&connect_uri, jobs.image_root())
                 .map_err(vm::VmApiError::Internal)?;
             for attachment in attachments {
@@ -2316,6 +2360,7 @@ mod tests {
         assert!(document["paths"]["/api/v1/session"].is_object());
         let create_properties = &document["components"]["schemas"]["CreateVmRequest"]["properties"];
         assert!(create_properties["resources"].is_object());
+        assert!(create_properties["machineType"].is_object());
         assert!(create_properties["networkId"].is_object());
         assert!(create_properties["mediaId"].is_object());
         assert!(create_properties["memoryGiB"].is_null());
@@ -2963,6 +3008,27 @@ mod tests {
             Some(media.join("installer.iso").as_path())
         );
         assert!(cdroms[1].as_present().unwrap().media.is_none());
+
+        let request: CreateVmRequest = serde_json::from_value(serde_json::json!({
+            "name": "microvm",
+            "machineType": "microvm",
+            "resources": { "vcpus": 1, "memoryMib": 512 },
+            "disks": [{
+                "imageId": "system.qcow2",
+                "format": "qcow2",
+                "bus": "virtio-blk"
+            }],
+            "console": { "graphics": "vnc", "serialLog": false }
+        }))
+        .unwrap();
+        let manifest = request.into_manifest(&jobs).unwrap();
+        assert_eq!(manifest.machine.unwrap().machine_type, "microvm");
+        assert!(manifest.network.is_none());
+        let interface = manifest.interfaces.unwrap().remove(0);
+        assert_eq!(
+            interface.as_present().unwrap().interface_type,
+            vm::VmInterfaceType::User
+        );
 
         drop(jobs);
         std::fs::remove_dir_all(directory).unwrap();

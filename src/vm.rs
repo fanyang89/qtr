@@ -74,7 +74,7 @@ pub fn run(args: VmArgs) -> Result<()> {
     }
 }
 
-const VM_MANIFEST_SCHEMA_VERSION: u64 = 3;
+const VM_MANIFEST_SCHEMA_VERSION: u64 = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -353,6 +353,17 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
 
     let mut manifest: VmManifest = serde_yaml::from_value(serde_yaml::Value::Mapping(mapping))
         .context("failed to parse VM manifest")?;
+    if version < 4
+        && manifest.interfaces.as_deref().is_some_and(|interfaces| {
+            interfaces.iter().any(|entry| {
+                entry
+                    .as_present()
+                    .is_some_and(|interface| interface.interface_type == VmInterfaceType::User)
+            })
+        })
+    {
+        bail!("user interfaces require schemaVersion 4");
+    }
     if manifest.network.is_none() && manifest.interfaces.is_none() {
         manifest.network = Some("default".to_string());
     }
@@ -614,7 +625,7 @@ fn init(args: VmInitArgs) -> Result<()> {
         interfaces: Some(vec![VmInterfaceEntry::present(VmInterface {
             id: "primary".to_string(),
             interface_type: VmInterfaceType::Network,
-            source: args.network,
+            source: Some(args.network),
             model: "virtio".to_string(),
             mac: None,
             mode: VmOptionalValue::default(),
@@ -669,6 +680,19 @@ fn apply(args: VmApplyArgs) -> Result<()> {
     }
 
     let current_xml = current_domain_xml(&args.connect_uri, &manifest.name)?;
+    if !current_xml.is_empty()
+        && manifest_is_microvm(&manifest)
+        && domain_is_active(&args.connect_uri, &manifest.name)?
+    {
+        let current_manifest = manifest_from_domain_xml(&current_xml)?;
+        inherit_omitted_microvm_fields(&current_manifest, &mut manifest);
+        if microvm_hotplug_config_changed(&current_manifest, &manifest)? {
+            bail!(
+                "running microvm {} must be shut off before changing CD-ROMs or user networking",
+                manifest.name
+            );
+        }
+    }
     let xml = if current_xml.is_empty() {
         validate_new_vm_disks(&manifest)?;
         build_manifest_domain_xml(&manifest, &boot_devices)?
@@ -729,10 +753,11 @@ fn apply(args: VmApplyArgs) -> Result<()> {
 }
 
 fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice]) -> Result<String> {
+    let microvm = manifest_is_microvm(manifest);
     let targets = assign_manifest_disk_targets(manifest)?;
     let disks = present_disks(&manifest.disks)
         .zip(targets)
-        .map(|(disk, target)| launch_disk_spec(disk, target, manifest.io_threads))
+        .map(|(disk, target)| launch_disk_spec(disk, target, manifest.io_threads, microvm))
         .collect::<Vec<_>>();
     let cdrom_targets = assign_manifest_cdrom_targets(manifest)?;
     let cdroms = match &manifest.cdroms {
@@ -742,6 +767,7 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
                 id: &cdrom.id,
                 media: cdrom.media.as_deref(),
                 target,
+                bus: if microvm { "scsi" } else { "sata" },
             })
             .collect::<Vec<_>>(),
         None => manifest
@@ -752,6 +778,7 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
                     id: "installer",
                     media: Some(media),
                     target: &cdrom_targets[0],
+                    bus: if microvm { "scsi" } else { "sata" },
                 }]
             })
             .unwrap_or_default(),
@@ -764,16 +791,19 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
         entries
             .iter()
             .filter_map(VmInterfaceEntry::as_present)
+            .filter(|interface| interface.interface_type != VmInterfaceType::User)
             .map(launch_interface_spec)
             .collect::<Vec<_>>()
     } else {
         legacy_interface = VmInterface {
             id: "primary".to_string(),
             interface_type: VmInterfaceType::Network,
-            source: manifest
-                .network
-                .clone()
-                .unwrap_or_else(|| "default".to_string()),
+            source: Some(
+                manifest
+                    .network
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+            ),
             model: "virtio".to_string(),
             mac: None,
             mode: VmOptionalValue::default(),
@@ -783,6 +813,21 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
         };
         vec![launch_interface_spec(&legacy_interface)]
     };
+    let user_interfaces = manifest
+        .interfaces
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .filter_map(VmInterfaceEntry::as_present)
+        .filter(|interface| interface.interface_type == VmInterfaceType::User)
+        .map(|interface| domain_xml::VmLaunchUserInterfaceSpec {
+            id: &interface.id,
+            mac: interface
+                .mac
+                .clone()
+                .unwrap_or_else(|| stable_user_interface_mac(&manifest.name, &interface.id)),
+        })
+        .collect::<Vec<_>>();
 
     Ok(build_vm_launch_domain_xml(VmLaunchDomainSpec {
         name: &manifest.name,
@@ -790,6 +835,7 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
             .machine
             .as_ref()
             .map(|machine| machine.machine_type.as_str()),
+        microvm,
         memory: memory.launch(),
         vcpus,
         cpu: launch_cpu(manifest),
@@ -799,6 +845,7 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
         serial_log: manifest.serial_log.as_deref(),
         boot_devices,
         interfaces: &interfaces,
+        user_interfaces: &user_interfaces,
         graphics: GraphicsSpec {
             mode: manifest.graphics,
             vnc_listen: &manifest.vnc_listen,
@@ -812,7 +859,10 @@ fn launch_interface_spec(interface: &VmInterface) -> VmLaunchInterfaceSpec<'_> {
         id: Some(&interface.id),
         interface_type: interface.interface_type.as_xml(),
         source_attribute: interface.interface_type.source_attribute(),
-        source: &interface.source,
+        source: interface
+            .source
+            .as_deref()
+            .expect("non-user interface source should be validated"),
         source_mode: interface
             .mode
             .as_ref()
@@ -841,6 +891,7 @@ fn launch_disk_spec(
     disk: &VmDisk,
     target: String,
     io_threads: Option<VmIoThreads>,
+    microvm: bool,
 ) -> VmLaunchDiskSpec<'_> {
     let io_threads = (disk.bus == VmDiskBus::VirtioBlk
         && disk.io.map(|io| io.mode) == Some(VmDiskIoMode::Threads))
@@ -862,7 +913,142 @@ fn launch_disk_spec(
         serial: disk.serial.as_deref(),
         io_tune: disk.io_tune.as_ref().copied().map(VmDiskIoTune::launch),
         io_threads,
+        virtio_mmio: microvm && disk.bus == VmDiskBus::VirtioBlk,
     }
+}
+
+fn manifest_is_microvm(manifest: &VmManifest) -> bool {
+    manifest
+        .machine
+        .as_ref()
+        .map(|machine| machine.machine_type.as_str())
+        == Some("microvm")
+}
+
+fn stable_user_interface_mac(vm_name: &str, interface_id: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in vm_name.bytes().chain([0]).chain(interface_id.bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!(
+        "52:54:{:02x}:{:02x}:{:02x}:{:02x}",
+        (hash >> 24) & 0xff,
+        (hash >> 16) & 0xff,
+        (hash >> 8) & 0xff,
+        hash & 0xff
+    )
+}
+
+fn microvm_hotplug_config_changed(current: &VmManifest, desired: &VmManifest) -> Result<bool> {
+    fn cdroms(manifest: &VmManifest) -> Result<BTreeMap<&str, (Option<&Path>, String)>> {
+        let targets = assign_manifest_cdrom_targets(manifest)?;
+        Ok(manifest
+            .cdroms
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .filter_map(VmCdromEntry::as_present)
+            .zip(targets)
+            .map(|(cdrom, target)| (cdrom.id.as_str(), (cdrom.media.as_deref(), target)))
+            .collect())
+    }
+
+    fn user_interface(manifest: &VmManifest) -> Option<(&str, String)> {
+        manifest
+            .interfaces
+            .as_deref()?
+            .iter()
+            .filter_map(VmInterfaceEntry::as_present)
+            .find(|interface| interface.interface_type == VmInterfaceType::User)
+            .map(|interface| {
+                (
+                    interface.id.as_str(),
+                    interface.mac.clone().unwrap_or_else(|| {
+                        stable_user_interface_mac(&manifest.name, &interface.id)
+                    }),
+                )
+            })
+    }
+
+    Ok(cdroms(current)? != cdroms(desired)? || user_interface(current) != user_interface(desired))
+}
+
+fn inherit_omitted_microvm_fields(current: &VmManifest, desired: &mut VmManifest) {
+    if desired.machine.is_none() {
+        desired.machine = current.machine.clone();
+    }
+    if desired.cpu.is_none() {
+        desired.cpu = current.cpu.clone();
+    }
+    if desired.interfaces.is_none() {
+        desired.interfaces = current.interfaces.clone();
+    }
+    if desired.cdrom.is_none() && desired.cdroms.is_none() {
+        desired.cdroms = current.cdroms.clone();
+    }
+    if desired.boot.is_none() {
+        desired.boot = current.boot.clone();
+    }
+    if desired.serial_log.is_none() {
+        desired.serial_log = current.serial_log.clone();
+    }
+    for desired_entry in &mut desired.disks {
+        let Some(desired_disk) = desired_entry.as_present_mut() else {
+            continue;
+        };
+        let Some(current_disk) = present_disks(&current.disks).find(|current_disk| {
+            desired_disk
+                .id
+                .as_ref()
+                .zip(current_disk.id.as_ref())
+                .is_some_and(|(desired, current)| desired == current)
+                || desired_disk
+                    .target
+                    .as_ref()
+                    .zip(current_disk.target.as_ref())
+                    .is_some_and(|(desired, current)| desired == current)
+                || desired_disk.path == current_disk.path
+        }) else {
+            continue;
+        };
+        desired_disk.target = desired_disk
+            .target
+            .clone()
+            .or_else(|| current_disk.target.clone());
+        desired_disk.cache = desired_disk.cache.or(current_disk.cache);
+        desired_disk.io = desired_disk.io.or(current_disk.io);
+        desired_disk.discard = desired_disk.discard.or(current_disk.discard);
+        desired_disk.detect_zeroes = desired_disk.detect_zeroes.or(current_disk.detect_zeroes);
+        desired_disk.readonly = desired_disk.readonly.or(current_disk.readonly);
+        if desired_disk.serial.is_preserve() {
+            desired_disk.serial = current_disk.serial.clone();
+        }
+        if desired_disk.io_tune.is_preserve() {
+            desired_disk.io_tune = current_disk.io_tune.clone();
+        }
+    }
+    if let (Some(current_cdroms), Some(desired_cdroms)) =
+        (current.cdroms.as_deref(), desired.cdroms.as_mut())
+    {
+        for desired_entry in desired_cdroms {
+            let Some(desired_cdrom) = desired_entry.as_present_mut() else {
+                continue;
+            };
+            if desired_cdrom.target.is_none() {
+                desired_cdrom.target = present_cdroms(current_cdroms)
+                    .find(|current_cdrom| current_cdrom.id == desired_cdrom.id)
+                    .and_then(|current_cdrom| current_cdrom.target.clone());
+            }
+        }
+    }
+}
+
+fn domain_is_active(connect_uri: &str, name: &str) -> Result<bool> {
+    let conn = connect_read_only(connect_uri)?;
+    lookup_domain(&conn, name)?
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} state"))
 }
 
 fn disk_target_or(disk: &VmDisk, index: usize) -> String {
@@ -1008,7 +1194,8 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
         .collect();
     let io_threads = io_threads_from_domain_xml(domain, devices)?;
     let cdroms = cdroms_from_domain_xml(devices)?;
-    let interfaces = interfaces_from_domain_xml(devices)?;
+    let mut interfaces = interfaces_from_domain_xml(devices)?;
+    interfaces.extend(user_interfaces_from_domain_xml(domain)?);
     let (graphics, vnc_listen, vnc_port) = graphics_config(devices)?;
     let serial_log = serial_log_path(devices);
 
@@ -1050,6 +1237,21 @@ fn patch_domain_xml(
 ) -> Result<String> {
     let doc = Document::parse(xml).context("failed to parse existing libvirt domain XML")?;
     let domain = doc.root_element();
+    let current_microvm =
+        machine_from_domain_xml(domain).is_some_and(|machine| machine.machine_type == "microvm");
+    let desired_microvm = manifest_is_microvm(manifest);
+    if current_microvm != desired_microvm {
+        bail!("changing between standard VM and microvm is not supported");
+    }
+    if desired_microvm {
+        let mut effective = manifest.clone();
+        let current = manifest_from_domain_xml(xml)?;
+        inherit_omitted_microvm_fields(&current, &mut effective);
+        let effective_boot = manifest_boot_order(&effective);
+        let effective_boot_devices = parse_boot_devices(&effective_boot)?;
+        let rebuilt = build_manifest_domain_xml(&effective, &effective_boot_devices)?;
+        return Ok(preserve_domain_uuid(domain, rebuilt));
+    }
     let devices = required_child(domain, "devices")?;
     let mut replacements = Vec::new();
     let memory = effective_memory(manifest)?;
@@ -1114,6 +1316,20 @@ fn patch_domain_xml(
     let output = apply_xml_replacements(xml, replacements)?;
     validate_unique_domain_disk_targets(&output)?;
     Ok(output)
+}
+
+fn preserve_domain_uuid(domain: Node<'_, '_>, mut rebuilt: String) -> String {
+    let Some(uuid) = optional_child(domain, "uuid").and_then(|uuid| uuid.text()) else {
+        return rebuilt;
+    };
+    let Some(name_end) = rebuilt.find("</name>").map(|index| index + "</name>".len()) else {
+        return rebuilt;
+    };
+    rebuilt.insert_str(
+        name_end,
+        &format!("\n  <uuid>{}</uuid>", escape_xml_value(uuid.trim())),
+    );
+    rebuilt
 }
 
 fn validate_unique_domain_disk_targets(xml: &str) -> Result<()> {
@@ -1240,6 +1456,7 @@ fn patch_disks(
                 &desired_disk,
                 target,
                 io_threads,
+                false,
             )));
         }
     }
@@ -1399,6 +1616,7 @@ fn patch_cdroms(
             id: &cdrom.id,
             media: cdrom.media.as_deref(),
             target: &target,
+            bus: "sata",
         });
         if let Some(index) = matched {
             let node = domain_cdroms[index].node;
@@ -1634,6 +1852,7 @@ fn build_patched_disk_xml(
         manifest_disk,
         disk_target_or(manifest_disk, index),
         io_threads,
+        false,
     ));
     vm_reconcile::merge_disk_xml(
         xml,
@@ -2843,7 +3062,7 @@ fn interfaces_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmInterface>>
             Ok(VmInterface {
                 id,
                 interface_type,
-                source,
+                source: Some(source),
                 model,
                 mac,
                 mode,
@@ -2853,6 +3072,84 @@ fn interfaces_from_domain_xml(devices: Node<'_, '_>) -> Result<Vec<VmInterface>>
             })
         })
         .collect()
+}
+
+fn user_interfaces_from_domain_xml(domain: Node<'_, '_>) -> Result<Vec<VmInterface>> {
+    const QEMU_NAMESPACE: &str = "http://libvirt.org/schemas/domain/qemu/1.0";
+    const MANAGED_PREFIX: &str = "qtr-net-";
+
+    let Some(commandline) = domain.children().find(|child| {
+        child.is_element()
+            && child.tag_name().name() == "commandline"
+            && child.tag_name().namespace() == Some(QEMU_NAMESPACE)
+    }) else {
+        return Ok(Vec::new());
+    };
+    let values = commandline
+        .children()
+        .filter(|child| {
+            child.is_element()
+                && child.tag_name().name() == "arg"
+                && child.tag_name().namespace() == Some(QEMU_NAMESPACE)
+        })
+        .filter_map(|arg| arg.attribute("value"))
+        .collect::<Vec<_>>();
+
+    let mut backends = Vec::new();
+    let mut macs = BTreeMap::new();
+    for pair in values.windows(2) {
+        if pair[0] == "-netdev" && pair[1].starts_with("user,") {
+            let Some(id) = qemu_option(pair[1], "id") else {
+                continue;
+            };
+            if id.starts_with(MANAGED_PREFIX) {
+                backends.push(id);
+            }
+        }
+        if pair[0] == "-device" && pair[1].starts_with("virtio-net-device,") {
+            let Some(id) = qemu_option(pair[1], "id") else {
+                continue;
+            };
+            if id.starts_with(MANAGED_PREFIX)
+                && let Some(mac) = qemu_option(pair[1], "mac")
+            {
+                macs.insert(id, mac);
+            }
+        }
+    }
+
+    backends
+        .into_iter()
+        .map(|backend_id| {
+            let id = backend_id
+                .strip_prefix(MANAGED_PREFIX)
+                .expect("managed backend prefix should be present");
+            if !is_valid_disk_id(id) {
+                bail!("managed QEMU user interface has invalid id {id:?}");
+            }
+            let mac = macs.remove(backend_id).with_context(|| {
+                format!("managed QEMU user interface {id} is missing MAC address")
+            })?;
+            Ok(VmInterface {
+                id: id.to_string(),
+                interface_type: VmInterfaceType::User,
+                source: None,
+                model: "virtio".to_string(),
+                mac: Some(mac.to_string()),
+                mode: VmOptionalValue::default(),
+                vlan: VmOptionalValue::default(),
+                mtu: VmOptionalValue::default(),
+                link: VmOptionalValue::default(),
+            })
+        })
+        .collect()
+}
+
+fn qemu_option<'a>(argument: &'a str, name: &str) -> Option<&'a str> {
+    argument
+        .split(',')
+        .skip(1)
+        .find_map(|option| option.strip_prefix(name)?.strip_prefix('='))
 }
 
 fn network_name(devices: Node<'_, '_>) -> Result<String> {
@@ -3045,8 +3342,11 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
     {
         bail!("network must not be empty");
     }
+    if manifest_is_microvm(manifest) && manifest.interfaces.is_none() {
+        bail!("microvm requires exactly one type: user interface");
+    }
     if let Some(interfaces) = &manifest.interfaces {
-        validate_interfaces(interfaces)?;
+        validate_interfaces(interfaces, manifest_is_microvm(manifest))?;
     }
 
     if let Some(machine) = &manifest.machine
@@ -3214,9 +3514,10 @@ fn validate_disk_iotune(io_tune: &VmDiskIoTune) -> Result<()> {
     Ok(())
 }
 
-fn validate_interfaces(interfaces: &[VmInterfaceEntry]) -> Result<()> {
+fn validate_interfaces(interfaces: &[VmInterfaceEntry], microvm: bool) -> Result<()> {
     let mut ids = BTreeSet::new();
     let mut macs = BTreeSet::new();
+    let mut user_interfaces = 0;
     for entry in interfaces {
         let id = entry
             .as_present()
@@ -3232,8 +3533,47 @@ fn validate_interfaces(interfaces: &[VmInterfaceEntry]) -> Result<()> {
         let Some(interface) = entry.as_present() else {
             continue;
         };
-        if interface.source.trim().is_empty() {
-            bail!("interface {} source must not be empty", interface.id);
+        if interface.interface_type == VmInterfaceType::User {
+            user_interfaces += 1;
+            if !microvm {
+                bail!(
+                    "interface {} type user requires machine.type: microvm",
+                    interface.id
+                );
+            }
+            if interface.source.is_some() {
+                bail!(
+                    "interface {} type user does not accept source",
+                    interface.id
+                );
+            }
+            if interface.model != "virtio" {
+                bail!(
+                    "interface {} type user requires model: virtio",
+                    interface.id
+                );
+            }
+            if !interface.mode.is_preserve()
+                || !interface.vlan.is_preserve()
+                || !interface.mtu.is_preserve()
+                || !interface.link.is_preserve()
+            {
+                bail!(
+                    "interface {} type user does not accept mode, vlan, mtu or link",
+                    interface.id
+                );
+            }
+        } else {
+            if microvm {
+                bail!("microvm interfaces must use type: user");
+            }
+            if interface
+                .source
+                .as_deref()
+                .is_none_or(|source| source.trim().is_empty())
+            {
+                bail!("interface {} source must not be empty", interface.id);
+            }
         }
         if interface.model.trim().is_empty() {
             bail!("interface {} model must not be empty", interface.id);
@@ -3266,6 +3606,9 @@ fn validate_interfaces(interfaces: &[VmInterfaceEntry]) -> Result<()> {
                 bail!("duplicate interface MAC address {mac}");
             }
         }
+    }
+    if microvm && user_interfaces != 1 {
+        bail!("microvm requires exactly one type: user interface");
     }
     Ok(())
 }
@@ -3726,6 +4069,18 @@ pub fn set_managed_cdrom_media(
         .get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE)
         .with_context(|| format!("failed to read inactive domain XML for {name}"))
         .map_err(VmApiError::Internal)?;
+    if machine_from_domain_xml(
+        Document::parse(&inactive_xml)
+            .context("failed to parse inactive domain XML")
+            .map_err(VmApiError::Internal)?
+            .root_element(),
+    )
+    .is_some_and(|machine| machine.machine_type == "microvm")
+    {
+        return Err(VmApiError::Conflict(anyhow::anyhow!(
+            "domain {name} is a microvm; shut it off before changing CD-ROM media"
+        )));
+    }
     let live_xml = domain
         .get_xml_desc(0)
         .with_context(|| format!("failed to read live domain XML for {name}"))
@@ -3892,6 +4247,9 @@ fn updated_cdrom_device_xml(
         id: &cdrom.id,
         media,
         target,
+        bus: optional_child(node, "target")
+            .and_then(|target| target.attribute("bus"))
+            .unwrap_or("sata"),
     });
     Ok((cdrom, vm_reconcile::merge_cdrom_xml(xml, node, &desired)))
 }
@@ -4036,7 +4394,13 @@ fn parse_summary_resources(xml: &str) -> (Option<u64>, Option<u32>, Option<Strin
         .and_then(|value| value.parse().ok());
     let network = required_child(domain, "devices")
         .ok()
-        .and_then(|devices| network_name(devices).ok());
+        .and_then(|devices| network_name(devices).ok())
+        .or_else(|| {
+            user_interfaces_from_domain_xml(domain)
+                .ok()
+                .filter(|interfaces| !interfaces.is_empty())
+                .map(|_| "user".to_string())
+        });
 
     (memory, vcpus, network)
 }
@@ -5214,6 +5578,26 @@ pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiRe
         .context("failed to determine current directory")
         .map_err(VmApiError::Internal)?;
     normalize_manifest_paths(&mut manifest, &base_dir).map_err(VmApiError::InvalidRequest)?;
+
+    let current_xml =
+        current_domain_xml(connect_uri, &manifest.name).map_err(VmApiError::Internal)?;
+    if !current_xml.is_empty() {
+        let current = manifest_from_domain_xml(&current_xml).map_err(VmApiError::Internal)?;
+        if manifest_is_microvm(&current) {
+            inherit_omitted_microvm_fields(&current, &mut manifest);
+            if manifest_is_microvm(&manifest)
+                && domain_is_active(connect_uri, &manifest.name).map_err(VmApiError::Internal)?
+                && microvm_hotplug_config_changed(&current, &manifest)
+                    .map_err(VmApiError::InvalidRequest)?
+            {
+                return Err(VmApiError::Conflict(anyhow::anyhow!(
+                    "running microvm {} must be shut off before changing CD-ROMs or user networking",
+                    manifest.name
+                )));
+            }
+        }
+    }
+
     validate_manifest(&manifest).map_err(VmApiError::InvalidRequest)?;
 
     let boot = manifest_boot_order(&manifest);
@@ -5224,8 +5608,6 @@ pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiRe
         )));
     }
 
-    let current_xml =
-        current_domain_xml(connect_uri, &manifest.name).map_err(VmApiError::Internal)?;
     let xml = if current_xml.is_empty() {
         validate_new_vm_disks(&manifest).map_err(VmApiError::InvalidRequest)?;
         build_manifest_domain_xml(&manifest, &boot_devices).map_err(VmApiError::InvalidRequest)?
@@ -5612,6 +5994,7 @@ mod tests {
                 serial: None,
                 io_tune: None,
                 io_threads: None,
+                virtio_mmio: false,
             },
             VmLaunchDiskSpec {
                 id: None,
@@ -5638,12 +6021,14 @@ mod tests {
                     count: 4,
                     queues: 4,
                 }),
+                virtio_mmio: false,
             },
         ];
         let cdroms = [VmLaunchCdromSpec {
             id: "installer",
             media: Some(Path::new("/isos/os.iso")),
             target: "sda",
+            bus: "sata",
         }];
         let interfaces = [VmLaunchInterfaceSpec {
             id: Some("primary"),
@@ -5660,6 +6045,7 @@ mod tests {
         let xml = build_vm_launch_domain_xml(VmLaunchDomainSpec {
             name: "install-os",
             machine: None,
+            microvm: false,
             memory: VmLaunchMemorySpec {
                 size_mib: 4096,
                 max_mib: None,
@@ -5679,6 +6065,7 @@ mod tests {
             serial_log: Some(Path::new("/logs/install-os.serial.log")),
             boot_devices: &boot_devices,
             interfaces: &interfaces,
+            user_interfaces: &[],
             graphics: GraphicsSpec {
                 mode: GraphicsMode::Vnc,
                 vnc_listen: "0.0.0.0",
@@ -5774,7 +6161,7 @@ mod tests {
                 .unwrap()
                 .first()
                 .and_then(VmInterfaceEntry::as_present)
-                .map(|interface| interface.source.as_str()),
+                .and_then(|interface| interface.source.as_deref()),
             Some("default")
         );
         assert_eq!(manifest.graphics, GraphicsMode::Vnc);
@@ -5784,6 +6171,125 @@ mod tests {
             manifest.serial_log,
             Some(PathBuf::from("/logs/install-os.serial.log"))
         );
+    }
+
+    #[test]
+    fn microvm_domain_xml_round_trips_user_interface() {
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/sys.qcow2",
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.machine = Some(VmMachine {
+            machine_type: "microvm".to_string(),
+        });
+        manifest.network = None;
+        manifest.interfaces = Some(vec![VmInterfaceEntry::present(VmInterface {
+            id: "primary".to_string(),
+            interface_type: VmInterfaceType::User,
+            source: None,
+            model: "virtio".to_string(),
+            mac: None,
+            mode: VmOptionalValue::default(),
+            vlan: VmOptionalValue::default(),
+            mtu: VmOptionalValue::default(),
+            link: VmOptionalValue::default(),
+        })]);
+
+        let xml = build_manifest_domain_xml(&manifest, &[BootDevice::Hd]).unwrap();
+        let dumped = manifest_from_domain_xml(&xml).unwrap();
+        let interface = dumped.interfaces.as_ref().unwrap()[0].as_present().unwrap();
+
+        assert_eq!(interface.interface_type, VmInterfaceType::User);
+        assert_eq!(interface.source, None);
+        assert_eq!(
+            interface.mac.as_deref(),
+            Some(stable_user_interface_mac("install-os", "primary").as_str())
+        );
+        assert!(!microvm_hotplug_config_changed(&dumped, &manifest).unwrap());
+        let mut changed = manifest.clone();
+        changed.cdroms = Some(vec![VmCdromEntry::present(VmCdrom {
+            id: "tools".to_string(),
+            media: None,
+            target: None,
+        })]);
+        assert!(microvm_hotplug_config_changed(&dumped, &changed).unwrap());
+        let mut omitted = manifest.clone();
+        omitted.machine = None;
+        omitted.cpu = None;
+        omitted.interfaces = None;
+        omitted.cdroms = None;
+        let mut current = dumped.clone();
+        current.cdroms = changed.cdroms.clone();
+        current.serial_log = Some(PathBuf::from("/logs/microvm.log"));
+        current.disks[0].as_present_mut().unwrap().serial = VmDiskSerial::value("root-disk");
+        inherit_omitted_microvm_fields(&current, &mut omitted);
+        assert_eq!(omitted.machine, current.machine);
+        assert_eq!(omitted.cpu, current.cpu);
+        assert!(omitted.interfaces.is_some());
+        assert_eq!(omitted.cdroms.unwrap()[0].id(), "tools");
+        assert_eq!(
+            omitted.disks[0].as_present().unwrap().serial,
+            VmDiskSerial::value("root-disk")
+        );
+        assert_eq!(omitted.serial_log, Some(PathBuf::from("/logs/microvm.log")));
+        let mut reordered = current.clone();
+        reordered.cdroms = Some(vec![
+            VmCdromEntry::present(VmCdrom {
+                id: "second".to_string(),
+                media: None,
+                target: None,
+            }),
+            VmCdromEntry::present(VmCdrom {
+                id: "tools".to_string(),
+                media: None,
+                target: None,
+            }),
+        ]);
+        current
+            .cdroms
+            .as_mut()
+            .unwrap()
+            .push(VmCdromEntry::present(VmCdrom {
+                id: "second".to_string(),
+                media: None,
+                target: Some("sdb".to_string()),
+            }));
+        assert!(microvm_hotplug_config_changed(&current, &reordered).unwrap());
+
+        let xml = xml.replace(
+            "  <name>install-os</name>",
+            "  <name>install-os</name>\n  <uuid>8b72a8d3-a54d-477b-9012-bc755bfbe45d</uuid>",
+        );
+        let patched = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd]).unwrap();
+        assert!(patched.contains("<uuid>8b72a8d3-a54d-477b-9012-bc755bfbe45d</uuid>"));
+    }
+
+    #[test]
+    fn rejects_switching_existing_domain_to_microvm() {
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/sys.qcow2",
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.machine = Some(VmMachine {
+            machine_type: "microvm".to_string(),
+        });
+        manifest.network = None;
+        manifest.interfaces = Some(vec![VmInterfaceEntry::present(VmInterface {
+            id: "primary".to_string(),
+            interface_type: VmInterfaceType::User,
+            source: None,
+            model: "virtio".to_string(),
+            mac: None,
+            mode: VmOptionalValue::default(),
+            vlan: VmOptionalValue::default(),
+            mtu: VmOptionalValue::default(),
+            link: VmOptionalValue::default(),
+        })]);
+
+        let error = patch_domain_xml(test_domain_xml(), &manifest, &[BootDevice::Hd]).unwrap_err();
+        assert!(error.to_string().contains("standard VM and microvm"));
     }
 
     #[test]
@@ -5969,7 +6475,7 @@ mod tests {
             VmInterfaceEntry::present(VmInterface {
                 id: "primary".to_string(),
                 interface_type: VmInterfaceType::Bridge,
-                source: "br-main".to_string(),
+                source: Some("br-main".to_string()),
                 model: "e1000e".to_string(),
                 mac: Some("52:54:00:12:34:56".to_string()),
                 mode: VmOptionalValue::default(),
@@ -5980,7 +6486,7 @@ mod tests {
             VmInterfaceEntry::present(VmInterface {
                 id: "storage".to_string(),
                 interface_type: VmInterfaceType::Network,
-                source: "storage-net".to_string(),
+                source: Some("storage-net".to_string()),
                 model: "virtio".to_string(),
                 mac: None,
                 mode: VmOptionalValue::default(),
@@ -5991,7 +6497,7 @@ mod tests {
             VmInterfaceEntry::present(VmInterface {
                 id: "uplink".to_string(),
                 interface_type: VmInterfaceType::Direct,
-                source: "eno1".to_string(),
+                source: Some("eno1".to_string()),
                 model: "virtio".to_string(),
                 mac: None,
                 mode: VmOptionalValue::configured(VmInterfaceDirectMode::Bridge),
@@ -6363,6 +6869,7 @@ mod tests {
             id: "installer",
             media: Some(Path::new("/isos/old.iso")),
             target: "sda",
+            bus: "sata",
         })
         .replace(
             "<source file='/isos/old.iso'/>",
@@ -6756,7 +7263,7 @@ disks:
         )]))
         .expect("manifest should serialize");
 
-        assert!(yaml.starts_with("schemaVersion: 3\n"));
+        assert!(yaml.starts_with("schemaVersion: 4\n"));
         assert!(yaml.contains("name: install-os\n"));
     }
 
@@ -6768,7 +7275,7 @@ disks:
         let output = serialize_manifest_yaml(&manifest).expect("absent disk should serialize");
 
         assert_eq!(manifest.disks[0].absent_id(), Some("data"));
-        assert!(output.starts_with("schemaVersion: 3\n"));
+        assert!(output.starts_with("schemaVersion: 4\n"));
         assert!(output.contains("- id: data\n  state: absent\n"));
         assert!(!output.contains("path:"));
     }
@@ -6863,7 +7370,7 @@ interfaces:
             &VmInterface {
                 id: "primary".to_string(),
                 interface_type: VmInterfaceType::Network,
-                source: "default".to_string(),
+                source: Some("default".to_string()),
                 model: "virtio".to_string(),
                 mac: Some("52:54:00:12:34:56".to_string()),
                 mode: VmOptionalValue::default(),
@@ -6888,7 +7395,7 @@ interfaces:
         );
 
         let output = serialize_manifest_yaml(&manifest).unwrap();
-        assert!(output.starts_with("schemaVersion: 3\n"));
+        assert!(output.starts_with("schemaVersion: 4\n"));
         assert!(output.contains("type: bridge"));
         assert!(output.contains("state: absent"));
         assert!(output.contains("vlan: 100"));
@@ -7039,10 +7546,10 @@ disks:
 
     #[test]
     fn rejects_unsupported_manifest_schema_version() {
-        let error = parse_manifest_yaml("schemaVersion: 4\nname: vm\ndisks: []\n")
+        let error = parse_manifest_yaml("schemaVersion: 5\nname: vm\ndisks: []\n")
             .expect_err("future schema should be rejected");
 
-        assert!(error.to_string().contains("unsupported VM schemaVersion 4"));
+        assert!(error.to_string().contains("unsupported VM schemaVersion 5"));
     }
 
     #[test]
@@ -7245,7 +7752,7 @@ disks:
         manifest.interfaces = Some(vec![VmInterfaceEntry::present(VmInterface {
             id: "primary".to_string(),
             interface_type: VmInterfaceType::Network,
-            source: "default".to_string(),
+            source: Some("default".to_string()),
             model: "virtio".to_string(),
             mac: Some("52:54:00:12:34:56".to_string()),
             mode: VmOptionalValue::default(),
@@ -7281,13 +7788,13 @@ disks:
             .as_present_mut()
             .unwrap();
         interface.interface_type = VmInterfaceType::Direct;
-        interface.source = "eno1".to_string();
+        interface.source = Some("eno1".to_string());
         interface.mode = VmOptionalValue::configured(VmInterfaceDirectMode::Passthrough);
         assert!(validate_manifest(&manifest).is_ok());
         manifest.interfaces.as_mut().unwrap()[0] = VmInterfaceEntry::present(VmInterface {
             id: "primary".to_string(),
             interface_type: VmInterfaceType::Network,
-            source: "default".to_string(),
+            source: Some("default".to_string()),
             model: "virtio".to_string(),
             mac: Some("not-a-mac".to_string()),
             mode: VmOptionalValue::default(),
@@ -7300,6 +7807,60 @@ disks:
                 .unwrap_err()
                 .to_string()
                 .contains("invalid MAC")
+        );
+    }
+
+    #[test]
+    fn validates_microvm_user_interface_contract() {
+        let dir = TestDiskDir::new();
+        let disk = dir.create_disk("sys.qcow2");
+        let mut manifest = test_manifest(vec![test_file_disk(
+            disk.to_str().unwrap(),
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.machine = Some(VmMachine {
+            machine_type: "microvm".to_string(),
+        });
+        manifest.network = None;
+        manifest.interfaces = Some(vec![VmInterfaceEntry::present(VmInterface {
+            id: "primary".to_string(),
+            interface_type: VmInterfaceType::User,
+            source: None,
+            model: "virtio".to_string(),
+            mac: None,
+            mode: VmOptionalValue::default(),
+            vlan: VmOptionalValue::default(),
+            mtu: VmOptionalValue::default(),
+            link: VmOptionalValue::default(),
+        })]);
+
+        assert!(validate_manifest(&manifest).is_ok());
+        manifest.interfaces.as_mut().unwrap()[0]
+            .as_present_mut()
+            .unwrap()
+            .source = Some("default".to_string());
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("does not accept source")
+        );
+
+        let schema_three = r#"schemaVersion: 3
+name: vm
+machine:
+  type: microvm
+disks: []
+interfaces:
+- id: primary
+  type: user
+"#;
+        let error = parse_manifest_yaml(schema_three).unwrap_err();
+        assert!(error.to_string().contains("schemaVersion 4"), "{error:#}");
+        assert!(
+            parse_manifest_yaml(&schema_three.replacen("schemaVersion: 3", "schemaVersion: 4", 1))
+                .is_ok()
         );
     }
 

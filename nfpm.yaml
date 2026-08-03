@@ -36,6 +36,7 @@ scripts:
 
 depends:
   - acl
+  - edk2-ovmf
   - iscsi-initiator-utils
   - libvirt-client
   - libvirt-daemon

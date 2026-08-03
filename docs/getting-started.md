@@ -8,6 +8,7 @@ Install the required Fedora packages:
 
 ```bash
 sudo dnf install \
+  edk2-ovmf \
   iscsi-initiator-utils \
   libvirt-client \
   libvirt-daemon \
@@ -33,6 +34,7 @@ The important libvirt pieces are:
 - `libvirt-daemon-kvm`: pulls in the KVM/QEMU daemon integration.
 - `libvirt-devel`: required to build the Rust `virt` bindings.
 - `iscsi-initiator-utils`: provides `iscsid` and `iscsiadm` for external block storage.
+- `edk2-ovmf`: provides the EFI firmware used by the QEMU microvm machine.
 
 ## Configure libvirt
 
