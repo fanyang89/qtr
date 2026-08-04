@@ -83,6 +83,17 @@ Run the complete local verification suite:
 task check
 ```
 
+Run the real libvirt lifecycle test in a Fedora 44 container:
+
+```bash
+task e2e:libvirt
+```
+
+The lifecycle test requires Docker and a readable, writable `/dev/kvm`. It starts
+libvirt and QEMU inside a privileged container, exercises VM creation, state
+transitions, managed save, disk resize, and removal, then writes diagnostics to
+`.tmp/e2e/libvirt/`. It uses an empty test disk and does not download a guest image.
+
 After changing API handlers, regenerate the OpenAPI document:
 
 ```bash
