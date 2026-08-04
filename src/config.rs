@@ -44,6 +44,10 @@ pub struct DirectVmArgs {
     #[arg(long, default_value = "cloud-hypervisor")]
     pub cloud_hypervisor: PathBuf,
 
+    /// passt executable used for unprivileged user networking.
+    #[arg(long, default_value = "passt")]
+    pub passt: PathBuf,
+
     #[command(subcommand)]
     pub command: DirectVmCommand,
 }

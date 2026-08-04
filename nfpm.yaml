@@ -46,6 +46,7 @@ depends:
   - libosinfo
   - osinfo-db
   - openssh-clients
+  - passt
   - polkit
   - pykickstart
   - qemu-img
