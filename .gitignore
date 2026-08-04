@@ -6,6 +6,5 @@
 .tmp/
 .opencode/
 /vm-install-os.yml
-/e2e/kworker/log.md
 *.local.yml
 *.local.yaml

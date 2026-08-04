@@ -178,9 +178,9 @@ Run commands through QEMU Guest Agent after the guest boots:
 ```bash
 cargo run -- vm exec install-os -- uname -a
 cargo run -- vm exec install-os -- journalctl -xb --no-pager
-cargo run -- vm exec install-os --script examples/kworker-fio.sh --output results/native-none.json
-cargo run -- vm cp install-os ./fio.conf guest:/tmp/fio.conf
-cargo run -- vm cp install-os guest:/tmp/qtr-fio.json ./results/qtr-fio.json --parents
+cargo run -- vm exec install-os --script examples/guest-info.sh --output results/guest-info.json
+cargo run -- vm cp install-os examples/guest-info.sh guest:/tmp/guest-info.sh
+cargo run -- vm cp install-os guest:/etc/os-release ./results/os-release --parents
 ```
 
 Each `vm exec` argument is passed to the guest verbatim; quoting and expansion happen only in your local shell. For guest-side shell features such as pipes, redirection or variable expansion, invoke a shell explicitly:
