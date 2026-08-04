@@ -1,0 +1,17 @@
+schemaVersion: 3
+name: qtr-e2e
+machine:
+  type: q35
+memory:
+  sizeMiB: 512
+vcpus: 1
+disks:
+  - id: root
+    path: /var/lib/qtr-e2e/root.qcow2
+    type: file
+    format: qcow2
+boot:
+  - hd
+interfaces: []
+graphics: none
+serialLog: /var/lib/qtr-e2e/serial.log
