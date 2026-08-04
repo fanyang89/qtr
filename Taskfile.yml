@@ -34,6 +34,11 @@ tasks:
       - cargo build
       - pnpm -C web build
 
+  e2e:libvirt:
+    desc: Run the Fedora 44 libvirt lifecycle test in Docker
+    cmds:
+      - ./e2e/libvirt/run-container.sh
+
   openapi:generate:
     desc: Generate the versioned OpenAPI document
     cmds:
