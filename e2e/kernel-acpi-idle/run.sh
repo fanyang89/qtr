@@ -128,6 +128,7 @@ case $QTR_CPU_PROFILE in
         cpu_config='cpu:
   mode: custom
   model: Dhyana
+  vendorId: HygonGenuine
   vcpus: 2
   features:
     hypervisor: disable
@@ -137,6 +138,7 @@ case $QTR_CPU_PROFILE in
         cpu_config='cpu:
   mode: custom
   model: Dhyana
+  vendorId: HygonGenuine
   vcpus: 2
   features:
     rdseed: disable'

@@ -56,6 +56,7 @@ pub struct VmLaunchCpuFeatureSpec<'a> {
 pub struct VmLaunchCpuSpec<'a> {
     pub mode: &'a str,
     pub model: Option<&'a str>,
+    pub vendor_id: Option<&'a str>,
     pub topology: Option<VmLaunchCpuTopology>,
     pub features: Option<Vec<VmLaunchCpuFeatureSpec<'a>>>,
 }
@@ -255,9 +256,13 @@ pub fn build_cpu_xml(spec: VmLaunchCpuSpec<'_>) -> String {
     let model = spec
         .model
         .map(|model| {
+            let vendor_id = spec
+                .vendor_id
+                .map(|vendor_id| format!(" vendor_id='{}'", escape_xml(vendor_id)))
+                .unwrap_or_default();
             format!(
-                "    <model fallback='forbid'>{}</model>\n",
-                escape_xml(model)
+                "    <model fallback='forbid'{vendor_id}>{}</model>\n",
+                escape_xml(model),
             )
         })
         .unwrap_or_default();
@@ -827,6 +832,7 @@ mod tests {
             cpu: Some(VmLaunchCpuSpec {
                 mode: "custom",
                 model: Some("EPYC-Milan"),
+                vendor_id: Some("AuthenticAMD"),
                 topology: Some(VmLaunchCpuTopology {
                     sockets: 2,
                     cores: 2,
@@ -852,7 +858,9 @@ mod tests {
         assert!(xml.contains("<vcpu placement='static'>8</vcpu>"));
         assert!(xml.contains("<type arch='x86_64' machine='pc-q35-10.0'>hvm</type>"));
         assert!(xml.contains("<cpu mode='custom' match='exact'>"));
-        assert!(xml.contains("<model fallback='forbid'>EPYC-Milan</model>"));
+        assert!(
+            xml.contains("<model fallback='forbid' vendor_id='AuthenticAMD'>EPYC-Milan</model>")
+        );
         assert!(xml.contains("<topology sockets='2' cores='2' threads='2'/>"));
     }
 
@@ -861,6 +869,7 @@ mod tests {
         let xml = build_cpu_xml(VmLaunchCpuSpec {
             mode: "host-model",
             model: None,
+            vendor_id: None,
             topology: None,
             features: Some(vec![
                 VmLaunchCpuFeatureSpec {

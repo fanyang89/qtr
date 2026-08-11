@@ -195,6 +195,8 @@ pub struct VmCpu {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vcpus: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topology: Option<VmCpuTopology>,

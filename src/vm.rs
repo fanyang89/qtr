@@ -293,6 +293,7 @@ fn launch_cpu(manifest: &VmManifest) -> Option<VmLaunchCpuSpec<'_>> {
     manifest.cpu.as_ref().map(|cpu| VmLaunchCpuSpec {
         mode: cpu.mode.as_xml(),
         model: cpu.model.as_deref(),
+        vendor_id: cpu.vendor_id.as_deref(),
         topology: cpu.topology.map(VmCpuTopology::launch),
         features: cpu.features.as_ref().map(|features| {
             features
@@ -334,6 +335,10 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
         .get(serde_yaml::Value::String("cpu".to_string()))
         .and_then(serde_yaml::Value::as_mapping)
         .is_some_and(|cpu| cpu.contains_key(serde_yaml::Value::String("features".to_string())));
+    let has_cpu_vendor_id = mapping
+        .get(serde_yaml::Value::String("cpu".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .is_some_and(|cpu| cpu.contains_key(serde_yaml::Value::String("vendorId".to_string())));
 
     let version = match mapping.remove(&schema_key) {
         Some(version) => version
@@ -368,6 +373,9 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
     }
     if version < 5 && has_cpu_features {
         bail!("cpu.features requires schemaVersion 5");
+    }
+    if version < 5 && has_cpu_vendor_id {
+        bail!("cpu.vendorId requires schemaVersion 5");
     }
 
     let mut manifest: VmManifest = serde_yaml::from_value(serde_yaml::Value::Mapping(mapping))
@@ -607,6 +615,7 @@ fn init(args: VmInitArgs) -> Result<()> {
         cpu: Some(VmCpu {
             mode: VmCpuMode::HostPassthrough,
             model: None,
+            vendor_id: None,
             vcpus: None,
             topology: Some(VmCpuTopology {
                 sockets: 1,
@@ -1690,6 +1699,7 @@ fn patch_cpu(
     let spec = VmLaunchCpuSpec {
         mode: cpu.mode.as_xml(),
         model: cpu.model.as_deref(),
+        vendor_id: cpu.vendor_id.as_deref(),
         topology: cpu.topology.map(VmCpuTopology::launch),
         features: cpu.features.as_ref().map(|features| {
             features
@@ -2385,6 +2395,9 @@ fn cpu_from_domain_xml(domain: Node<'_, '_>, vcpus: u32) -> Result<Option<VmCpu>
     } else {
         None
     };
+    let vendor_id = optional_child(cpu, "model")
+        .and_then(|model| model.attribute("vendor_id"))
+        .map(str::to_string);
     let topology = optional_child(cpu, "topology")
         .map(|topology| -> Result<VmCpuTopology> {
             if let Some(attribute) = topology
@@ -2421,6 +2434,7 @@ fn cpu_from_domain_xml(domain: Node<'_, '_>, vcpus: u32) -> Result<Option<VmCpu>
     Ok(Some(VmCpu {
         mode,
         model,
+        vendor_id,
         vcpus: topology.is_none().then_some(vcpus),
         topology,
         features: Some(features),
@@ -3138,9 +3152,18 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
                 {
                     bail!("custom CPU mode requires cpu.model");
                 }
+                if cpu
+                    .vendor_id
+                    .as_deref()
+                    .is_some_and(|vendor_id| vendor_id.len() != 12 || !vendor_id.is_ascii())
+                {
+                    bail!("cpu.vendorId must contain exactly 12 ASCII characters");
+                }
             }
-            VmCpuMode::HostPassthrough | VmCpuMode::HostModel if cpu.model.is_some() => {
-                bail!("cpu.model is only valid with custom CPU mode");
+            VmCpuMode::HostPassthrough | VmCpuMode::HostModel
+                if cpu.model.is_some() || cpu.vendor_id.is_some() =>
+            {
+                bail!("cpu.model and cpu.vendorId are only valid with custom CPU mode");
             }
             _ => {}
         }
@@ -5784,6 +5807,7 @@ mod tests {
             cpu: Some(VmLaunchCpuSpec {
                 mode: "host-passthrough",
                 model: None,
+                vendor_id: None,
                 topology: None,
                 features: None,
             }),
@@ -5879,6 +5903,7 @@ mod tests {
             Some(VmCpu {
                 mode: VmCpuMode::HostPassthrough,
                 model: None,
+                vendor_id: None,
                 vcpus: Some(2),
                 topology: None,
                 features: Some(BTreeMap::new()),
@@ -6260,6 +6285,7 @@ mod tests {
         manifest.cpu = Some(VmCpu {
             mode: VmCpuMode::HostModel,
             model: None,
+            vendor_id: None,
             vcpus: None,
             topology: Some(VmCpuTopology {
                 sockets: 2,
@@ -6318,6 +6344,7 @@ mod tests {
         manifest.cpu = Some(VmCpu {
             mode: VmCpuMode::HostModel,
             model: None,
+            vendor_id: None,
             vcpus: Some(2),
             topology: None,
             features: None,
@@ -6361,6 +6388,7 @@ mod tests {
             Some(VmCpu {
                 mode: VmCpuMode::HostModel,
                 model: None,
+                vendor_id: None,
                 vcpus: None,
                 topology: Some(VmCpuTopology {
                     sockets: 1,
@@ -6403,6 +6431,30 @@ mod tests {
         let yaml = serialize_manifest_yaml(&manifest).expect("CPU features should serialize");
         let yaml_manifest = parse_manifest_yaml(&yaml).expect("CPU features should parse");
         assert_eq!(yaml_manifest.cpu.unwrap().features, Some(features));
+    }
+
+    #[test]
+    fn round_trips_custom_cpu_vendor_id_through_xml_and_yaml() {
+        let xml = test_domain_xml().replace(
+            "  <devices>",
+            "  <cpu mode='custom' match='exact'>\n    <model fallback='forbid' vendor_id='HygonGenuine'>Dhyana</model>\n  </cpu>\n  <devices>",
+        );
+        let manifest = manifest_from_domain_xml(&xml).expect("CPU vendor ID should dump");
+        let cpu = manifest.cpu.as_ref().unwrap();
+
+        assert_eq!(cpu.model.as_deref(), Some("Dhyana"));
+        assert_eq!(cpu.vendor_id.as_deref(), Some("HygonGenuine"));
+
+        let rebuilt = build_manifest_domain_xml(&manifest, &[BootDevice::Hd])
+            .expect("dumped CPU vendor ID should rebuild");
+        assert!(rebuilt.contains("vendor_id='HygonGenuine'"));
+
+        let yaml = serialize_manifest_yaml(&manifest).expect("CPU vendor ID should serialize");
+        let yaml_manifest = parse_manifest_yaml(&yaml).expect("CPU vendor ID should parse");
+        assert_eq!(
+            yaml_manifest.cpu.unwrap().vendor_id.as_deref(),
+            Some("HygonGenuine")
+        );
     }
 
     #[test]
@@ -7017,6 +7069,26 @@ disks: []
     }
 
     #[test]
+    fn cpu_vendor_id_requires_schema_five() {
+        let yaml = "schemaVersion: 5\nname: vm\ncpu:\n  mode: custom\n  model: Dhyana\n  vendorId: HygonGenuine\n  vcpus: 2\ndisks: []\n";
+        for version in 1..=4 {
+            let old = yaml.replacen("schemaVersion: 5", &format!("schemaVersion: {version}"), 1);
+            let error = parse_manifest_yaml(&old).expect_err("old schema accepted CPU vendor ID");
+            assert!(
+                error
+                    .to_string()
+                    .contains("cpu.vendorId requires schemaVersion 5")
+            );
+        }
+
+        let manifest = parse_manifest_yaml(yaml).expect("schema 5 CPU vendor ID should parse");
+        assert_eq!(
+            manifest.cpu.unwrap().vendor_id.as_deref(),
+            Some("HygonGenuine")
+        );
+    }
+
+    #[test]
     fn parses_and_serializes_absent_disk_tombstone() {
         let yaml = "schemaVersion: 2\nname: vm\ndisks:\n- id: data\n  state: absent\n";
 
@@ -7473,6 +7545,7 @@ disks:
         manifest.cpu = Some(VmCpu {
             mode: VmCpuMode::Custom,
             model: Some("EPYC-Milan".to_string()),
+            vendor_id: Some("AuthenticAMD".to_string()),
             vcpus: None,
             topology: Some(VmCpuTopology {
                 sockets: 1,
@@ -7628,6 +7701,7 @@ interfaces:
         manifest.cpu = Some(VmCpu {
             mode: VmCpuMode::Custom,
             model: None,
+            vendor_id: None,
             vcpus: Some(2),
             topology: None,
             features: None,
@@ -7642,6 +7716,37 @@ interfaces:
         manifest.cpu = Some(VmCpu {
             mode: VmCpuMode::HostModel,
             model: None,
+            vendor_id: Some("HygonGenuine".to_string()),
+            vcpus: Some(2),
+            topology: None,
+            features: None,
+        });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("only valid with custom CPU mode")
+        );
+
+        manifest.cpu = Some(VmCpu {
+            mode: VmCpuMode::Custom,
+            model: Some("Dhyana".to_string()),
+            vendor_id: Some("Hygon".to_string()),
+            vcpus: Some(2),
+            topology: None,
+            features: None,
+        });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("exactly 12 ASCII characters")
+        );
+
+        manifest.cpu = Some(VmCpu {
+            mode: VmCpuMode::HostModel,
+            model: None,
+            vendor_id: None,
             vcpus: Some(2),
             topology: Some(VmCpuTopology {
                 sockets: 1,
@@ -7660,6 +7765,7 @@ interfaces:
         manifest.cpu = Some(VmCpu {
             mode: VmCpuMode::HostModel,
             model: None,
+            vendor_id: None,
             vcpus: Some(2),
             topology: None,
             features: Some(BTreeMap::from([(

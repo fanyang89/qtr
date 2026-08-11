@@ -542,6 +542,7 @@ fn fedora_manifest(args: &VmInstallFedoraArgs, disk: &Path, serial_log: &Path) -
         cpu: Some(VmCpu {
             mode: VmCpuMode::HostPassthrough,
             model: None,
+            vendor_id: None,
             vcpus: Some(args.vcpus),
             topology: None,
             features: None,
