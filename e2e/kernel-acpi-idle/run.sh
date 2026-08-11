@@ -77,8 +77,12 @@ cleanup() {
         "$qtr_bin" vm rm "$vm_name" >"$artifact_dir/cleanup-rm.txt" 2>&1
     fi
     if [[ -f $serial_log ]]; then
-        if cp -a -- "$serial_log" "$artifact_dir/serial.log"; then
+        if cp -a -- "$serial_log" "$artifact_dir/serial.log" 2>/dev/null; then
             rm -f -- "$serial_log"
+        elif (( EUID != 0 )) && sudo -n cat -- "$serial_log" |
+            tee "$artifact_dir/serial.log" >/dev/null &&
+            sudo -n rm -f -- "$serial_log"; then
+            :
         else
             printf 'failed to archive serial log; retained at %s\n' "$serial_log" >&2
             (( status == 0 )) && status=1
