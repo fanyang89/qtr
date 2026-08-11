@@ -9,11 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { StatusDot } from '@/components/status-dot'
 
 type ConnectionState =
-  | 'idle'
-  | 'connecting'
-  | 'connected'
-  | 'disconnected'
-  | 'error'
+  'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'
 
 export function NoVncConsole({ name }: { name: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
