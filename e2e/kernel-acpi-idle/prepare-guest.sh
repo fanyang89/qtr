@@ -44,7 +44,7 @@ readonly package_name kernel_release
     exit 1
 }
 
-rpm -ivh --replacepkgs "$rpm_path"
+rpm -ivh --oldpackage --replacepkgs "$rpm_path"
 [[ -d /lib/modules/$kernel_release ]] || {
     printf 'RPM did not install /lib/modules/%s\n' "$kernel_release" >&2
     exit 1
