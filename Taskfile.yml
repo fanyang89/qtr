@@ -39,6 +39,13 @@ tasks:
     cmds:
       - ./e2e/libvirt/run-container.sh
 
+  e2e:kernel-acpi-idle:
+    desc: Run one isolated kernel ACPI idle VM test
+    cmds:
+      - cargo build
+      - python3 -m unittest e2e/kernel-acpi-idle/test_aml.py
+      - ./e2e/kernel-acpi-idle/run.sh
+
   openapi:generate:
     desc: Generate the versioned OpenAPI document
     cmds:

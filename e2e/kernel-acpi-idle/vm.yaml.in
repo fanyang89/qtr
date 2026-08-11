@@ -1,0 +1,19 @@
+schemaVersion: 5
+name: @VM_NAME@
+machine:
+  type: pc-i440fx-10.2
+@CPU_CONFIG@
+memory:
+  sizeMiB: 2048
+disks:
+  - id: root
+    path: @OVERLAY_PATH@
+    type: file
+    format: qcow2
+    target: vda
+    bus: virtio-blk
+boot:
+  - hd
+interfaces: []
+graphics: none
+serialLog: @SERIAL_LOG@

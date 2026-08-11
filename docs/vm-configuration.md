@@ -17,7 +17,7 @@ Serial console file output is disabled by default. Configure `serialLog` in the 
 
 ## Schema and Capabilities
 
-VM YAML emitted by qtr includes `schemaVersion: 3`. Existing unversioned, version 1, version 2, and standard-VM version 4 definitions remain supported. Version 4 was briefly emitted by a removed VM profile and is read only for compatibility.
+VM YAML emitted by qtr includes `schemaVersion: 5`. Existing unversioned and version 1 through 4 definitions remain supported. Version 4 was briefly emitted by a removed VM profile and is read only for compatibility. `cpu.features` and `cpu.vendorId` require version 5.
 
 Query the VM features reported by the current libvirt/QEMU host before using host-specific machine, firmware, CPU or device options:
 
@@ -38,7 +38,7 @@ Edit `cdroms[].media` to point at the installer ISO. Create or resize disks with
 The generated YAML is an installer-oriented template:
 
 ```yaml
-schemaVersion: 3
+schemaVersion: 5
 name: install-os
 machine:
   type: q35
@@ -70,7 +70,19 @@ vncListen: 127.0.0.1
 
 ## Machine, CPU, and Memory
 
-`machine.type` is optional; omit it to let libvirt select the machine type. CPU configuration accepts `host-passthrough`, `host-model`, or `custom`. A custom CPU requires `model`. Set either `cpu.vcpus` or `cpu.topology`, but not both.
+`machine.type` is optional; omit it to let libvirt select the machine type. CPU configuration accepts `host-passthrough`, `host-model`, or `custom`. A custom CPU requires `model` and may set a 12-character ASCII `vendorId` exposed through CPUID; other modes reject both fields. Set either `cpu.vcpus` or `cpu.topology`, but not both.
+
+Version 5 CPU configuration supports a `features` map from CPU feature name to a libvirt policy: `force`, `require`, `optional`, `disable`, or `forbid`. qtr writes features in name order. Applying the map replaces existing CPU feature elements while preserving unrelated CPU XML children. Omit `features` to preserve existing feature elements, or set `features: {}` to remove them.
+
+```yaml
+cpu:
+  mode: host-model
+  vcpus: 4
+  features:
+    aes: require
+    avx: optional
+    vmx: forbid
+```
 
 `memory.sizeMiB` is the current guest memory allocation and optional `memory.maxMiB` sets the maximum allocation. Legacy `vcpus` and `memoryGiB` remain supported for existing definitions but cannot be mixed with their structured replacements.
 

@@ -47,10 +47,18 @@ pub struct VmLaunchMemorySpec {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmLaunchCpuFeatureSpec<'a> {
+    pub name: &'a str,
+    pub policy: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmLaunchCpuSpec<'a> {
     pub mode: &'a str,
     pub model: Option<&'a str>,
+    pub vendor_id: Option<&'a str>,
     pub topology: Option<VmLaunchCpuTopology>,
+    pub features: Option<Vec<VmLaunchCpuFeatureSpec<'a>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,9 +256,13 @@ pub fn build_cpu_xml(spec: VmLaunchCpuSpec<'_>) -> String {
     let model = spec
         .model
         .map(|model| {
+            let vendor_id = spec
+                .vendor_id
+                .map(|vendor_id| format!(" vendor_id='{}'", escape_xml(vendor_id)))
+                .unwrap_or_default();
             format!(
-                "    <model fallback='forbid'>{}</model>\n",
-                escape_xml(model)
+                "    <model fallback='forbid'{vendor_id}>{}</model>\n",
+                escape_xml(model),
             )
         })
         .unwrap_or_default();
@@ -263,11 +275,23 @@ pub fn build_cpu_xml(spec: VmLaunchCpuSpec<'_>) -> String {
             )
         })
         .unwrap_or_default();
+    let features = spec
+        .features
+        .iter()
+        .flatten()
+        .map(|feature| {
+            format!(
+                "    <feature policy='{}' name='{}'/>\n",
+                escape_xml(feature.policy),
+                escape_xml(feature.name)
+            )
+        })
+        .collect::<String>();
 
-    if model.is_empty() && topology.is_empty() {
+    if model.is_empty() && topology.is_empty() && features.is_empty() {
         format!("  <cpu{attributes}/>\n")
     } else {
-        format!("  <cpu{attributes}>\n{model}{topology}  </cpu>\n")
+        format!("  <cpu{attributes}>\n{model}{topology}{features}  </cpu>\n")
     }
 }
 
@@ -808,11 +832,13 @@ mod tests {
             cpu: Some(VmLaunchCpuSpec {
                 mode: "custom",
                 model: Some("EPYC-Milan"),
+                vendor_id: Some("AuthenticAMD"),
                 topology: Some(VmLaunchCpuTopology {
                     sockets: 2,
                     cores: 2,
                     threads: 2,
                 }),
+                features: None,
             }),
             io_threads: None,
             disks: &disks,
@@ -832,8 +858,33 @@ mod tests {
         assert!(xml.contains("<vcpu placement='static'>8</vcpu>"));
         assert!(xml.contains("<type arch='x86_64' machine='pc-q35-10.0'>hvm</type>"));
         assert!(xml.contains("<cpu mode='custom' match='exact'>"));
-        assert!(xml.contains("<model fallback='forbid'>EPYC-Milan</model>"));
+        assert!(
+            xml.contains("<model fallback='forbid' vendor_id='AuthenticAMD'>EPYC-Milan</model>")
+        );
         assert!(xml.contains("<topology sockets='2' cores='2' threads='2'/>"));
+    }
+
+    #[test]
+    fn builds_and_escapes_cpu_features() {
+        let xml = build_cpu_xml(VmLaunchCpuSpec {
+            mode: "host-model",
+            model: None,
+            vendor_id: None,
+            topology: None,
+            features: Some(vec![
+                VmLaunchCpuFeatureSpec {
+                    name: "a&b<c>'\"",
+                    policy: "require",
+                },
+                VmLaunchCpuFeatureSpec {
+                    name: "vmx",
+                    policy: "forbid",
+                },
+            ]),
+        });
+
+        assert!(xml.contains("<feature policy='require' name='a&amp;b&lt;c&gt;&apos;&quot;'/>"));
+        assert!(xml.contains("<feature policy='forbid' name='vmx'/>"));
     }
 
     #[test]

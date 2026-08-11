@@ -1,4 +1,4 @@
-schemaVersion: 3
+schemaVersion: 5
 name: install-os
 machine:
   type: q35
@@ -8,6 +8,12 @@ cpu:
     sockets: 1
     cores: 4
     threads: 1
+  features:
+    aes: require
+    avx: optional
+    hle: disable
+    hypervisor: force
+    vmx: forbid
 memory:
   sizeMiB: 6144
   maxMiB: 8192

@@ -8,3 +8,5 @@
 /vm-install-os.yml
 *.local.yml
 *.local.yaml
+__pycache__/
+*.py[cod]
