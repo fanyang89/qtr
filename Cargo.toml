@@ -21,7 +21,7 @@ serde_yaml = "0.9"
 similar = "3"
 subtle = "2.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "fs", "sync"] }
-tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 utoipa = { version = "5.5", features = ["axum_extras", "uuid"] }
