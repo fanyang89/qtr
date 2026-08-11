@@ -544,6 +544,7 @@ fn fedora_manifest(args: &VmInstallFedoraArgs, disk: &Path, serial_log: &Path) -
             model: None,
             vcpus: Some(args.vcpus),
             topology: None,
+            features: None,
         }),
         memory: Some(VmMemory {
             size_mib: args.memory_mib,

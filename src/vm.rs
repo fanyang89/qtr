@@ -31,17 +31,17 @@ use crate::{
     },
     disk,
     domain_xml::{
-        self, BootDevice, GraphicsSpec, VmLaunchCpuSpec, VmLaunchDiskSource, VmLaunchDiskSpec,
-        VmLaunchDomainSpec, VmLaunchInterfaceSpec, VmLaunchIoThreadsSpec,
-        build_vm_launch_domain_xml, parse_boot_devices,
+        self, BootDevice, GraphicsSpec, VmLaunchCpuFeatureSpec, VmLaunchCpuSpec,
+        VmLaunchDiskSource, VmLaunchDiskSpec, VmLaunchDomainSpec, VmLaunchInterfaceSpec,
+        VmLaunchIoThreadsSpec, build_vm_launch_domain_xml, parse_boot_devices,
     },
     guest_agent, installer, vm_reconcile,
 };
 
 pub use crate::vm_model::{
-    VmCdrom, VmCdromEntry, VmCpu, VmCpuMode, VmCpuTopology, VmDisk, VmDiskBus, VmDiskCache,
-    VmDiskDetectZeroes, VmDiskDiscard, VmDiskEntry, VmDiskIoConfig, VmDiskIoMode, VmDiskIoTune,
-    VmDiskIoTuneConfig, VmDiskSerial, VmDiskType, VmInterface, VmInterfaceDirectMode,
+    VmCdrom, VmCdromEntry, VmCpu, VmCpuFeaturePolicy, VmCpuMode, VmCpuTopology, VmDisk, VmDiskBus,
+    VmDiskCache, VmDiskDetectZeroes, VmDiskDiscard, VmDiskEntry, VmDiskIoConfig, VmDiskIoMode,
+    VmDiskIoTune, VmDiskIoTuneConfig, VmDiskSerial, VmDiskType, VmInterface, VmInterfaceDirectMode,
     VmInterfaceEntry, VmInterfaceLinkState, VmInterfaceType, VmIoThreads, VmMachine, VmManifest,
     VmMemory, VmOptionalValue,
 };
@@ -74,8 +74,8 @@ pub fn run(args: VmArgs) -> Result<()> {
     }
 }
 
-const VM_MANIFEST_SCHEMA_VERSION: u64 = 3;
-const MAX_SUPPORTED_VM_MANIFEST_SCHEMA_VERSION: u64 = 4;
+const VM_MANIFEST_SCHEMA_VERSION: u64 = 5;
+const MAX_SUPPORTED_VM_MANIFEST_SCHEMA_VERSION: u64 = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -294,6 +294,15 @@ fn launch_cpu(manifest: &VmManifest) -> Option<VmLaunchCpuSpec<'_>> {
         mode: cpu.mode.as_xml(),
         model: cpu.model.as_deref(),
         topology: cpu.topology.map(VmCpuTopology::launch),
+        features: cpu.features.as_ref().map(|features| {
+            features
+                .iter()
+                .map(|(name, policy)| VmLaunchCpuFeatureSpec {
+                    name,
+                    policy: policy.as_xml(),
+                })
+                .collect()
+        }),
     })
 }
 
@@ -321,6 +330,10 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
     }
     let has_cdroms = has_key("cdroms");
     let has_interfaces = has_key("interfaces");
+    let has_cpu_features = mapping
+        .get(serde_yaml::Value::String("cpu".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .is_some_and(|cpu| cpu.contains_key(serde_yaml::Value::String("features".to_string())));
 
     let version = match mapping.remove(&schema_key) {
         Some(version) => version
@@ -352,6 +365,9 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
     }
     if version < 3 && has_interfaces {
         bail!("interfaces requires schemaVersion 3");
+    }
+    if version < 5 && has_cpu_features {
+        bail!("cpu.features requires schemaVersion 5");
     }
 
     let mut manifest: VmManifest = serde_yaml::from_value(serde_yaml::Value::Mapping(mapping))
@@ -597,6 +613,7 @@ fn init(args: VmInitArgs) -> Result<()> {
                 cores: args.vcpus,
                 threads: 1,
             }),
+            features: None,
         }),
         memory: Some(VmMemory {
             size_mib: memory_mib,
@@ -1674,6 +1691,15 @@ fn patch_cpu(
         mode: cpu.mode.as_xml(),
         model: cpu.model.as_deref(),
         topology: cpu.topology.map(VmCpuTopology::launch),
+        features: cpu.features.as_ref().map(|features| {
+            features
+                .iter()
+                .map(|(name, policy)| VmLaunchCpuFeatureSpec {
+                    name,
+                    policy: policy.as_xml(),
+                })
+                .collect()
+        }),
     };
 
     if let Some(current) = optional_child(domain, "cpu") {
@@ -1695,6 +1721,7 @@ fn patch_cpu(
 }
 
 fn build_patched_cpu_xml(xml: &str, current: Node<'_, '_>, spec: VmLaunchCpuSpec<'_>) -> String {
+    let replace_features = spec.features.is_some();
     let mut desired = domain_xml::build_cpu_xml(spec);
     let extra_attributes = current
         .attributes()
@@ -1720,7 +1747,10 @@ fn build_patched_cpu_xml(xml: &str, current: Node<'_, '_>, spec: VmLaunchCpuSpec
     let extra_children = current
         .children()
         .filter(|child| {
-            child.is_element() && !child.has_tag_name("model") && !child.has_tag_name("topology")
+            child.is_element()
+                && !child.has_tag_name("model")
+                && !child.has_tag_name("topology")
+                && (!replace_features || !child.has_tag_name("feature"))
         })
         .map(|child| {
             let range = child.range();
@@ -2370,12 +2400,30 @@ fn cpu_from_domain_xml(domain: Node<'_, '_>, vcpus: u32) -> Result<Option<VmCpu>
             })
         })
         .transpose()?;
+    let mut features = BTreeMap::new();
+    for feature in cpu.children().filter(|child| child.has_tag_name("feature")) {
+        let name = feature
+            .attribute("name")
+            .context("domain XML CPU feature is missing name")?;
+        if name.trim().is_empty() {
+            bail!("domain XML CPU feature name must not be empty");
+        }
+        let policy = feature
+            .attribute("policy")
+            .context("domain XML CPU feature is missing policy")?;
+        let policy = VmCpuFeaturePolicy::from_xml(policy)
+            .with_context(|| format!("unsupported CPU feature policy {policy:?}"))?;
+        if features.insert(name.to_string(), policy).is_some() {
+            bail!("duplicate CPU feature {name:?} in domain XML");
+        }
+    }
 
     Ok(Some(VmCpu {
         mode,
         model,
         vcpus: topology.is_none().then_some(vcpus),
         topology,
+        features: Some(features),
     }))
 }
 
@@ -3100,6 +3148,13 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
             && (topology.sockets == 0 || topology.cores == 0 || topology.threads == 0)
         {
             bail!("CPU topology values must be greater than 0");
+        }
+        if cpu
+            .features
+            .as_ref()
+            .is_some_and(|features| features.keys().any(|name| name.trim().is_empty()))
+        {
+            bail!("CPU feature name must not be empty");
         }
     }
 
@@ -5730,6 +5785,7 @@ mod tests {
                 mode: "host-passthrough",
                 model: None,
                 topology: None,
+                features: None,
             }),
             io_threads: Some(VmLaunchIoThreadsSpec {
                 count: 4,
@@ -5825,6 +5881,7 @@ mod tests {
                 model: None,
                 vcpus: Some(2),
                 topology: None,
+                features: Some(BTreeMap::new()),
             })
         );
         assert_eq!(manifest.network, None);
@@ -6190,7 +6247,7 @@ mod tests {
     fn patches_machine_cpu_topology_and_memory_idempotently() {
         let xml = test_domain_xml().replace(
             "  <devices>",
-            "  <cpu mode='custom' deprecated='no'>\n    <model fallback='allow'>OldModel</model>\n    <vendor>AuthenticAMD</vendor>\n    <feature policy='require' name='aes'/>\n  </cpu>\n  <devices>",
+            "  <cpu mode='custom' deprecated='no'>\n    <model fallback='allow'>OldModel</model>\n    <vendor>AuthenticAMD</vendor>\n    <feature policy='require' name='aes'/>\n    <feature policy='disable' name='stale'/>\n    <cache mode='passthrough'/>\n  </cpu>\n  <devices>",
         );
         let mut manifest = test_manifest(vec![test_file_disk(
             "/vm/sys.qcow2",
@@ -6209,6 +6266,10 @@ mod tests {
                 cores: 2,
                 threads: 2,
             }),
+            features: Some(BTreeMap::from([
+                ("aes".to_string(), VmCpuFeaturePolicy::Forbid),
+                ("avx".to_string(), VmCpuFeaturePolicy::Optional),
+            ])),
         });
         manifest.memory = Some(VmMemory {
             size_mib: 2048,
@@ -6224,7 +6285,11 @@ mod tests {
         assert!(patched.contains("<type arch='x86_64' machine='pc-q35-10.0'>hvm</type>"));
         assert!(patched.contains("<cpu mode='host-model' deprecated='no'>"));
         assert!(patched.contains("<topology sockets='2' cores='2' threads='2'/>"));
-        assert!(patched.contains("<feature policy='require' name='aes'/>"));
+        assert!(patched.contains("<feature policy='forbid' name='aes'/>"));
+        assert!(patched.contains("<feature policy='optional' name='avx'/>"));
+        assert_eq!(patched.matches("<feature ").count(), 2);
+        assert!(!patched.contains("name='stale'"));
+        assert!(patched.contains("<cache mode='passthrough'/>"));
         assert!(!patched.contains("OldModel"));
         let vendor = patched
             .find("<vendor>AuthenticAMD</vendor>")
@@ -6237,6 +6302,35 @@ mod tests {
         let patched_again = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd])
             .expect("second resource patch should succeed");
         assert_eq!(patched_again, patched);
+    }
+
+    #[test]
+    fn preserves_omitted_cpu_features_and_clears_explicit_empty_map() {
+        let xml = test_domain_xml().replace(
+            "  <devices>",
+            "  <cpu mode='host-model'>\n    <feature policy='require' name='aes'/>\n  </cpu>\n  <devices>",
+        );
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/sys.qcow2",
+            None,
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.cpu = Some(VmCpu {
+            mode: VmCpuMode::HostModel,
+            model: None,
+            vcpus: Some(2),
+            topology: None,
+            features: None,
+        });
+
+        let preserved = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd])
+            .expect("omitted CPU features should be preserved");
+        assert!(preserved.contains("<feature policy='require' name='aes'/>"));
+
+        manifest.cpu.as_mut().unwrap().features = Some(BTreeMap::new());
+        let cleared = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd])
+            .expect("explicit empty CPU features should clear existing features");
+        assert!(!cleared.contains("<feature "));
     }
 
     #[test]
@@ -6273,12 +6367,61 @@ mod tests {
                     cores: 2,
                     threads: 1,
                 }),
+                features: Some(BTreeMap::new()),
             })
         );
         assert!(yaml.contains("sizeMiB: 1536"));
         assert!(yaml.contains("maxMiB: 6144"));
         assert!(!yaml.contains("memoryGiB"));
         assert!(!yaml.contains("\nvcpus:"));
+    }
+
+    #[test]
+    fn round_trips_cpu_feature_policies_through_xml_and_yaml() {
+        let xml = test_domain_xml().replace(
+            "  <devices>",
+            "  <cpu mode='host-model'>\n    <feature policy='force' name='a-force'/>\n    <feature policy='require' name='b-require'/>\n    <feature policy='optional' name='c-optional'/>\n    <feature policy='disable' name='d-disable'/>\n    <feature policy='forbid' name='e-forbid'/>\n  </cpu>\n  <devices>",
+        );
+        let manifest = manifest_from_domain_xml(&xml).expect("CPU features should dump");
+        let features = manifest.cpu.as_ref().unwrap().features.clone().unwrap();
+
+        assert_eq!(features["a-force"], VmCpuFeaturePolicy::Force);
+        assert_eq!(features["b-require"], VmCpuFeaturePolicy::Require);
+        assert_eq!(features["c-optional"], VmCpuFeaturePolicy::Optional);
+        assert_eq!(features["d-disable"], VmCpuFeaturePolicy::Disable);
+        assert_eq!(features["e-forbid"], VmCpuFeaturePolicy::Forbid);
+
+        let rebuilt = build_manifest_domain_xml(&manifest, &[BootDevice::Hd])
+            .expect("dumped CPU features should rebuild");
+        let rebuilt_manifest =
+            manifest_from_domain_xml(&rebuilt).expect("rebuilt CPU features should dump");
+        assert_eq!(
+            rebuilt_manifest.cpu.unwrap().features,
+            Some(features.clone())
+        );
+
+        let yaml = serialize_manifest_yaml(&manifest).expect("CPU features should serialize");
+        let yaml_manifest = parse_manifest_yaml(&yaml).expect("CPU features should parse");
+        assert_eq!(yaml_manifest.cpu.unwrap().features, Some(features));
+    }
+
+    #[test]
+    fn rejects_invalid_cpu_features_in_domain_xml() {
+        for feature in [
+            "<feature policy='require' name=' '/>",
+            "<feature name='aes'/>",
+            "<feature policy='prefer' name='aes'/>",
+            "<feature policy='require' name='aes'/><feature policy='disable' name='aes'/>",
+        ] {
+            let xml = test_domain_xml().replace(
+                "  <devices>",
+                &format!("  <cpu mode='host-model'>{feature}</cpu>\n  <devices>"),
+            );
+            assert!(
+                manifest_from_domain_xml(&xml).is_err(),
+                "accepted invalid feature XML {feature}"
+            );
+        }
     }
 
     #[test]
@@ -6817,8 +6960,60 @@ disks:
         )]))
         .expect("manifest should serialize");
 
-        assert!(yaml.starts_with("schemaVersion: 3\n"));
+        assert!(yaml.starts_with("schemaVersion: 5\n"));
         assert!(yaml.contains("name: install-os\n"));
+    }
+
+    #[test]
+    fn parses_and_serializes_schema_five_cpu_features_in_name_order() {
+        let yaml = r#"schemaVersion: 5
+name: vm
+cpu:
+  mode: host-model
+  vcpus: 2
+  features:
+    z-force: force
+    b-require: require
+    d-optional: optional
+    a-disable: disable
+    c-forbid: forbid
+disks: []
+"#;
+        let manifest = parse_manifest_yaml(yaml).expect("CPU feature policies should parse");
+        let features = manifest.cpu.as_ref().unwrap().features.as_ref().unwrap();
+
+        assert_eq!(features["z-force"], VmCpuFeaturePolicy::Force);
+        assert_eq!(features["b-require"], VmCpuFeaturePolicy::Require);
+        assert_eq!(features["d-optional"], VmCpuFeaturePolicy::Optional);
+        assert_eq!(features["a-disable"], VmCpuFeaturePolicy::Disable);
+        assert_eq!(features["c-forbid"], VmCpuFeaturePolicy::Forbid);
+
+        let output = serialize_manifest_yaml(&manifest).expect("CPU features should serialize");
+        let positions = [
+            "a-disable",
+            "b-require",
+            "c-forbid",
+            "d-optional",
+            "z-force",
+        ]
+        .map(|name| output.find(name).expect("feature should be serialized"));
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn cpu_features_require_schema_five_and_known_policies() {
+        let yaml = "schemaVersion: 5\nname: vm\ncpu:\n  vcpus: 2\n  features:\n    aes: require\ndisks: []\n";
+        for version in 1..=4 {
+            let old = yaml.replacen("schemaVersion: 5", &format!("schemaVersion: {version}"), 1);
+            let error = parse_manifest_yaml(&old).expect_err("old schema accepted CPU features");
+            assert!(
+                error
+                    .to_string()
+                    .contains("cpu.features requires schemaVersion 5")
+            );
+        }
+
+        assert!(parse_manifest_yaml(&yaml.replace("require", "prefer")).is_err());
     }
 
     #[test]
@@ -6829,7 +7024,7 @@ disks:
         let output = serialize_manifest_yaml(&manifest).expect("absent disk should serialize");
 
         assert_eq!(manifest.disks[0].absent_id(), Some("data"));
-        assert!(output.starts_with("schemaVersion: 3\n"));
+        assert!(output.starts_with("schemaVersion: 5\n"));
         assert!(output.contains("- id: data\n  state: absent\n"));
         assert!(!output.contains("path:"));
     }
@@ -6949,7 +7144,7 @@ interfaces:
         );
 
         let output = serialize_manifest_yaml(&manifest).unwrap();
-        assert!(output.starts_with("schemaVersion: 3\n"));
+        assert!(output.starts_with("schemaVersion: 5\n"));
         assert!(output.contains("type: bridge"));
         assert!(output.contains("state: absent"));
         assert!(output.contains("vlan: 100"));
@@ -7100,10 +7295,10 @@ disks:
 
     #[test]
     fn rejects_unsupported_manifest_schema_version() {
-        let error = parse_manifest_yaml("schemaVersion: 5\nname: vm\ndisks: []\n")
+        let error = parse_manifest_yaml("schemaVersion: 6\nname: vm\ndisks: []\n")
             .expect_err("future schema should be rejected");
 
-        assert!(error.to_string().contains("unsupported VM schemaVersion 5"));
+        assert!(error.to_string().contains("unsupported VM schemaVersion 6"));
     }
 
     #[test]
@@ -7284,6 +7479,7 @@ disks:
                 cores: 4,
                 threads: 2,
             }),
+            features: None,
         });
         manifest.memory = Some(VmMemory {
             size_mib: 6144,
@@ -7391,11 +7587,11 @@ disks:
     }
 
     #[test]
-    fn reads_schema_four_but_emits_schema_three() {
+    fn reads_schema_four_but_emits_schema_five() {
         let manifest = parse_manifest_yaml("schemaVersion: 4\nname: vm\ndisks: []\n").unwrap();
         assert_eq!(manifest.network.as_deref(), Some("default"));
         let output = serialize_manifest_yaml(&manifest).unwrap();
-        assert!(output.starts_with("schemaVersion: 3\n"));
+        assert!(output.starts_with("schemaVersion: 5\n"));
 
         let user_interface = r#"schemaVersion: 4
 name: vm
@@ -7434,6 +7630,7 @@ interfaces:
             model: None,
             vcpus: Some(2),
             topology: None,
+            features: None,
         });
         assert!(
             validate_manifest(&manifest)
@@ -7451,12 +7648,30 @@ interfaces:
                 cores: 2,
                 threads: 1,
             }),
+            features: None,
         });
         assert!(
             validate_manifest(&manifest)
                 .unwrap_err()
                 .to_string()
                 .contains("mutually exclusive")
+        );
+
+        manifest.cpu = Some(VmCpu {
+            mode: VmCpuMode::HostModel,
+            model: None,
+            vcpus: Some(2),
+            topology: None,
+            features: Some(BTreeMap::from([(
+                "   ".to_string(),
+                VmCpuFeaturePolicy::Require,
+            )])),
+        });
+        assert!(
+            validate_manifest(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("CPU feature name must not be empty")
         );
 
         manifest.cpu = None;

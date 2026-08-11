@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
@@ -198,6 +198,41 @@ pub struct VmCpu {
     pub vcpus: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topology: Option<VmCpuTopology>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<BTreeMap<String, VmCpuFeaturePolicy>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmCpuFeaturePolicy {
+    Force,
+    Require,
+    Optional,
+    Disable,
+    Forbid,
+}
+
+impl VmCpuFeaturePolicy {
+    pub(crate) fn as_xml(self) -> &'static str {
+        match self {
+            Self::Force => "force",
+            Self::Require => "require",
+            Self::Optional => "optional",
+            Self::Disable => "disable",
+            Self::Forbid => "forbid",
+        }
+    }
+
+    pub(crate) fn from_xml(value: &str) -> Option<Self> {
+        match value {
+            "force" => Some(Self::Force),
+            "require" => Some(Self::Require),
+            "optional" => Some(Self::Optional),
+            "disable" => Some(Self::Disable),
+            "forbid" => Some(Self::Forbid),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
