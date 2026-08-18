@@ -1,15 +1,34 @@
-schemaVersion: 3
+schemaVersion: 6
 name: qtr-e2e
 machine:
   type: q35
 memory:
   sizeMiB: 512
 vcpus: 1
+ioThreads:
+  count: 1
+  queues: 1
+vcpuTune:
+  vcpuPins:
+    - vcpu: 0
+      cpuset: "0"
+  emulatorPin:
+    cpuset: "0"
+  ioThreadPins:
+    - ioThread: 1
+      cpuset: "0"
+numaTune:
+  memory:
+    mode: strict
+    placement: static
+    nodeset: "0"
 disks:
   - id: root
     path: /var/lib/qtr-e2e/root.qcow2
     type: file
     format: qcow2
+    io:
+      mode: threads
 boot:
   - hd
 interfaces: []

@@ -11,6 +11,8 @@ pub struct VmLaunchDomainSpec<'a> {
     pub vcpus: u32,
     pub cpu: Option<VmLaunchCpuSpec<'a>>,
     pub io_threads: Option<VmLaunchIoThreadsSpec>,
+    pub vcpu_tune: Option<VmLaunchVcpuTuneSpec<'a>>,
+    pub numa_tune: Option<VmLaunchNumaTuneSpec<'a>>,
     pub disks: &'a [VmLaunchDiskSpec<'a>],
     pub cdroms: &'a [VmLaunchCdromSpec<'a>],
     pub serial_log: Option<&'a Path>,
@@ -66,6 +68,45 @@ pub struct VmLaunchCpuTopology {
     pub sockets: u32,
     pub cores: u32,
     pub threads: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmLaunchVcpuTuneSpec<'a> {
+    pub vcpu_pins: Vec<VmLaunchCpuPinSpec<'a>>,
+    pub emulator_pin: Option<&'a str>,
+    pub io_thread_pins: Vec<VmLaunchIoThreadPinSpec<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmLaunchCpuPinSpec<'a> {
+    pub id: u32,
+    pub cpuset: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmLaunchIoThreadPinSpec<'a> {
+    pub id: u32,
+    pub cpuset: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmLaunchNumaTuneSpec<'a> {
+    pub memory: Option<VmLaunchNumaMemorySpec<'a>>,
+    pub mem_nodes: Vec<VmLaunchNumaMemNodeSpec<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmLaunchNumaMemorySpec<'a> {
+    pub mode: Option<&'a str>,
+    pub placement: Option<&'a str>,
+    pub nodeset: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmLaunchNumaMemNodeSpec<'a> {
+    pub cell_id: u32,
+    pub mode: &'a str,
+    pub nodeset: &'a str,
 }
 
 pub struct VmLaunchDiskSpec<'a> {
@@ -174,6 +215,8 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         .unwrap_or_default();
     let max_memory_mib = spec.memory.max_mib.unwrap_or(spec.memory.size_mib);
     let cpu_xml = spec.cpu.map(build_cpu_xml).unwrap_or_default();
+    let vcpu_tune_xml = spec.vcpu_tune.map(build_vcpu_tune_xml).unwrap_or_default();
+    let numa_tune_xml = spec.numa_tune.map(build_numa_tune_xml).unwrap_or_default();
 
     format!(
         r#"<domain type='kvm'>
@@ -181,7 +224,7 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
   <memory unit='MiB'>{max_memory_mib}</memory>
   <currentMemory unit='MiB'>{memory_mib}</currentMemory>
   <vcpu placement='static'>{vcpus}</vcpu>
-{io_threads_xml}  <os>
+{io_threads_xml}{vcpu_tune_xml}{numa_tune_xml}  <os>
     <type arch='x86_64'{machine}>hvm</type>
 {boot_xml}  </os>
   <features>
@@ -202,6 +245,8 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         machine = machine,
         cpu_xml = cpu_xml,
         io_threads_xml = io_threads_xml,
+        vcpu_tune_xml = vcpu_tune_xml,
+        numa_tune_xml = numa_tune_xml,
         boot_xml = boot_xml,
         disks_xml = disks_xml,
         scsi_controller_xml = scsi_controller_xml,
@@ -210,6 +255,67 @@ pub fn build_vm_launch_domain_xml(spec: VmLaunchDomainSpec<'_>) -> String {
         console_xml = console_xml,
         graphics_xml = graphics_xml,
     )
+}
+
+pub fn build_vcpu_tune_xml(spec: VmLaunchVcpuTuneSpec<'_>) -> String {
+    if spec.vcpu_pins.is_empty() && spec.emulator_pin.is_none() && spec.io_thread_pins.is_empty() {
+        return String::new();
+    }
+
+    let mut xml = String::from("  <cputune>\n");
+    for pin in spec.vcpu_pins {
+        xml.push_str(&format!(
+            "    <vcpupin vcpu='{}' cpuset='{}'/>\n",
+            pin.id,
+            escape_xml(pin.cpuset)
+        ));
+    }
+    if let Some(cpuset) = spec.emulator_pin {
+        xml.push_str(&format!(
+            "    <emulatorpin cpuset='{}'/>\n",
+            escape_xml(cpuset)
+        ));
+    }
+    for pin in spec.io_thread_pins {
+        xml.push_str(&format!(
+            "    <iothreadpin iothread='{}' cpuset='{}'/>\n",
+            pin.id,
+            escape_xml(pin.cpuset)
+        ));
+    }
+    xml.push_str("  </cputune>\n");
+    xml
+}
+
+pub fn build_numa_tune_xml(spec: VmLaunchNumaTuneSpec<'_>) -> String {
+    if spec.memory.is_none() && spec.mem_nodes.is_empty() {
+        return String::new();
+    }
+
+    let mut xml = String::from("  <numatune>\n");
+    if let Some(memory) = spec.memory {
+        xml.push_str("    <memory");
+        push_optional_xml_attribute(&mut xml, "mode", memory.mode);
+        push_optional_xml_attribute(&mut xml, "placement", memory.placement);
+        push_optional_xml_attribute(&mut xml, "nodeset", memory.nodeset);
+        xml.push_str("/>\n");
+    }
+    for node in spec.mem_nodes {
+        xml.push_str(&format!(
+            "    <memnode cellid='{}' mode='{}' nodeset='{}'/>\n",
+            node.cell_id,
+            escape_xml(node.mode),
+            escape_xml(node.nodeset)
+        ));
+    }
+    xml.push_str("  </numatune>\n");
+    xml
+}
+
+fn push_optional_xml_attribute(output: &mut String, name: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        output.push_str(&format!(" {name}='{}'", escape_xml(value)));
+    }
 }
 
 pub fn build_interface_xml(spec: &VmLaunchInterfaceSpec<'_>) -> String {
@@ -757,6 +863,8 @@ mod tests {
             vcpus: 1,
             cpu: None,
             io_threads: None,
+            vcpu_tune: None,
+            numa_tune: None,
             disks: &virtio_disks,
             cdroms: &[],
             serial_log: None,
@@ -781,6 +889,8 @@ mod tests {
             vcpus: 1,
             cpu: None,
             io_threads: None,
+            vcpu_tune: None,
+            numa_tune: None,
             disks: &scsi_disks,
             cdroms: &[],
             serial_log: None,
@@ -841,6 +951,8 @@ mod tests {
                 features: None,
             }),
             io_threads: None,
+            vcpu_tune: None,
+            numa_tune: None,
             disks: &disks,
             cdroms: &[],
             serial_log: None,
@@ -885,6 +997,42 @@ mod tests {
 
         assert!(xml.contains("<feature policy='require' name='a&amp;b&lt;c&gt;&apos;&quot;'/>"));
         assert!(xml.contains("<feature policy='forbid' name='vmx'/>"));
+    }
+
+    #[test]
+    fn builds_cpu_and_numa_tuning() {
+        let cpu = build_vcpu_tune_xml(VmLaunchVcpuTuneSpec {
+            vcpu_pins: vec![
+                VmLaunchCpuPinSpec {
+                    id: 0,
+                    cpuset: "2-3",
+                },
+                VmLaunchCpuPinSpec {
+                    id: 1,
+                    cpuset: "4-5",
+                },
+            ],
+            emulator_pin: Some("0-1"),
+            io_thread_pins: vec![VmLaunchIoThreadPinSpec { id: 1, cpuset: "6" }],
+        });
+        let numa = build_numa_tune_xml(VmLaunchNumaTuneSpec {
+            memory: Some(VmLaunchNumaMemorySpec {
+                mode: Some("strict"),
+                placement: Some("static"),
+                nodeset: Some("0-1"),
+            }),
+            mem_nodes: vec![VmLaunchNumaMemNodeSpec {
+                cell_id: 0,
+                mode: "preferred",
+                nodeset: "1",
+            }],
+        });
+
+        assert!(cpu.contains("<vcpupin vcpu='0' cpuset='2-3'/>"));
+        assert!(cpu.contains("<emulatorpin cpuset='0-1'/>"));
+        assert!(cpu.contains("<iothreadpin iothread='1' cpuset='6'/>"));
+        assert!(numa.contains("<memory mode='strict' placement='static' nodeset='0-1'/>"));
+        assert!(numa.contains("<memnode cellid='0' mode='preferred' nodeset='1'/>"));
     }
 
     #[test]

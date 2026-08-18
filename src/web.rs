@@ -349,6 +349,12 @@ struct UpdateVmRequest {
     #[schema(value_type = Option<Object>)]
     memory: Option<vm::VmMemory>,
     io_threads: Option<vm::VmIoThreads>,
+    #[serde(default)]
+    #[schema(value_type = Option<vm::VmVcpuTune>)]
+    vcpu_tune: vm::VmVcpuTuneConfig,
+    #[serde(default)]
+    #[schema(value_type = Option<vm::VmNumaTune>)]
+    numa_tune: vm::VmNumaTuneConfig,
     #[schema(value_type = Vec<Object>)]
     disks: Vec<vm::VmDisk>,
     #[schema(value_type = Option<String>)]
@@ -378,6 +384,8 @@ impl UpdateVmRequest {
             cpu: self.cpu,
             memory: self.memory,
             io_threads: self.io_threads,
+            vcpu_tune: self.vcpu_tune,
+            numa_tune: self.numa_tune,
             disks: self
                 .disks
                 .into_iter()
@@ -507,6 +515,8 @@ impl CreateVmRequest {
                 max_mib: None,
             }),
             io_threads: None,
+            vcpu_tune: Default::default(),
+            numa_tune: Default::default(),
             disks,
             cdrom,
             cdroms,
@@ -2182,6 +2192,44 @@ mod tests {
         assert!(serde_json::from_str::<UpdateVmRequest>(cdroms).is_err());
     }
 
+    #[test]
+    fn update_request_distinguishes_omitted_null_and_configured_tuning() {
+        let omitted: UpdateVmRequest = serde_json::from_str(
+            r#"{"name":"vm","disks":[{"path":"/tmp/root.qcow2","format":"qcow2"}]}"#,
+        )
+        .unwrap();
+        assert!(omitted.vcpu_tune.is_preserve());
+        assert!(omitted.numa_tune.is_preserve());
+
+        let removed: UpdateVmRequest = serde_json::from_str(
+            r#"{"name":"vm","disks":[{"path":"/tmp/root.qcow2","format":"qcow2"}],"vcpuTune":null,"numaTune":null}"#,
+        )
+        .unwrap();
+        assert_eq!(removed.vcpu_tune, vm::VmVcpuTuneConfig::Remove);
+        assert_eq!(removed.numa_tune, vm::VmNumaTuneConfig::Remove);
+
+        let configured: UpdateVmRequest = serde_json::from_str(
+            r#"{"name":"vm","disks":[{"path":"/tmp/root.qcow2","format":"qcow2"}],"vcpuTune":{"vcpuPins":[{"vcpu":0,"cpuset":"2-3"}]},"numaTune":{"memory":{"mode":"strict","placement":"static","nodeset":"0"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            configured.vcpu_tune.as_ref().unwrap().vcpu_pins[0].cpuset,
+            "2-3"
+        );
+        assert_eq!(
+            configured
+                .numa_tune
+                .as_ref()
+                .unwrap()
+                .memory
+                .as_ref()
+                .unwrap()
+                .nodeset
+                .as_deref(),
+            Some("0")
+        );
+    }
+
     #[tokio::test]
     async fn typed_errors_map_to_http_statuses() {
         let app = Router::new()
@@ -2321,6 +2369,9 @@ mod tests {
         assert!(create_properties["networkId"].is_object());
         assert!(create_properties["mediaId"].is_object());
         assert!(create_properties["memoryGiB"].is_null());
+        let update_properties = &document["components"]["schemas"]["UpdateVmRequest"]["properties"];
+        assert!(update_properties["vcpuTune"]["oneOf"].is_array());
+        assert!(update_properties["numaTune"]["oneOf"].is_array());
         let install_properties =
             &document["components"]["schemas"]["FedoraInstallRequest"]["properties"];
         assert!(install_properties["mediaId"].is_object());

@@ -8,6 +8,88 @@ pub(crate) struct InterfaceManagedFields {
     pub link: bool,
 }
 
+pub(crate) fn merge_tuning_xml(
+    current_xml: &str,
+    current: Node<'_, '_>,
+    desired_xml: &str,
+    managed_children: &[&str],
+) -> Option<String> {
+    let desired_doc = Document::parse(desired_xml).expect("generated tuning XML should parse");
+    let desired = desired_doc.root_element();
+    let desired_children = desired
+        .children()
+        .filter(Node::is_element)
+        .collect::<Vec<_>>();
+    let opaque_children = current
+        .children()
+        .filter(Node::is_element)
+        .filter(|child| !managed_children.contains(&child.tag_name().name()))
+        .collect::<Vec<_>>();
+
+    if desired_children.is_empty() && opaque_children.is_empty() && current.attributes().len() == 0
+    {
+        return None;
+    }
+
+    let mut output = render_element_start("  ", desired, Some(current), &[]);
+    output.push_str(">\n");
+    for child in desired_children {
+        let matching = current
+            .children()
+            .filter(Node::is_element)
+            .find(|candidate| {
+                candidate.tag_name().name() == child.tag_name().name()
+                    && tuning_child_key(*candidate) == tuning_child_key(child)
+            });
+        output.push_str(&render_tuning_child(current_xml, child, matching));
+    }
+    for child in opaque_children {
+        output.push_str(&render_raw_node(current_xml, child, "    "));
+    }
+    output.push_str(&format!("  </{}>\n", desired.tag_name().name()));
+    Some(output)
+}
+
+fn tuning_child_key(node: Node<'_, '_>) -> Option<(&'static str, String)> {
+    for attribute in ["vcpu", "iothread", "cellid"] {
+        if let Some(value) = node.attribute(attribute) {
+            return Some((attribute, value.to_string()));
+        }
+    }
+    None
+}
+
+fn render_tuning_child(
+    current_xml: &str,
+    desired: Node<'_, '_>,
+    current: Option<Node<'_, '_>>,
+) -> String {
+    let managed_attributes: &[&str] = match desired.tag_name().name() {
+        "vcpupin" => &["vcpu", "cpuset"],
+        "emulatorpin" => &["cpuset"],
+        "iothreadpin" => &["iothread", "cpuset"],
+        "memory" => &["mode", "placement", "nodeset"],
+        "memnode" => &["cellid", "mode", "nodeset"],
+        _ => &[],
+    };
+    let mut output = render_element_start("    ", desired, current, managed_attributes);
+    let opaque_children = current
+        .into_iter()
+        .flat_map(|node| node.children())
+        .filter(Node::is_element)
+        .collect::<Vec<_>>();
+    if opaque_children.is_empty() {
+        output.push_str("/>\n");
+    } else {
+        output.push_str(">\n");
+        for child in opaque_children {
+            output.push_str(&render_raw_node(current_xml, child, "      "));
+        }
+        output.push_str(&format!("    </{}>\n", desired.tag_name().name()));
+    }
+    output
+}
+
 pub(crate) fn merge_interface_xml(
     current_xml: &str,
     current: Node<'_, '_>,

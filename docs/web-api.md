@@ -49,3 +49,7 @@ Regenerate it after changing API handlers:
 ```bash
 task openapi:generate
 ```
+
+## VM Tuning Updates
+
+`PUT /api/v1/vms/{name}` accepts the schema 6 `vcpuTune` and `numaTune` objects documented in [VM Configuration](vm-configuration.md#cpu-and-numa-tuning). Omit either field to preserve its current libvirt XML, or send `null` to remove qtr-managed tuning nodes. The simplified `POST /api/v1/vms` request does not accept tuning; create the VM first and apply tuning with `PUT`.
