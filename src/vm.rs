@@ -39,11 +39,13 @@ use crate::{
 };
 
 pub use crate::vm_model::{
-    VmCdrom, VmCdromEntry, VmCpu, VmCpuFeaturePolicy, VmCpuMode, VmCpuTopology, VmDisk, VmDiskBus,
-    VmDiskCache, VmDiskDetectZeroes, VmDiskDiscard, VmDiskEntry, VmDiskIoConfig, VmDiskIoMode,
-    VmDiskIoTune, VmDiskIoTuneConfig, VmDiskSerial, VmDiskType, VmInterface, VmInterfaceDirectMode,
-    VmInterfaceEntry, VmInterfaceLinkState, VmInterfaceType, VmIoThreads, VmMachine, VmManifest,
-    VmMemory, VmOptionalValue,
+    VmCdrom, VmCdromEntry, VmCpu, VmCpuFeaturePolicy, VmCpuMode, VmCpuPin, VmCpuTopology, VmDisk,
+    VmDiskBus, VmDiskCache, VmDiskDetectZeroes, VmDiskDiscard, VmDiskEntry, VmDiskIoConfig,
+    VmDiskIoMode, VmDiskIoTune, VmDiskIoTuneConfig, VmDiskSerial, VmDiskType, VmInterface,
+    VmInterfaceDirectMode, VmInterfaceEntry, VmInterfaceLinkState, VmInterfaceType, VmIoThreadPin,
+    VmIoThreads, VmMachine, VmManifest, VmMemory, VmNumaMemNode, VmNumaMemory, VmNumaMode,
+    VmNumaPlacement, VmNumaTune, VmNumaTuneConfig, VmOptionalValue, VmVcpuPin, VmVcpuTune,
+    VmVcpuTuneConfig,
 };
 
 pub fn run(args: VmArgs) -> Result<()> {
@@ -74,8 +76,8 @@ pub fn run(args: VmArgs) -> Result<()> {
     }
 }
 
-const VM_MANIFEST_SCHEMA_VERSION: u64 = 5;
-const MAX_SUPPORTED_VM_MANIFEST_SCHEMA_VERSION: u64 = 5;
+const VM_MANIFEST_SCHEMA_VERSION: u64 = 6;
+const MAX_SUPPORTED_VM_MANIFEST_SCHEMA_VERSION: u64 = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -339,6 +341,8 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
         .get(serde_yaml::Value::String("cpu".to_string()))
         .and_then(serde_yaml::Value::as_mapping)
         .is_some_and(|cpu| cpu.contains_key(serde_yaml::Value::String("vendorId".to_string())));
+    let has_vcpu_tune = has_key("vcpuTune");
+    let has_numa_tune = has_key("numaTune");
 
     let version = match mapping.remove(&schema_key) {
         Some(version) => version
@@ -376,6 +380,12 @@ pub fn parse_manifest_yaml(input: &str) -> Result<VmManifest> {
     }
     if version < 5 && has_cpu_vendor_id {
         bail!("cpu.vendorId requires schemaVersion 5");
+    }
+    if version < 6 && has_vcpu_tune {
+        bail!("vcpuTune requires schemaVersion 6");
+    }
+    if version < 6 && has_numa_tune {
+        bail!("numaTune requires schemaVersion 6");
     }
 
     let mut manifest: VmManifest = serde_yaml::from_value(serde_yaml::Value::Mapping(mapping))
@@ -629,6 +639,8 @@ fn init(args: VmInitArgs) -> Result<()> {
             max_mib: None,
         }),
         io_threads: None,
+        vcpu_tune: VmVcpuTuneConfig::default(),
+        numa_tune: VmNumaTuneConfig::default(),
         disks,
         cdrom: None,
         cdroms: (!args.no_cdrom).then_some(vec![VmCdromEntry::present(VmCdrom {
@@ -698,6 +710,7 @@ fn apply(args: VmApplyArgs) -> Result<()> {
     }
 
     let current_xml = current_domain_xml(&args.connect_uri, &manifest.name)?;
+    validate_manifest_domain_context(&manifest, &current_xml)?;
     let xml = if current_xml.is_empty() {
         validate_new_vm_disks(&manifest)?;
         build_manifest_domain_xml(&manifest, &boot_devices)?
@@ -823,6 +836,8 @@ fn build_manifest_domain_xml(manifest: &VmManifest, boot_devices: &[BootDevice])
         vcpus,
         cpu: launch_cpu(manifest),
         io_threads: manifest.io_threads.map(VmIoThreads::effective),
+        vcpu_tune: manifest.vcpu_tune.as_ref().map(VmVcpuTune::launch),
+        numa_tune: manifest.numa_tune.as_ref().map(VmNumaTune::launch),
         disks: &disks,
         cdroms: &cdroms,
         serial_log: manifest.serial_log.as_deref(),
@@ -1036,6 +1051,8 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
         .map(VmDiskEntry::present)
         .collect();
     let io_threads = io_threads_from_domain_xml(domain, devices)?;
+    let vcpu_tune = vcpu_tune_from_domain_xml(domain)?;
+    let numa_tune = numa_tune_from_domain_xml(domain)?;
     let cdroms = cdroms_from_domain_xml(devices)?;
     let interfaces = interfaces_from_domain_xml(devices)?;
     let (graphics, vnc_listen, vnc_port) = graphics_config(devices)?;
@@ -1047,6 +1064,8 @@ fn manifest_from_domain_xml(xml: &str) -> Result<VmManifest> {
         cpu: cpu_from_domain_xml(domain, vcpus)?,
         memory: Some(memory),
         io_threads,
+        vcpu_tune,
+        numa_tune,
         disks,
         cdrom: None,
         cdroms: (!cdroms.is_empty()).then_some(cdroms),
@@ -1086,6 +1105,8 @@ fn patch_domain_xml(
 
     patch_memory(xml, domain, memory, &mut replacements)?;
     patch_io_threads(xml, domain, manifest.io_threads, &mut replacements)?;
+    patch_vcpu_tune(xml, domain, &manifest.vcpu_tune, &mut replacements)?;
+    patch_numa_tune(xml, domain, &manifest.numa_tune, &mut replacements)?;
     push_text_replacement(
         xml,
         required_child(domain, "vcpu")?,
@@ -1649,6 +1670,87 @@ fn patch_io_threads(
         (None, None) => {}
     }
 
+    Ok(())
+}
+
+fn patch_vcpu_tune(
+    xml: &str,
+    domain: Node<'_, '_>,
+    config: &VmVcpuTuneConfig,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let desired = match config {
+        VmOptionalValue::Preserve => return Ok(()),
+        VmOptionalValue::Remove => String::new(),
+        VmOptionalValue::Value(tune) => domain_xml::build_vcpu_tune_xml(tune.launch()),
+    };
+    patch_tuning_container(
+        xml,
+        domain,
+        "cputune",
+        &desired,
+        &["vcpupin", "emulatorpin", "iothreadpin"],
+        replacements,
+    )
+}
+
+fn patch_numa_tune(
+    xml: &str,
+    domain: Node<'_, '_>,
+    config: &VmNumaTuneConfig,
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    let desired = match config {
+        VmOptionalValue::Preserve => return Ok(()),
+        VmOptionalValue::Remove => String::new(),
+        VmOptionalValue::Value(tune) => domain_xml::build_numa_tune_xml(tune.launch()),
+    };
+    patch_tuning_container(
+        xml,
+        domain,
+        "numatune",
+        &desired,
+        &["memory", "memnode"],
+        replacements,
+    )
+}
+
+fn patch_tuning_container(
+    xml: &str,
+    domain: Node<'_, '_>,
+    tag: &str,
+    desired: &str,
+    managed_children: &[&str],
+    replacements: &mut Vec<XmlReplacement>,
+) -> Result<()> {
+    if let Some(current) = optional_child(domain, tag) {
+        let empty = format!("<{tag}/>");
+        let merged = vm_reconcile::merge_tuning_xml(
+            xml,
+            current,
+            if desired.is_empty() { &empty } else { desired },
+            managed_children,
+        )
+        .unwrap_or_default();
+        let range = current.range();
+        replacements.push(XmlReplacement {
+            range: line_start(xml, range.start)..line_end(xml, range.end),
+            value: merged,
+        });
+    } else if !desired.is_empty() {
+        let anchor = if tag == "numatune" {
+            optional_child(domain, "cputune")
+                .or_else(|| optional_child(domain, "iothreads"))
+                .unwrap_or(required_child(domain, "vcpu")?)
+        } else {
+            optional_child(domain, "iothreads").unwrap_or(required_child(domain, "vcpu")?)
+        };
+        let end = line_end(xml, anchor.range().end);
+        replacements.push(XmlReplacement {
+            range: end..end,
+            value: desired.to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -2441,6 +2543,133 @@ fn cpu_from_domain_xml(domain: Node<'_, '_>, vcpus: u32) -> Result<Option<VmCpu>
     }))
 }
 
+fn vcpu_tune_from_domain_xml(domain: Node<'_, '_>) -> Result<VmVcpuTuneConfig> {
+    let Some(cpu_tune) = optional_child(domain, "cputune") else {
+        return Ok(VmVcpuTuneConfig::Preserve);
+    };
+    let mut vcpu_pins = Vec::new();
+    let mut vcpu_ids = BTreeSet::new();
+    for pin in cpu_tune
+        .children()
+        .filter(|child| child.has_tag_name("vcpupin"))
+    {
+        let vcpu = required_u32_attr(pin, "vcpu")?;
+        if !vcpu_ids.insert(vcpu) {
+            bail!("duplicate vcpupin for vCPU {vcpu} in domain XML");
+        }
+        vcpu_pins.push(VmVcpuPin {
+            vcpu,
+            cpuset: required_attr(pin, "cpuset")?.to_string(),
+        });
+    }
+    let emulator_pins = cpu_tune
+        .children()
+        .filter(|child| child.has_tag_name("emulatorpin"))
+        .collect::<Vec<_>>();
+    if emulator_pins.len() > 1 {
+        bail!("domain XML contains multiple emulatorpin elements");
+    }
+    let emulator_pin = emulator_pins
+        .first()
+        .map(|pin| {
+            Ok::<_, anyhow::Error>(VmCpuPin {
+                cpuset: required_attr(*pin, "cpuset")?.to_string(),
+            })
+        })
+        .transpose()?;
+    let mut io_thread_pins = Vec::new();
+    let mut io_thread_ids = BTreeSet::new();
+    for pin in cpu_tune
+        .children()
+        .filter(|child| child.has_tag_name("iothreadpin"))
+    {
+        let io_thread = required_u32_attr(pin, "iothread")?;
+        if !io_thread_ids.insert(io_thread) {
+            bail!("duplicate iothreadpin for IOThread {io_thread} in domain XML");
+        }
+        io_thread_pins.push(VmIoThreadPin {
+            io_thread,
+            cpuset: required_attr(pin, "cpuset")?.to_string(),
+        });
+    }
+    if vcpu_pins.is_empty() && emulator_pin.is_none() && io_thread_pins.is_empty() {
+        Ok(VmVcpuTuneConfig::Preserve)
+    } else {
+        Ok(VmVcpuTuneConfig::configured(VmVcpuTune {
+            vcpu_pins,
+            emulator_pin,
+            io_thread_pins,
+        }))
+    }
+}
+
+fn numa_tune_from_domain_xml(domain: Node<'_, '_>) -> Result<VmNumaTuneConfig> {
+    let Some(numa_tune) = optional_child(domain, "numatune") else {
+        return Ok(VmNumaTuneConfig::Preserve);
+    };
+    let memory_nodes = numa_tune
+        .children()
+        .filter(|child| child.has_tag_name("memory"))
+        .collect::<Vec<_>>();
+    if memory_nodes.len() > 1 {
+        bail!("domain XML contains multiple numatune memory elements");
+    }
+    let memory = memory_nodes
+        .first()
+        .map(|memory| {
+            let mode = memory.attribute("mode").map(parse_numa_mode).transpose()?;
+            let placement = memory
+                .attribute("placement")
+                .map(parse_numa_placement)
+                .transpose()?;
+            Ok::<_, anyhow::Error>(VmNumaMemory {
+                mode,
+                placement,
+                nodeset: memory.attribute("nodeset").map(str::to_string),
+            })
+        })
+        .transpose()?;
+    let mut mem_nodes = Vec::new();
+    let mut cell_ids = BTreeSet::new();
+    for node in numa_tune
+        .children()
+        .filter(|child| child.has_tag_name("memnode"))
+    {
+        let cell_id = required_u32_attr(node, "cellid")?;
+        if !cell_ids.insert(cell_id) {
+            bail!("duplicate numatune memnode for cell {cell_id} in domain XML");
+        }
+        mem_nodes.push(VmNumaMemNode {
+            cell_id,
+            mode: parse_numa_mode(required_attr(node, "mode")?)?,
+            nodeset: required_attr(node, "nodeset")?.to_string(),
+        });
+    }
+    if memory.is_none() && mem_nodes.is_empty() {
+        Ok(VmNumaTuneConfig::Preserve)
+    } else {
+        Ok(VmNumaTuneConfig::configured(VmNumaTune {
+            memory,
+            mem_nodes,
+        }))
+    }
+}
+
+fn parse_numa_mode(value: &str) -> Result<VmNumaMode> {
+    VmNumaMode::from_xml(value).with_context(|| format!("unsupported NUMA mode {value:?}"))
+}
+
+fn parse_numa_placement(value: &str) -> Result<VmNumaPlacement> {
+    VmNumaPlacement::from_xml(value)
+        .with_context(|| format!("unsupported NUMA placement {value:?}"))
+}
+
+fn required_attr<'a>(node: Node<'a, '_>, name: &str) -> Result<&'a str> {
+    node.attribute(name)
+        .filter(|value| !value.trim().is_empty())
+        .with_context(|| format!("domain XML <{}> is missing {name}", node.tag_name().name()))
+}
+
 fn required_u32_attr(node: Node<'_, '_>, name: &str) -> Result<u32> {
     node.attribute(name)
         .with_context(|| format!("domain XML <{}> is missing {name}", node.tag_name().name()))?
@@ -3190,6 +3419,9 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
         }
     }
 
+    validate_vcpu_tune(manifest, vcpus)?;
+    validate_numa_tune(manifest)?;
+
     let uses_io_threads = manifest
         .disks
         .iter()
@@ -3280,6 +3512,193 @@ fn validate_manifest(manifest: &VmManifest) -> Result<()> {
         bail!("cdrom ISO {} does not exist", cdrom.display());
     }
 
+    Ok(())
+}
+
+fn validate_vcpu_tune(manifest: &VmManifest, vcpus: u32) -> Result<()> {
+    let Some(tune) = manifest.vcpu_tune.as_ref() else {
+        return Ok(());
+    };
+    let mut ids = BTreeSet::new();
+    for pin in &tune.vcpu_pins {
+        if pin.vcpu >= vcpus {
+            bail!(
+                "vcpuTune vCPU {} is outside the configured range 0..{}",
+                pin.vcpu,
+                vcpus - 1
+            );
+        }
+        if !ids.insert(pin.vcpu) {
+            bail!("duplicate vcpuTune pin for vCPU {}", pin.vcpu);
+        }
+        validate_cpu_set(&pin.cpuset, "vcpuTune vcpuPins cpuset")?;
+    }
+    if let Some(pin) = &tune.emulator_pin {
+        validate_cpu_set(&pin.cpuset, "vcpuTune emulatorPin cpuset")?;
+    }
+    if !tune.io_thread_pins.is_empty() && manifest.io_threads.is_none() {
+        bail!("vcpuTune ioThreadPins requires ioThreads");
+    }
+    let mut io_thread_ids = BTreeSet::new();
+    for pin in &tune.io_thread_pins {
+        if pin.io_thread == 0 {
+            bail!("vcpuTune IOThread ID must be greater than 0");
+        }
+        if !io_thread_ids.insert(pin.io_thread) {
+            bail!("duplicate vcpuTune pin for IOThread {}", pin.io_thread);
+        }
+        validate_cpu_set(&pin.cpuset, "vcpuTune ioThreadPins cpuset")?;
+    }
+    Ok(())
+}
+
+fn validate_numa_tune(manifest: &VmManifest) -> Result<()> {
+    let Some(tune) = manifest.numa_tune.as_ref() else {
+        return Ok(());
+    };
+    if let Some(memory) = &tune.memory {
+        if memory.placement == Some(VmNumaPlacement::Auto) {
+            if memory.nodeset.is_some() {
+                bail!("numaTune memory placement auto cannot be combined with nodeset");
+            }
+            if !tune.mem_nodes.is_empty() {
+                bail!("numaTune memory placement auto cannot be combined with memNodes");
+            }
+        }
+        if let Some(nodeset) = &memory.nodeset {
+            validate_cpu_set(nodeset, "numaTune memory nodeset")?;
+        }
+        if memory.mode == Some(VmNumaMode::Restrictive)
+            && tune
+                .mem_nodes
+                .iter()
+                .any(|node| node.mode != VmNumaMode::Restrictive)
+        {
+            bail!("restrictive numaTune memory requires restrictive memNodes");
+        }
+    }
+    let mut cell_ids = BTreeSet::new();
+    for node in &tune.mem_nodes {
+        if !cell_ids.insert(node.cell_id) {
+            bail!("duplicate numaTune memNode for cell {}", node.cell_id);
+        }
+        validate_cpu_set(&node.nodeset, "numaTune memNodes nodeset")?;
+    }
+    Ok(())
+}
+
+fn validate_cpu_set(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        bail!("{field} must be a non-empty libvirt CPU set");
+    }
+    let mut has_inclusion = false;
+    for item in value.split(',') {
+        if item.is_empty() {
+            bail!("{field} contains an empty item");
+        }
+        if let Some(excluded) = item.strip_prefix('^') {
+            if !has_inclusion || excluded.is_empty() || excluded.contains('-') {
+                bail!("{field} has invalid exclusion {item:?}");
+            }
+            excluded
+                .parse::<u32>()
+                .with_context(|| format!("{field} has invalid CPU or node {item:?}"))?;
+            continue;
+        }
+        has_inclusion = true;
+        let mut range = item.split('-');
+        let start = range
+            .next()
+            .expect("split always returns an item")
+            .parse::<u32>()
+            .with_context(|| format!("{field} has invalid CPU or node {item:?}"))?;
+        if let Some(end) = range.next() {
+            let end = end
+                .parse::<u32>()
+                .with_context(|| format!("{field} has invalid range {item:?}"))?;
+            if range.next().is_some() || start > end {
+                bail!("{field} has invalid range {item:?}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_manifest_domain_context(manifest: &VmManifest, current_xml: &str) -> Result<()> {
+    let current_document = (!current_xml.is_empty())
+        .then(|| Document::parse(current_xml).context("failed to parse existing domain XML"))
+        .transpose()?;
+    let current_domain = current_document.as_ref().map(Document::root_element);
+
+    let preserved_vcpu_tune = match (&manifest.vcpu_tune, current_domain) {
+        (VmOptionalValue::Preserve, Some(domain)) => vcpu_tune_from_domain_xml(domain)?,
+        _ => VmVcpuTuneConfig::Preserve,
+    };
+    let vcpu_tune = match &manifest.vcpu_tune {
+        VmOptionalValue::Value(tune) => Some(tune),
+        VmOptionalValue::Preserve => preserved_vcpu_tune.as_ref(),
+        VmOptionalValue::Remove => None,
+    };
+    if let Some(tune) = vcpu_tune {
+        let vcpus = effective_vcpus(manifest)?;
+        if let Some(pin) = tune.vcpu_pins.iter().find(|pin| pin.vcpu >= vcpus) {
+            bail!(
+                "vcpuTune vCPU {} is outside the configured range 0..{}",
+                pin.vcpu,
+                vcpus - 1
+            );
+        }
+        if !tune.io_thread_pins.is_empty() {
+            let io_threads = manifest
+                .io_threads
+                .context("vcpuTune ioThreadPins requires ioThreads")?;
+            let explicit_ids = current_domain
+                .and_then(|domain| optional_child(domain, "iothreadids"))
+                .map(|ids| {
+                    ids.children()
+                        .filter(|child| child.has_tag_name("iothread"))
+                        .map(|thread| required_u32_attr(thread, "id"))
+                        .collect::<Result<BTreeSet<_>>>()
+                })
+                .transpose()?;
+            for pin in &tune.io_thread_pins {
+                let exists = explicit_ids.as_ref().map_or_else(
+                    || pin.io_thread <= u32::from(io_threads.count),
+                    |ids| ids.contains(&pin.io_thread),
+                );
+                if !exists {
+                    bail!(
+                        "vcpuTune IOThread {} does not exist in the VM IOThread configuration",
+                        pin.io_thread
+                    );
+                }
+            }
+        }
+    }
+
+    let Some(tune) = manifest.numa_tune.as_ref() else {
+        return Ok(());
+    };
+    if tune.mem_nodes.is_empty() {
+        return Ok(());
+    }
+    let domain = current_domain
+        .context("numaTune memNodes requires an existing VM with guest NUMA topology")?;
+    let cells = optional_child(domain, "cpu")
+        .and_then(|cpu| optional_child(cpu, "numa"))
+        .into_iter()
+        .flat_map(|numa| numa.children())
+        .filter(|cell| cell.has_tag_name("cell"))
+        .map(|cell| required_u32_attr(cell, "id"))
+        .collect::<Result<BTreeSet<_>>>()?;
+    for node in &tune.mem_nodes {
+        if !cells.contains(&node.cell_id) {
+            bail!(
+                "numaTune memNode cellId {} does not exist in the VM guest NUMA topology",
+                node.cell_id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -5210,6 +5629,7 @@ pub fn create_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiR
         .map_err(VmApiError::Internal)?;
     normalize_manifest_paths(&mut manifest, &base_dir).map_err(VmApiError::InvalidRequest)?;
     validate_manifest(&manifest).map_err(VmApiError::InvalidRequest)?;
+    validate_manifest_domain_context(&manifest, "").map_err(VmApiError::InvalidRequest)?;
     validate_new_vm_disks(&manifest).map_err(VmApiError::InvalidRequest)?;
 
     let boot = manifest_boot_order(&manifest);
@@ -5244,6 +5664,7 @@ pub(crate) fn define_new_by_manifest(
         .map_err(VmApiError::Internal)?;
     normalize_manifest_paths(&mut manifest, &base_dir).map_err(VmApiError::InvalidRequest)?;
     validate_manifest(&manifest).map_err(VmApiError::InvalidRequest)?;
+    validate_manifest_domain_context(&manifest, "").map_err(VmApiError::InvalidRequest)?;
     validate_new_vm_disks(&manifest).map_err(VmApiError::InvalidRequest)?;
     let boot = manifest_boot_order(&manifest);
     let boot_devices = parse_boot_devices(&boot).map_err(VmApiError::InvalidRequest)?;
@@ -5322,6 +5743,8 @@ pub fn apply_by_manifest(connect_uri: &str, mut manifest: VmManifest) -> VmApiRe
     let current_xml =
         current_domain_xml(connect_uri, &manifest.name).map_err(VmApiError::Internal)?;
     validate_manifest(&manifest).map_err(VmApiError::InvalidRequest)?;
+    validate_manifest_domain_context(&manifest, &current_xml)
+        .map_err(VmApiError::InvalidRequest)?;
 
     let boot = manifest_boot_order(&manifest);
     let boot_devices = parse_boot_devices(&boot).map_err(VmApiError::InvalidRequest)?;
@@ -5815,6 +6238,8 @@ mod tests {
                 count: 4,
                 queues: 4,
             }),
+            vcpu_tune: None,
+            numa_tune: None,
             disks: &disks,
             cdroms: &cdroms,
             serial_log: Some(Path::new("/logs/install-os.serial.log")),
@@ -6004,6 +6429,8 @@ mod tests {
             cpu: None,
             memory: None,
             io_threads: None,
+            vcpu_tune: Default::default(),
+            numa_tune: Default::default(),
             disks: vec![VmDiskEntry::present(VmDisk {
                 id: None,
                 disk_type: VmDiskType::File,
@@ -6455,6 +6882,165 @@ mod tests {
             yaml_manifest.cpu.unwrap().vendor_id.as_deref(),
             Some("HygonGenuine")
         );
+    }
+
+    #[test]
+    fn round_trips_cpu_and_numa_tuning_through_xml_and_yaml() {
+        let xml = test_domain_xml().replace(
+            "  <os>",
+            "  <cputune>\n    <vcpupin vcpu='0' cpuset='2-3'/>\n    <emulatorpin cpuset='0-1'/>\n    <iothreadpin iothread='1' cpuset='4'/>\n  </cputune>\n  <numatune>\n    <memory mode='strict' placement='static' nodeset='0-1'/>\n    <memnode cellid='0' mode='preferred' nodeset='1'/>\n  </numatune>\n  <os>",
+        );
+        let manifest = manifest_from_domain_xml(&xml).expect("tuning XML should parse");
+        let cpu = manifest.vcpu_tune.as_ref().unwrap();
+        assert_eq!(cpu.vcpu_pins[0].cpuset, "2-3");
+        assert_eq!(cpu.emulator_pin.as_ref().unwrap().cpuset, "0-1");
+        assert_eq!(cpu.io_thread_pins[0].io_thread, 1);
+        let numa = manifest.numa_tune.as_ref().unwrap();
+        assert_eq!(
+            numa.memory.as_ref().unwrap().nodeset.as_deref(),
+            Some("0-1")
+        );
+        assert_eq!(numa.mem_nodes[0].mode, VmNumaMode::Preferred);
+
+        let yaml = serialize_manifest_yaml(&manifest).expect("tuning should serialize");
+        let reparsed = parse_manifest_yaml(&yaml).expect("tuning YAML should parse");
+        assert_eq!(reparsed.vcpu_tune, manifest.vcpu_tune);
+        assert_eq!(reparsed.numa_tune, manifest.numa_tune);
+    }
+
+    #[test]
+    fn reconciles_tuning_and_preserves_unknown_children() {
+        let xml = test_domain_xml().replace(
+            "  <os>",
+            "  <cputune>\n    <vcpupin vcpu='0' cpuset='0'/>\n    <shares>2048</shares>\n  </cputune>\n  <numatune>\n    <memory mode='preferred' nodeset='1'/>\n  </numatune>\n  <os>",
+        );
+        let mut manifest = test_manifest(vec![test_file_disk(
+            "/vm/sys.qcow2",
+            Some("vda"),
+            VmDiskBus::VirtioBlk,
+        )]);
+        manifest.vcpu_tune = VmVcpuTuneConfig::configured(VmVcpuTune {
+            vcpu_pins: vec![VmVcpuPin {
+                vcpu: 1,
+                cpuset: "2-3".to_string(),
+            }],
+            emulator_pin: Some(VmCpuPin {
+                cpuset: "0-1".to_string(),
+            }),
+            io_thread_pins: Vec::new(),
+        });
+        manifest.numa_tune = VmNumaTuneConfig::configured(VmNumaTune {
+            memory: Some(VmNumaMemory {
+                mode: Some(VmNumaMode::Strict),
+                placement: Some(VmNumaPlacement::Static),
+                nodeset: Some("0".to_string()),
+            }),
+            mem_nodes: Vec::new(),
+        });
+
+        let patched = patch_domain_xml(&xml, &manifest, &[BootDevice::Hd]).unwrap();
+        assert!(patched.contains("<shares>2048</shares>"));
+        assert!(!patched.contains("vcpupin vcpu='0'"));
+        assert!(patched.contains("<vcpupin vcpu='1' cpuset='2-3'/>"));
+        assert!(patched.contains("<emulatorpin cpuset='0-1'/>"));
+        assert!(patched.contains("<memory mode='strict' placement='static' nodeset='0'/>"));
+
+        let patched_again = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd]).unwrap();
+        assert_eq!(patched_again, patched);
+
+        manifest.vcpu_tune = VmVcpuTuneConfig::Remove;
+        manifest.numa_tune = VmNumaTuneConfig::Remove;
+        let removed = patch_domain_xml(&patched, &manifest, &[BootDevice::Hd]).unwrap();
+        assert!(removed.contains("<cputune>"));
+        assert!(removed.contains("<shares>2048</shares>"));
+        assert!(!removed.contains("vcpupin"));
+        assert!(!removed.contains("emulatorpin"));
+        assert!(!removed.contains("<numatune>"));
+    }
+
+    #[test]
+    fn validates_cpu_sets_and_tuning_relationships() {
+        for valid in ["0", "0,2", "1-4", "1-4,^2"] {
+            validate_cpu_set(valid, "test").expect(valid);
+        }
+        for invalid in ["", "0,", "2-1", "^1", "0-2,^1-2", "0 1", "a"] {
+            assert!(
+                validate_cpu_set(invalid, "test").is_err(),
+                "accepted {invalid}"
+            );
+        }
+
+        let mut manifest = test_manifest(Vec::new());
+        manifest.vcpu_tune = VmVcpuTuneConfig::configured(VmVcpuTune {
+            vcpu_pins: vec![VmVcpuPin {
+                vcpu: 2,
+                cpuset: "0".to_string(),
+            }],
+            emulator_pin: None,
+            io_thread_pins: Vec::new(),
+        });
+        assert!(validate_vcpu_tune(&manifest, 2).is_err());
+
+        manifest.numa_tune = VmNumaTuneConfig::configured(VmNumaTune {
+            memory: Some(VmNumaMemory {
+                mode: Some(VmNumaMode::Strict),
+                placement: Some(VmNumaPlacement::Auto),
+                nodeset: Some("0".to_string()),
+            }),
+            mem_nodes: Vec::new(),
+        });
+        assert!(validate_numa_tune(&manifest).is_err());
+    }
+
+    #[test]
+    fn validates_memnodes_against_existing_guest_numa_cells() {
+        let mut manifest = test_manifest(Vec::new());
+        manifest.numa_tune = VmNumaTuneConfig::configured(VmNumaTune {
+            memory: None,
+            mem_nodes: vec![VmNumaMemNode {
+                cell_id: 1,
+                mode: VmNumaMode::Strict,
+                nodeset: "0".to_string(),
+            }],
+        });
+        assert!(validate_manifest_domain_context(&manifest, "").is_err());
+
+        let xml = test_domain_xml().replace(
+            "  <devices>",
+            "  <cpu><numa><cell id='0' cpus='0' memory='1024' unit='MiB'/><cell id='1' cpus='1' memory='1024' unit='MiB'/></numa></cpu>\n  <devices>",
+        );
+        validate_manifest_domain_context(&manifest, &xml).unwrap();
+        if let VmOptionalValue::Value(tune) = &mut manifest.numa_tune {
+            tune.mem_nodes[0].cell_id = 2;
+        }
+        assert!(validate_manifest_domain_context(&manifest, &xml).is_err());
+    }
+
+    #[test]
+    fn validates_preserved_tuning_against_target_resources() {
+        let manifest = test_manifest(Vec::new());
+        let xml = test_domain_xml().replace(
+            "  <devices>",
+            "  <cputune><vcpupin vcpu='2' cpuset='0'/></cputune>\n  <devices>",
+        );
+        assert!(validate_manifest_domain_context(&manifest, &xml).is_err());
+
+        let mut manifest = test_manifest(Vec::new());
+        manifest.io_threads = Some(VmIoThreads {
+            count: 2,
+            queues: None,
+        });
+        let xml = test_domain_xml().replace(
+            "  <devices>",
+            "  <iothreads>2</iothreads>\n  <iothreadids><iothread id='2'/><iothread id='4'/></iothreadids>\n  <cputune><iothreadpin iothread='4' cpuset='0'/></cputune>\n  <devices>",
+        );
+        validate_manifest_domain_context(&manifest, &xml).unwrap();
+
+        let invalid_xml = xml.replace("iothread='4'", "iothread='3'");
+        assert!(validate_manifest_domain_context(&manifest, &invalid_xml).is_err());
+
+        manifest.io_threads = None;
+        assert!(validate_manifest_domain_context(&manifest, &xml).is_err());
     }
 
     #[test]
@@ -6922,6 +7508,8 @@ disks:
             cpu: None,
             memory: None,
             io_threads: None,
+            vcpu_tune: Default::default(),
+            numa_tune: Default::default(),
             disks: vec![VmDiskEntry::present(VmDisk {
                 id: None,
                 disk_type: VmDiskType::File,
@@ -7012,7 +7600,7 @@ disks:
         )]))
         .expect("manifest should serialize");
 
-        assert!(yaml.starts_with("schemaVersion: 5\n"));
+        assert!(yaml.starts_with("schemaVersion: 6\n"));
         assert!(yaml.contains("name: install-os\n"));
     }
 
@@ -7089,6 +7677,44 @@ disks: []
     }
 
     #[test]
+    fn parses_schema_six_cpu_and_numa_tuning() {
+        let yaml = r#"schemaVersion: 6
+name: vm
+vcpus: 2
+vcpuTune:
+  vcpuPins:
+  - vcpu: 0
+    cpuset: 2-3
+  emulatorPin:
+    cpuset: 0-1
+numaTune:
+  memory:
+    mode: strict
+    placement: static
+    nodeset: "0"
+disks: []
+"#;
+
+        let manifest = parse_manifest_yaml(yaml).expect("tuning should parse");
+        let cpu = manifest.vcpu_tune.as_ref().unwrap();
+        assert_eq!(cpu.vcpu_pins[0].vcpu, 0);
+        assert_eq!(cpu.emulator_pin.as_ref().unwrap().cpuset, "0-1");
+        let numa = manifest.numa_tune.as_ref().unwrap();
+        assert_eq!(numa.memory.as_ref().unwrap().mode, Some(VmNumaMode::Strict));
+
+        let output = serialize_manifest_yaml(&manifest).expect("tuning should serialize");
+        assert!(output.starts_with("schemaVersion: 6\n"));
+        assert!(output.contains("vcpuTune:"));
+        assert!(output.contains("numaTune:"));
+
+        for field in ["vcpuTune: {}", "numaTune: {}"] {
+            let old = format!("schemaVersion: 5\nname: vm\n{field}\ndisks: []\n");
+            let error = parse_manifest_yaml(&old).expect_err("schema 5 accepted tuning");
+            assert!(error.to_string().contains("requires schemaVersion 6"));
+        }
+    }
+
+    #[test]
     fn parses_and_serializes_absent_disk_tombstone() {
         let yaml = "schemaVersion: 2\nname: vm\ndisks:\n- id: data\n  state: absent\n";
 
@@ -7096,7 +7722,7 @@ disks: []
         let output = serialize_manifest_yaml(&manifest).expect("absent disk should serialize");
 
         assert_eq!(manifest.disks[0].absent_id(), Some("data"));
-        assert!(output.starts_with("schemaVersion: 5\n"));
+        assert!(output.starts_with("schemaVersion: 6\n"));
         assert!(output.contains("- id: data\n  state: absent\n"));
         assert!(!output.contains("path:"));
     }
@@ -7216,7 +7842,7 @@ interfaces:
         );
 
         let output = serialize_manifest_yaml(&manifest).unwrap();
-        assert!(output.starts_with("schemaVersion: 5\n"));
+        assert!(output.starts_with("schemaVersion: 6\n"));
         assert!(output.contains("type: bridge"));
         assert!(output.contains("state: absent"));
         assert!(output.contains("vlan: 100"));
@@ -7367,10 +7993,10 @@ disks:
 
     #[test]
     fn rejects_unsupported_manifest_schema_version() {
-        let error = parse_manifest_yaml("schemaVersion: 6\nname: vm\ndisks: []\n")
+        let error = parse_manifest_yaml("schemaVersion: 7\nname: vm\ndisks: []\n")
             .expect_err("future schema should be rejected");
 
-        assert!(error.to_string().contains("unsupported VM schemaVersion 6"));
+        assert!(error.to_string().contains("unsupported VM schemaVersion 7"));
     }
 
     #[test]
@@ -7463,6 +8089,8 @@ disks:
             cpu: None,
             memory: None,
             io_threads: None,
+            vcpu_tune: Default::default(),
+            numa_tune: Default::default(),
             disks: disks.into_iter().map(VmDiskEntry::present).collect(),
             cdrom: None,
             cdroms: None,
@@ -7664,7 +8292,7 @@ disks:
         let manifest = parse_manifest_yaml("schemaVersion: 4\nname: vm\ndisks: []\n").unwrap();
         assert_eq!(manifest.network.as_deref(), Some("default"));
         let output = serialize_manifest_yaml(&manifest).unwrap();
-        assert!(output.starts_with("schemaVersion: 5\n"));
+        assert!(output.starts_with("schemaVersion: 6\n"));
 
         let user_interface = r#"schemaVersion: 4
 name: vm

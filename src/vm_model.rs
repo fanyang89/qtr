@@ -6,7 +6,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use crate::{
     config::{DiskFormat, GraphicsMode},
     domain_xml::{
-        VmLaunchCpuTopology, VmLaunchDiskIoTuneSpec, VmLaunchIoThreadsSpec, VmLaunchMemorySpec,
+        VmLaunchCpuPinSpec, VmLaunchCpuTopology, VmLaunchDiskIoTuneSpec, VmLaunchIoThreadPinSpec,
+        VmLaunchIoThreadsSpec, VmLaunchMemorySpec, VmLaunchNumaMemNodeSpec, VmLaunchNumaMemorySpec,
+        VmLaunchNumaTuneSpec, VmLaunchVcpuTuneSpec,
     },
 };
 
@@ -22,6 +24,10 @@ pub struct VmManifest {
     pub memory: Option<VmMemory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub io_threads: Option<VmIoThreads>,
+    #[serde(default, skip_serializing_if = "VmOptionalValue::is_preserve")]
+    pub vcpu_tune: VmVcpuTuneConfig,
+    #[serde(default, skip_serializing_if = "VmOptionalValue::is_preserve")]
+    pub numa_tune: VmNumaTuneConfig,
     pub disks: Vec<VmDiskEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdrom: Option<PathBuf>,
@@ -277,6 +283,169 @@ impl VmCpuTopology {
             sockets: self.sockets,
             cores: self.cores,
             threads: self.threads,
+        }
+    }
+}
+
+pub type VmVcpuTuneConfig = VmOptionalValue<VmVcpuTune>;
+pub type VmNumaTuneConfig = VmOptionalValue<VmNumaTune>;
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmVcpuTune {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vcpu_pins: Vec<VmVcpuPin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emulator_pin: Option<VmCpuPin>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub io_thread_pins: Vec<VmIoThreadPin>,
+}
+
+impl VmVcpuTune {
+    pub(crate) fn launch(&self) -> VmLaunchVcpuTuneSpec<'_> {
+        VmLaunchVcpuTuneSpec {
+            vcpu_pins: self
+                .vcpu_pins
+                .iter()
+                .map(|pin| VmLaunchCpuPinSpec {
+                    id: pin.vcpu,
+                    cpuset: &pin.cpuset,
+                })
+                .collect(),
+            emulator_pin: self.emulator_pin.as_ref().map(|pin| pin.cpuset.as_str()),
+            io_thread_pins: self
+                .io_thread_pins
+                .iter()
+                .map(|pin| VmLaunchIoThreadPinSpec {
+                    id: pin.io_thread,
+                    cpuset: &pin.cpuset,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmVcpuPin {
+    pub vcpu: u32,
+    pub cpuset: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmCpuPin {
+    pub cpuset: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmIoThreadPin {
+    #[serde(rename = "ioThread")]
+    #[schema(minimum = 1)]
+    pub io_thread: u32,
+    pub cpuset: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmNumaTune {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<VmNumaMemory>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mem_nodes: Vec<VmNumaMemNode>,
+}
+
+impl VmNumaTune {
+    pub(crate) fn launch(&self) -> VmLaunchNumaTuneSpec<'_> {
+        VmLaunchNumaTuneSpec {
+            memory: self.memory.as_ref().map(|memory| VmLaunchNumaMemorySpec {
+                mode: memory.mode.map(VmNumaMode::as_xml),
+                placement: memory.placement.map(VmNumaPlacement::as_xml),
+                nodeset: memory.nodeset.as_deref(),
+            }),
+            mem_nodes: self
+                .mem_nodes
+                .iter()
+                .map(|node| VmLaunchNumaMemNodeSpec {
+                    cell_id: node.cell_id,
+                    mode: node.mode.as_xml(),
+                    nodeset: &node.nodeset,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmNumaMemory {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<VmNumaMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<VmNumaPlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodeset: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmNumaMemNode {
+    pub cell_id: u32,
+    pub mode: VmNumaMode,
+    pub nodeset: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum VmNumaMode {
+    Strict,
+    Preferred,
+    Interleave,
+    Restrictive,
+}
+
+impl VmNumaMode {
+    pub(crate) fn as_xml(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Preferred => "preferred",
+            Self::Interleave => "interleave",
+            Self::Restrictive => "restrictive",
+        }
+    }
+
+    pub(crate) fn from_xml(value: &str) -> Option<Self> {
+        match value {
+            "strict" => Some(Self::Strict),
+            "preferred" => Some(Self::Preferred),
+            "interleave" => Some(Self::Interleave),
+            "restrictive" => Some(Self::Restrictive),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum VmNumaPlacement {
+    Static,
+    Auto,
+}
+
+impl VmNumaPlacement {
+    pub(crate) fn as_xml(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub(crate) fn from_xml(value: &str) -> Option<Self> {
+        match value {
+            "static" => Some(Self::Static),
+            "auto" => Some(Self::Auto),
+            _ => None,
         }
     }
 }

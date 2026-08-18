@@ -2619,10 +2619,30 @@
               "null"
             ]
           },
+          "numaTune": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmNumaTune"
+              }
+            ]
+          },
           "serialLog": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "vcpuTune": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmVcpuTune"
+              }
             ]
           },
           "vcpus": {
@@ -2640,6 +2660,18 @@
             ],
             "format": "int32",
             "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "VmCpuPin": {
+        "type": "object",
+        "required": [
+          "cpuset"
+        ],
+        "properties": {
+          "cpuset": {
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -2715,6 +2747,24 @@
             "type": "string"
           }
         }
+      },
+      "VmIoThreadPin": {
+        "type": "object",
+        "required": [
+          "ioThread",
+          "cpuset"
+        ],
+        "properties": {
+          "cpuset": {
+            "type": "string"
+          },
+          "ioThread": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
       },
       "VmIoThreads": {
         "type": "object",
@@ -2815,6 +2865,98 @@
             "minimum": 0
           }
         }
+      },
+      "VmNumaMemNode": {
+        "type": "object",
+        "required": [
+          "cellId",
+          "mode",
+          "nodeset"
+        ],
+        "properties": {
+          "cellId": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "mode": {
+            "$ref": "#/components/schemas/VmNumaMode"
+          },
+          "nodeset": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "VmNumaMemory": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmNumaMode"
+              }
+            ]
+          },
+          "nodeset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmNumaPlacement"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "VmNumaMode": {
+        "type": "string",
+        "enum": [
+          "strict",
+          "preferred",
+          "interleave",
+          "restrictive"
+        ]
+      },
+      "VmNumaPlacement": {
+        "type": "string",
+        "enum": [
+          "static",
+          "auto"
+        ]
+      },
+      "VmNumaTune": {
+        "type": "object",
+        "properties": {
+          "memNodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VmNumaMemNode"
+            }
+          },
+          "memory": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmNumaMemory"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "VmSummary": {
         "type": "object",
@@ -3017,6 +3159,52 @@
             "$ref": "#/components/schemas/VmDiskType"
           }
         }
+      },
+      "VmVcpuPin": {
+        "type": "object",
+        "required": [
+          "vcpu",
+          "cpuset"
+        ],
+        "properties": {
+          "cpuset": {
+            "type": "string"
+          },
+          "vcpu": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "VmVcpuTune": {
+        "type": "object",
+        "properties": {
+          "emulatorPin": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VmCpuPin"
+              }
+            ]
+          },
+          "ioThreadPins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VmIoThreadPin"
+            }
+          },
+          "vcpuPins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VmVcpuPin"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "VncTicketResponse": {
         "type": "object",

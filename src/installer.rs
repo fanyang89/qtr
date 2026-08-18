@@ -552,6 +552,8 @@ fn fedora_manifest(args: &VmInstallFedoraArgs, disk: &Path, serial_log: &Path) -
             max_mib: None,
         }),
         io_threads: None,
+        vcpu_tune: Default::default(),
+        numa_tune: Default::default(),
         disks: vec![VmDiskEntry::present(VmDisk {
             id: Some("root".to_string()),
             disk_type: VmDiskType::File,

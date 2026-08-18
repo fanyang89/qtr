@@ -1,4 +1,4 @@
-schemaVersion: 5
+schemaVersion: 6
 name: install-os
 machine:
   type: q35
@@ -20,6 +20,22 @@ memory:
 ioThreads:
   count: 4
   queues: 4
+vcpuTune:
+  vcpuPins:
+  - vcpu: 0
+    cpuset: "2-3"
+  - vcpu: 1
+    cpuset: "4-5"
+  emulatorPin:
+    cpuset: "0-1"
+  ioThreadPins:
+  - ioThread: 1
+    cpuset: "6"
+numaTune:
+  memory:
+    mode: strict
+    placement: static
+    nodeset: "0"
 disks:
 - id: root
   path: .tmp/disks/install-os.qcow2

@@ -17,7 +17,7 @@ Serial console file output is disabled by default. Configure `serialLog` in the 
 
 ## Schema and Capabilities
 
-VM YAML emitted by qtr includes `schemaVersion: 5`. Existing unversioned and version 1 through 4 definitions remain supported. Version 4 was briefly emitted by a removed VM profile and is read only for compatibility. `cpu.features` and `cpu.vendorId` require version 5.
+VM YAML emitted by qtr includes `schemaVersion: 6`. Existing unversioned and version 1 through 5 definitions remain supported. Version 4 was briefly emitted by a removed VM profile and is read only for compatibility. `cpu.features` and `cpu.vendorId` require version 5; `vcpuTune` and `numaTune` require version 6.
 
 Query the VM features reported by the current libvirt/QEMU host before using host-specific machine, firmware, CPU or device options:
 
@@ -38,7 +38,7 @@ Edit `cdroms[].media` to point at the installer ISO. Create or resize disks with
 The generated YAML is an installer-oriented template:
 
 ```yaml
-schemaVersion: 5
+schemaVersion: 6
 name: install-os
 machine:
   type: q35
@@ -85,6 +85,50 @@ cpu:
 ```
 
 `memory.sizeMiB` is the current guest memory allocation and optional `memory.maxMiB` sets the maximum allocation. Legacy `vcpus` and `memoryGiB` remain supported for existing definitions but cannot be mixed with their structured replacements.
+
+## CPU and NUMA Tuning
+
+`vcpuTune` maps vCPUs, the emulator thread, and IOThreads to host CPUs. CPU sets accept comma-separated IDs, ranges, and exclusions such as `0-7,^4`. Quote CPU and node sets so a single ID remains a YAML string. `ioThreadPins` requires `ioThreads`. New VMs use IDs from 1 through `ioThreads.count`; existing libvirt VMs may use IDs declared by `<iothreadids>`.
+
+```yaml
+vcpuTune:
+  vcpuPins:
+  - vcpu: 0
+    cpuset: "2-3"
+  - vcpu: 1
+    cpuset: "4-5"
+  emulatorPin:
+    cpuset: "0-1"
+  ioThreadPins:
+  - ioThread: 1
+    cpuset: "6"
+```
+
+`numaTune.memory` controls host NUMA memory policy for the whole VM. Modes are `strict`, `preferred`, `interleave`, and `restrictive`; placement is `static` or `auto`. Automatic placement cannot be combined with `nodeset` or `memNodes`.
+
+```yaml
+numaTune:
+  memory:
+    mode: strict
+    placement: static
+    nodeset: "0-1"
+```
+
+`memNodes` applies policy to guest NUMA cells. qtr does not create guest NUMA topology, so this option is accepted only when updating a VM whose existing libvirt XML already contains the referenced `<cpu><numa><cell>` IDs.
+
+```yaml
+numaTune:
+  memory:
+    mode: strict
+    placement: static
+    nodeset: "0-1"
+  memNodes:
+  - cellId: 0
+    mode: strict
+    nodeset: "0"
+```
+
+Omit `vcpuTune` or `numaTune` to preserve the existing tuning XML. Set a field to `null` to remove the corresponding qtr-managed nodes. An empty object clears all managed children while preserving unsupported libvirt children such as CPU shares and quotas. Applying tuning to a running VM updates its persistent definition and takes effect on the next start.
 
 ## Disks
 

@@ -67,9 +67,15 @@ virsh --connect qemu:///system uri
 "$qtr" vm list >"$artifact_dir/vm-list.txt"
 "$qtr" vm dump "$vm_name" --output "$artifact_dir/domain.yaml"
 "$qtr" vm dump "$vm_name" --xml >"$artifact_dir/domain.xml"
+grep -Fq "<vcpupin vcpu='0' cpuset='0'/>" "$artifact_dir/domain.xml"
+grep -Fq "<emulatorpin cpuset='0'/>" "$artifact_dir/domain.xml"
+grep -Fq "<iothreadpin iothread='1' cpuset='0'/>" "$artifact_dir/domain.xml"
+grep -Fq "<memory mode='strict' nodeset='0'/>" "$artifact_dir/domain.xml"
 
 "$qtr" vm start "$vm_name"
 assert_state running
+virsh --connect qemu:///system vcpupin "$vm_name" >"$artifact_dir/vcpupin.txt"
+virsh --connect qemu:///system numatune "$vm_name" >"$artifact_dir/numatune.txt"
 
 "$qtr" vm suspend "$vm_name"
 assert_state paused
