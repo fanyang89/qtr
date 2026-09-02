@@ -43,9 +43,10 @@ use crate::config::GraphicsMode;
 use crate::{
     config::WebArgs,
     jobs::{
-        FedoraInstallRequest, ImageCreateOutcome, ImageDeleteOutcome, ImageResizeOutcome,
-        InstallJob, InstallJobCreateOutcome, IsoDeleteOutcome, IsoPublishOutcome, JobRoots,
-        JobService, ManagedImage, ManagedImageStatus, ManagedIso, ManagedIsoStatus,
+        FedoraInstallRequest, ImageCloneOutcome, ImageCreateOutcome, ImageDeleteOutcome,
+        ImageResizeOutcome, InstallJob, InstallJobCreateOutcome, IsoDeleteOutcome,
+        IsoPublishOutcome, JobRoots, JobService, ManagedImage, ManagedImageStatus, ManagedIso,
+        ManagedIsoStatus,
     },
     network, vm,
 };
@@ -254,6 +255,12 @@ struct CreateImageRequest {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CloneImageRequest {
+    id: String,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AttachImageRequest {
     #[serde(default)]
     bus: vm::VmDiskBus,
@@ -286,6 +293,7 @@ struct ManagedImageResponse {
     virtual_size_bytes: Option<u64>,
     modified_at_ms: Option<i64>,
     format: Option<crate::config::DiskFormat>,
+    backing_image_id: Option<String>,
     status: ManagedImageStatus,
     attachments: Vec<vm::VmImageAttachment>,
     reserved_by_job_id: Option<String>,
@@ -331,6 +339,7 @@ impl ManagedImageResponse {
             virtual_size_bytes: image.virtual_size_bytes,
             modified_at_ms: image.modified_at_ms,
             format: image.format,
+            backing_image_id: image.backing_image_id,
             status: image.status,
             attachments,
             reserved_by_job_id,
@@ -656,6 +665,7 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(get_install_job))
         .routes(routes!(cancel_install_job))
         .routes(routes!(list_images, create_image))
+        .routes(routes!(clone_image))
         .routes(routes!(resize_image, delete_image))
         .routes(routes!(attach_image, detach_image))
         .routes(routes!(add_cdrom_tray))
@@ -1212,6 +1222,52 @@ async fn create_image(
             Json(ManagedImageResponse::new(image, Vec::new(), None)),
         )),
         ImageCreateOutcome::Conflict(detail) => Err(AppError::Conflict(detail)),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/images/{id}/clone",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Managed backing image ID")),
+    request_body = CloneImageRequest,
+    responses(
+        (status = CREATED, body = ManagedImageResponse),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn clone_image(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    request: std::result::Result<Json<CloneImageRequest>, JsonRejection>,
+) -> AppResult<(StatusCode, Json<ManagedImageResponse>)> {
+    let request = api_json(request)?;
+    let jobs = job_service(&state)?;
+    jobs.validate_existing_image_id(&id)
+        .map_err(AppError::BadRequest)?;
+    jobs.validate_image_id(&request.id, crate::config::DiskFormat::Qcow2)
+        .map_err(AppError::BadRequest)?;
+    let connect_uri = state.connect_uri;
+    let outcome = run_job_store(move || {
+        jobs.clone_image(&id, &request.id, |path| {
+            vm::domains_using_image(&connect_uri, path)
+        })
+    })
+    .await?;
+    match outcome {
+        ImageCloneOutcome::Created(image) => Ok((
+            StatusCode::CREATED,
+            Json(ManagedImageResponse::new(image, Vec::new(), None)),
+        )),
+        ImageCloneOutcome::NotFound => Err(AppError::NotFound),
+        ImageCloneOutcome::InUse(detail) | ImageCloneOutcome::Conflict(detail) => {
+            Err(AppError::Conflict(detail))
+        }
     }
 }
 
@@ -2614,6 +2670,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_image_clone_reports_and_protects_backing_image() {
+        let directory = std::env::temp_dir().join(format!("qtr-web-clone-test-{}", Uuid::new_v4()));
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("isos"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        assert!(matches!(
+            jobs.create_image("base.raw", crate::config::DiskFormat::Raw, 1024 * 1024)
+                .unwrap(),
+            ImageCreateOutcome::Created(_)
+        ));
+        assert!(matches!(
+            jobs.create_image("base.qcow2", crate::config::DiskFormat::Qcow2, 1024 * 1024)
+                .unwrap(),
+            ImageCreateOutcome::Created(_)
+        ));
+        let router = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+        );
+
+        let clone_request = || {
+            Request::post("/api/v1/images/base.raw/clone")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"id":"node-1.qcow2"}"#))
+                .unwrap()
+        };
+        let response = router.clone().oneshot(clone_request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let image: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(image["format"], "qcow2");
+        assert_eq!(image["backingImageId"], "base.raw");
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/images/base.qcow2/clone")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"id":"node-2.qcow2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let image: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(image["backingImageId"], "base.qcow2");
+
+        let response = router.clone().oneshot(clone_request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/images/missing.raw/clone")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"id":"missing-overlay.qcow2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/images/base.raw/resize")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"sizeBytes":2097152}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete("/api/v1/images/base.raw")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete("/api/v1/images/node-1.qcow2")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(directory.join("images/base.raw").is_file());
+
+        for id in ["node-2.qcow2", "base.qcow2"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::delete(format!("/api/v1/images/{id}"))
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete("/api/v1/images/base.raw")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            std::fs::read_dir(directory.join("images/.uploads"))
+                .unwrap()
+                .count(),
+            0
+        );
+
+        drop(router);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn managed_image_lifecycle_is_safe_and_complete() {
         let directory = std::env::temp_dir().join(format!("qtr-web-image-test-{}", Uuid::new_v4()));
         let jobs = JobService::start(JobRoots {
@@ -2652,6 +2860,19 @@ mod tests {
             "test-token".to_string(),
             Some(jobs),
         );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/images/root.qcow2/clone")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"id":"busy-clone.qcow2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
 
         let attach = Request::put(format!("/api/v1/vms/{name}/disks/data.qcow2"))
             .header(header::AUTHORIZATION, "Bearer test-token")

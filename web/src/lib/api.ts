@@ -145,6 +145,7 @@ export const imageAttachmentSchema = z.object({
 
 export const managedImageSchema = managedResourceSchema.extend({
   format: z.enum(['raw', 'qcow2']).nullish(),
+  backingImageId: z.string().nullish(),
   status: z.enum(['ready', 'invalid']),
   attachments: z.array(imageAttachmentSchema),
   reservedByJobId: z.string().nullish(),
@@ -345,6 +346,18 @@ export async function createDisk(
   input: ImageCreateInput
 ): Promise<ManagedImage> {
   return parseResponse(apiClient.post('/images', input), managedImageSchema)
+}
+
+export async function cloneDisk(
+  backingImageId: string,
+  id: string
+): Promise<ManagedImage> {
+  return parseResponse(
+    apiClient.post(`/images/${encodeURIComponent(backingImageId)}/clone`, {
+      id,
+    }),
+    managedImageSchema
+  )
 }
 
 export async function resizeDisk(

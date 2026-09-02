@@ -124,6 +124,7 @@ describe('VM API contract', () => {
         virtualSizeBytes: 8 * 1024 ** 3,
         modifiedAtMs: null,
         format: 'qcow2',
+        backingImageId: 'base.qcow2',
         status: 'ready',
         attachments: [
           {
@@ -135,8 +136,8 @@ describe('VM API contract', () => {
           },
         ],
         reservedByJobId: null,
-      }).attachments[0].vmName
-    ).toBe('fedora')
+      }).backingImageId
+    ).toBe('base.qcow2')
     expect(
       managedIsoSchema.parse({
         id: 'Fedora.iso',

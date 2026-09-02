@@ -1,4 +1,8 @@
-use std::{ffi::OsString, fs, path::Path};
+use std::{
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -59,10 +63,11 @@ fn qemu_img_info(path: &Path) -> Result<QemuImgInfo> {
         .with_context(|| format!("failed to parse qemu-img info for {}", path.display()))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ImageInfo {
     pub format: DiskFormat,
     pub virtual_size_bytes: u64,
+    pub backing_file: Option<PathBuf>,
 }
 
 pub(crate) fn image_info(path: &Path) -> Result<ImageInfo> {
@@ -82,6 +87,7 @@ pub(crate) fn image_info(path: &Path) -> Result<ImageInfo> {
     Ok(ImageInfo {
         format,
         virtual_size_bytes,
+        backing_file: info.backing_filename.map(PathBuf::from),
     })
 }
 

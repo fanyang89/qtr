@@ -229,6 +229,102 @@
         ]
       }
     },
+    "/api/v1/images/{id}/clone": {
+      "post": {
+        "tags": [
+          "resources"
+        ],
+        "operationId": "clone_image",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Managed backing image ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloneImageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedImageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/images/{id}/resize": {
       "post": {
         "tags": [
@@ -2041,6 +2137,18 @@
         },
         "additionalProperties": false
       },
+      "CloneImageRequest": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateImageRequest": {
         "type": "object",
         "required": [
@@ -2360,6 +2468,12 @@
             "items": {
               "$ref": "#/components/schemas/VmImageAttachment"
             }
+          },
+          "backingImageId": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "format": {
             "oneOf": [

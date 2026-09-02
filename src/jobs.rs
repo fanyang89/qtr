@@ -144,6 +144,7 @@ pub struct ManagedImage {
     pub virtual_size_bytes: Option<u64>,
     pub modified_at_ms: Option<i64>,
     pub format: Option<DiskFormat>,
+    pub backing_image_id: Option<String>,
     pub status: ManagedImageStatus,
 }
 
@@ -176,6 +177,13 @@ pub enum IsoPublishOutcome {
 
 pub enum ImageCreateOutcome {
     Created(ManagedImage),
+    Conflict(String),
+}
+
+pub enum ImageCloneOutcome {
+    Created(ManagedImage),
+    NotFound,
+    InUse(String),
     Conflict(String),
 }
 
@@ -616,6 +624,87 @@ impl JobService {
         result
     }
 
+    pub fn clone_image<F>(
+        &self,
+        source_id: &str,
+        destination_id: &str,
+        source_vm_users: F,
+    ) -> Result<ImageCloneOutcome>
+    where
+        F: FnOnce(&Path) -> Result<Vec<String>>,
+    {
+        let _guard = self.lock_resources()?;
+        validate_existing_image_id(source_id)?;
+        validate_image_id(destination_id, DiskFormat::Qcow2)?;
+
+        let source = self.roots.images.join(source_id);
+        match std::fs::symlink_metadata(&source) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => bail!("image {source_id:?} is not a regular file"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ImageCloneOutcome::NotFound);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if let Some(job_id) = self.active_image_user(source_id)? {
+            return Ok(ImageCloneOutcome::InUse(format!(
+                "backing image is reserved by automated install job {job_id}"
+            )));
+        }
+        if let Some(vm_name) = source_vm_users(&source)?.into_iter().next() {
+            return Ok(ImageCloneOutcome::InUse(format!(
+                "backing image is attached to VM {vm_name}"
+            )));
+        }
+        let source_image = image_from_path(source_id, &source)?;
+        let Some(source_format) = source_image.format else {
+            return Ok(ImageCloneOutcome::Conflict(format!(
+                "backing image {source_id:?} is not a valid disk"
+            )));
+        };
+
+        if let Some(job_id) = self.active_image_user(destination_id)? {
+            return Ok(ImageCloneOutcome::Conflict(format!(
+                "destination image is reserved by automated install job {job_id}"
+            )));
+        }
+        let destination = self.roots.images.join(destination_id);
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                return Ok(ImageCloneOutcome::Conflict(format!(
+                    "image {destination_id:?} already exists"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let backing_file = source
+            .canonicalize()
+            .with_context(|| format!("failed to resolve backing image {}", source.display()))?;
+        let staging = self
+            .roots
+            .images
+            .join(".uploads")
+            .join(format!("{}.partial", Uuid::new_v4()));
+        let result = (|| {
+            disk::create_overlay(&staging, &backing_file, source_format)?;
+            match std::fs::hard_link(&staging, &destination) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Ok(ImageCloneOutcome::Conflict(format!(
+                        "image {destination_id:?} already exists"
+                    )));
+                }
+                Err(error) => return Err(error.into()),
+            }
+            let image = image_from_path(destination_id, &destination)?;
+            Ok(ImageCloneOutcome::Created(image))
+        })();
+        let _ = std::fs::remove_file(staging);
+        result
+    }
+
     pub fn active_install_user(
         &self,
         vm_name: &str,
@@ -648,6 +737,14 @@ impl JobService {
         if let Some(job_id) = self.active_image_user(id)? {
             return Ok(ImageDeleteOutcome::InUse(format!(
                 "image is reserved by automated install job {job_id}"
+            )));
+        }
+        if let Some(dependent_id) = dependent_image_ids(&self.roots.images, &path)?
+            .into_iter()
+            .next()
+        {
+            return Ok(ImageDeleteOutcome::InUse(format!(
+                "image is the backing image for managed overlay {dependent_id}"
             )));
         }
         if let Some(vm_name) = vm_users(&path)?.into_iter().next() {
@@ -683,6 +780,14 @@ impl JobService {
         if let Some(job_id) = self.active_image_user(id)? {
             return Ok(ImageResizeOutcome::InUse(format!(
                 "image is reserved by automated install job {job_id}"
+            )));
+        }
+        if let Some(dependent_id) = dependent_image_ids(&self.roots.images, &path)?
+            .into_iter()
+            .next()
+        {
+            return Ok(ImageResizeOutcome::InUse(format!(
+                "image is the backing image for managed overlay {dependent_id}"
             )));
         }
         if let Some(vm_name) = active_vm_user(&path)? {
@@ -989,18 +1094,85 @@ fn image_from_path(id: &str, path: &Path) -> Result<ManagedImage> {
             DiskFormat::Qcow2 => id.ends_with(".qcow2"),
         }
     });
+    let backing_image_id = info.as_ref().and_then(|info| {
+        info.backing_file
+            .as_deref()
+            .and_then(|backing_file| managed_backing_image_id(path, backing_file))
+    });
     Ok(ManagedImage {
         id: resource.id,
         size_bytes: resource.size_bytes,
-        virtual_size_bytes: info.map(|info| info.virtual_size_bytes),
+        virtual_size_bytes: info.as_ref().map(|info| info.virtual_size_bytes),
         modified_at_ms: resource.modified_at_ms,
-        format: info.map(|info| info.format),
+        format: info.as_ref().map(|info| info.format),
+        backing_image_id,
         status: if info.is_some() {
             ManagedImageStatus::Ready
         } else {
             ManagedImageStatus::Invalid
         },
     })
+}
+
+fn managed_backing_image_id(image_path: &Path, backing_file: &Path) -> Option<String> {
+    let image_root = image_path.parent()?.canonicalize().ok()?;
+    let backing_file = resolve_backing_file(image_path, backing_file)
+        .canonicalize()
+        .ok()?;
+    if backing_file.parent() != Some(image_root.as_path()) {
+        return None;
+    }
+    backing_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+}
+
+fn dependent_image_ids(root: &Path, backing_file: &Path) -> Result<Vec<String>> {
+    let backing_file = backing_file
+        .canonicalize()
+        .with_context(|| format!("failed to resolve backing image {}", backing_file.display()))?;
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(root)
+        .with_context(|| format!("failed to read image root {}", root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.canonicalize().ok().as_ref() == Some(&backing_file) {
+            continue;
+        }
+        let Ok(info) = disk::image_info(&path) else {
+            continue;
+        };
+        let Some(candidate) = info.backing_file.as_deref() else {
+            continue;
+        };
+        if resolve_backing_file(&path, candidate)
+            .canonicalize()
+            .ok()
+            .as_ref()
+            == Some(&backing_file)
+            && let Some(id) = entry.file_name().to_str()
+        {
+            ids.push(id.to_string());
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
+fn resolve_backing_file(image_path: &Path, backing_file: &Path) -> PathBuf {
+    if backing_file.is_absolute() {
+        backing_file.to_path_buf()
+    } else {
+        image_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(backing_file)
+    }
 }
 
 fn resolve_resource(root: &Path, id: &str, kind: &str) -> Result<PathBuf> {
