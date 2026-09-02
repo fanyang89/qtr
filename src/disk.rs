@@ -69,6 +69,7 @@ pub(crate) struct ImageInfo {
     pub format: DiskFormat,
     pub virtual_size_bytes: u64,
     pub backing_file: Option<PathBuf>,
+    pub external_data_file: Option<PathBuf>,
 }
 
 pub(crate) fn image_info(path: &Path) -> Result<ImageInfo> {
@@ -89,6 +90,10 @@ pub(crate) fn image_info(path: &Path) -> Result<ImageInfo> {
         format,
         virtual_size_bytes,
         backing_file: info.backing_filename.map(PathBuf::from),
+        external_data_file: info
+            .format_specific
+            .and_then(|specific| specific.data.data_file)
+            .map(PathBuf::from),
     })
 }
 
@@ -181,6 +186,19 @@ struct QemuImgInfo {
     backing_filename: Option<String>,
     #[serde(rename = "backing-filename-format")]
     backing_filename_format: Option<String>,
+    #[serde(rename = "format-specific")]
+    format_specific: Option<QemuImgFormatSpecific>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq)]
+struct QemuImgFormatSpecific {
+    data: QemuImgFormatSpecificData,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq)]
+struct QemuImgFormatSpecificData {
+    #[serde(rename = "data-file")]
+    data_file: Option<String>,
 }
 
 fn parse_qemu_img_info(output: &str) -> Result<QemuImgInfo> {
@@ -231,7 +249,13 @@ mod tests {
   "format": "qcow2",
   "actual-size": 200704,
   "backing-filename": "base.qcow2",
-  "backing-filename-format": "qcow2"
+  "backing-filename-format": "qcow2",
+  "format-specific": {
+    "type": "qcow2",
+    "data": {
+      "data-file": "payload.raw"
+    }
+  }
 }"#;
 
         assert_eq!(
@@ -242,6 +266,11 @@ mod tests {
                 actual_size: Some(200_704),
                 backing_filename: Some("base.qcow2".to_string()),
                 backing_filename_format: Some("qcow2".to_string()),
+                format_specific: Some(QemuImgFormatSpecific {
+                    data: QemuImgFormatSpecificData {
+                        data_file: Some("payload.raw".to_string()),
+                    },
+                }),
             }
         );
     }

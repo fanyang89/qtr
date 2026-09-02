@@ -66,6 +66,21 @@ struct AppState {
 #[derive(utoipa::OpenApi)]
 struct ApiDoc;
 
+struct BinaryUpload;
+
+impl utoipa::PartialSchema for BinaryUpload {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .format(Some(utoipa::openapi::schema::SchemaFormat::KnownFormat(
+                utoipa::openapi::schema::KnownFormat::Binary,
+            )))
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for BinaryUpload {}
+
 #[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct HealthStatus {
@@ -187,11 +202,11 @@ impl IntoResponse for AppError {
             Self::Conflict(detail) => ("Conflict", detail.clone()),
             Self::PayloadTooLarge => (
                 "Payload Too Large",
-                "The ISO exceeds the configured upload limit.".to_string(),
+                "The upload exceeds the configured size limit.".to_string(),
             ),
             Self::UnsupportedMediaType => (
                 "Unsupported Media Type",
-                "ISO uploads require application/octet-stream.".to_string(),
+                "Uploads require application/octet-stream.".to_string(),
             ),
             Self::Vm(vm::VmApiError::Conflict(error)) => ("Conflict", error.to_string()),
             Self::Vm(vm::VmApiError::Internal(_)) | Self::Internal(_) => (
@@ -1286,7 +1301,7 @@ async fn create_image(
     tag = "resources",
     security(("bearerAuth" = [])),
     params(("id" = String, Path, description = "Managed image ID ending in .qcow2 or .raw")),
-    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    request_body(content = inline(BinaryUpload), content_type = "application/octet-stream"),
     responses(
         (status = CREATED, body = ManagedImageResponse),
         (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
@@ -1849,7 +1864,7 @@ async fn receive_upload(
     tag = "resources",
     security(("bearerAuth" = [])),
     params(("id" = String, Path, description = "ISO ID")),
-    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    request_body(content = inline(BinaryUpload), content_type = "application/octet-stream"),
     responses(
         (status = CREATED, body = ManagedIsoResponse),
         (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
@@ -2604,6 +2619,12 @@ mod tests {
         assert!(document["paths"]["/api/v1/images"].is_object());
         assert!(document["paths"]["/api/v1/media"].is_object());
         assert!(document["paths"]["/api/v1/networks"].is_object());
+        for path in ["/api/v1/images/{id}", "/api/v1/media/{id}"] {
+            let schema = &document["paths"][path]["put"]["requestBody"]["content"]["application/octet-stream"]
+                ["schema"];
+            assert_eq!(schema["type"], "string");
+            assert_eq!(schema["format"], "binary");
+        }
         assert!(document["paths"]["/api/v1/session"].is_object());
         let create_properties = &document["components"]["schemas"]["CreateVmRequest"]["properties"];
         assert!(create_properties["resources"].is_object());
@@ -2775,6 +2796,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disk_upload_staging_is_private_and_removed_on_drop() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-upload-staging-test-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let staging = directory.join("image.partial");
+        let partial = receive_upload(
+            Body::from(b"staged bytes".as_slice()),
+            1024,
+            staging.clone(),
+            "disk image",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(&staging).unwrap().permissions()
+            ) & 0o777,
+            0o600
+        );
+        drop(partial);
+        assert!(!staging.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn disk_image_upload_is_streamed_validated_and_cloneable() {
         let directory =
             std::env::temp_dir().join(format!("qtr-web-image-upload-test-{}", Uuid::new_v4()));
@@ -2797,6 +2843,20 @@ mod tests {
         crate::disk::create_overlay(&overlay_source, &raw_source, crate::config::DiskFormat::Raw)
             .unwrap();
         let external_backing = std::fs::read(&overlay_source).unwrap();
+        let external_data_source = directory.join("external-data.qcow2");
+        let external_data_file = directory.join("external-data.raw");
+        let status = std::process::Command::new("qemu-img")
+            .args(["create", "-f", "qcow2", "-o"])
+            .arg(format!(
+                "data_file={},data_file_raw=on",
+                external_data_file.display()
+            ))
+            .arg(&external_data_source)
+            .arg("1048576")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let external_data = std::fs::read(&external_data_source).unwrap();
         let oversized_virtual_source = directory.join("oversized-virtual.qcow2");
         crate::disk::create_image(
             &oversized_virtual_source,
@@ -2840,7 +2900,7 @@ mod tests {
                     .unwrap()
                     .permissions()
             ) & 0o777,
-            0o600
+            0o660
         );
 
         let response = router
@@ -2904,6 +2964,14 @@ mod tests {
 
         let response = router
             .clone()
+            .oneshot(upload("external-data.qcow2", external_data))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!directory.join("images/external-data.qcow2").exists());
+
+        let response = router
+            .clone()
             .oneshot(
                 Request::put("/api/v1/images/wrong-content-type.qcow2")
                     .header(header::AUTHORIZATION, "Bearer test-token")
@@ -2914,6 +2982,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            problem["detail"],
+            "Uploads require application/octet-stream."
+        );
 
         let response = router
             .clone()
@@ -2931,6 +3007,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            problem["detail"],
+            "The upload exceeds the configured size limit."
+        );
 
         let response = router
             .clone()

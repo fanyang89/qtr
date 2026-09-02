@@ -1,4 +1,5 @@
 use std::{
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -894,6 +895,11 @@ impl JobService {
                 "uploaded image must not reference an external backing file".to_string(),
             ));
         }
+        if info.external_data_file.is_some() {
+            return Ok(ImagePublishOutcome::Invalid(
+                "uploaded image must not reference an external data file".to_string(),
+            ));
+        }
         if let Err(error) = validate_image_size(info.virtual_size_bytes) {
             return Ok(ImagePublishOutcome::Invalid(error.to_string()));
         }
@@ -908,6 +914,8 @@ impl JobService {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        std::fs::set_permissions(staging, std::fs::Permissions::from_mode(0o660))
+            .with_context(|| format!("failed to set image permissions for {id:?}"))?;
         match std::fs::hard_link(staging, &destination) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
