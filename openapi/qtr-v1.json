@@ -2056,6 +2056,72 @@
         ]
       }
     },
+    "/api/v1/vms/{name}/guest-status": {
+      "get": {
+        "tags": [
+          "vms"
+        ],
+        "operationId": "get_vm_guest_status",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VM name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VmGuestStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/vms/{name}/shutdown": {
       "post": {
         "tags": [
@@ -2604,6 +2670,62 @@
           "vnc"
         ]
       },
+      "GuestNetworkAddress": {
+        "type": "object",
+        "required": [
+          "type",
+          "address",
+          "prefix",
+          "usable"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "type": {
+            "$ref": "#/components/schemas/GuestNetworkAddressType"
+          },
+          "usable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GuestNetworkAddressType": {
+        "type": "string",
+        "enum": [
+          "ipv4",
+          "ipv6"
+        ]
+      },
+      "GuestNetworkInterface": {
+        "type": "object",
+        "required": [
+          "name",
+          "addresses"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GuestNetworkAddress"
+            }
+          },
+          "hardwareAddress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "HealthStatus": {
         "type": "object",
         "required": [
@@ -3066,6 +3188,42 @@
           "file",
           "block"
         ]
+      },
+      "VmGuestStatus": {
+        "type": "object",
+        "required": [
+          "name",
+          "domainState",
+          "guestAgentReady",
+          "networkInterfacesAvailable",
+          "interfaces",
+          "observedAtMs"
+        ],
+        "properties": {
+          "domainState": {
+            "type": "string"
+          },
+          "guestAgentReady": {
+            "type": "boolean"
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GuestNetworkInterface"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "networkInterfacesAvailable": {
+            "type": "boolean"
+          },
+          "observedAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
       },
       "VmImageAttachment": {
         "type": "object",

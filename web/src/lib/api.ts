@@ -80,6 +80,28 @@ export const vmSummarySchema = z.object({
 
 const vmSummaryArraySchema = z.array(vmSummarySchema)
 
+export const guestNetworkAddressSchema = z.object({
+  type: z.enum(['ipv4', 'ipv6']),
+  address: z.string(),
+  prefix: z.number().int().nonnegative(),
+  usable: z.boolean(),
+})
+
+export const guestNetworkInterfaceSchema = z.object({
+  name: z.string(),
+  hardwareAddress: z.string().nullish(),
+  addresses: z.array(guestNetworkAddressSchema),
+})
+
+export const vmGuestStatusSchema = z.object({
+  name: z.string(),
+  domainState: vmStateSchema,
+  guestAgentReady: z.boolean(),
+  networkInterfacesAvailable: z.boolean(),
+  interfaces: z.array(guestNetworkInterfaceSchema),
+  observedAtMs: z.number(),
+})
+
 const healthStatusSchema = z.object({
   ok: z.boolean(),
   libvirtUri: z.string(),
@@ -187,6 +209,9 @@ export type VmMetrics = z.infer<typeof vmMetricsSchema>
 export type VmDisk = z.infer<typeof vmDiskSchema>
 export type VmCdrom = z.infer<typeof vmCdromSchema>
 export type VmSummary = z.infer<typeof vmSummarySchema>
+export type GuestNetworkAddress = z.infer<typeof guestNetworkAddressSchema>
+export type GuestNetworkInterface = z.infer<typeof guestNetworkInterfaceSchema>
+export type VmGuestStatus = z.infer<typeof vmGuestStatusSchema>
 export type HealthStatus = z.infer<typeof healthStatusSchema>
 export type VncTicket = z.infer<typeof vncTicketSchema>
 export type JobStatus = z.infer<typeof jobStatusSchema>
@@ -373,6 +398,13 @@ export async function getVm(name: string): Promise<VmSummary> {
   return parseResponse(
     apiClient.get(`/vms/${encodeURIComponent(name)}`),
     vmSummarySchema
+  )
+}
+
+export async function getVmGuestStatus(name: string): Promise<VmGuestStatus> {
+  return parseResponse(
+    apiClient.get(`/vms/${encodeURIComponent(name)}/guest-status`),
+    vmGuestStatusSchema
   )
 }
 

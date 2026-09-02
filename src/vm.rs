@@ -124,6 +124,17 @@ pub struct VmSummary {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct VmGuestStatus {
+    pub name: String,
+    pub domain_state: &'static str,
+    pub guest_agent_ready: bool,
+    pub network_interfaces_available: bool,
+    pub interfaces: Vec<guest_agent::GuestNetworkInterface>,
+    pub observed_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct VmSummaryCdrom {
     pub id: String,
     pub target: String,
@@ -4422,6 +4433,38 @@ pub fn get_summary(connect_uri: &str, name: &str) -> VmApiResult<VmSummary> {
     let conn = connect_read_only(connect_uri).map_err(VmApiError::Internal)?;
     let domain = lookup_domain_api(&conn, name)?;
     domain_summary(&domain).map_err(VmApiError::Internal)
+}
+
+pub fn get_guest_status(connect_uri: &str, name: &str) -> VmApiResult<VmGuestStatus> {
+    // libvirt's QGA timeout is integer seconds. A one-second shared deadline
+    // keeps the two sequential calls bounded to roughly two seconds total even
+    // when the remaining fractional second is rounded up for the second call.
+    const GUEST_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
+
+    let conn = connect(connect_uri).map_err(VmApiError::Internal)?;
+    let domain = lookup_domain_api(&conn, name)?;
+    let (state, _) = domain
+        .get_state()
+        .with_context(|| format!("failed to query domain {name} state"))
+        .map_err(VmApiError::Internal)?;
+    let active = domain
+        .is_active()
+        .with_context(|| format!("failed to query domain {name} activity"))
+        .map_err(VmApiError::Internal)?;
+    let observation = if active {
+        guest_agent::observe_network(&domain, GUEST_STATUS_TIMEOUT)
+    } else {
+        guest_agent::GuestNetworkObservation::default()
+    };
+
+    Ok(VmGuestStatus {
+        name: name.to_string(),
+        domain_state: domain_state_name(state),
+        guest_agent_ready: observation.guest_agent_ready,
+        network_interfaces_available: observation.network_interfaces_available,
+        interfaces: observation.interfaces,
+        observed_at_ms: sampled_at_ms(),
+    })
 }
 
 fn domain_summary(domain: &Domain) -> Result<VmSummary> {

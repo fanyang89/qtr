@@ -707,6 +707,7 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
     let protected_api = OpenApiRouter::new()
         .routes(routes!(list_vms, create_vm))
         .routes(routes!(get_vm, update_vm, undefine_vm))
+        .routes(routes!(get_vm_guest_status))
         .routes(routes!(start_vm))
         .routes(routes!(shutdown_vm))
         .routes(routes!(destroy_vm))
@@ -861,6 +862,28 @@ async fn get_vm(
     })
     .await?;
     Ok(Json(vm))
+}
+
+#[utoipa::path(
+    get,
+    path = "/vms/{name}/guest-status",
+    tag = "vms",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = OK, body = vm::VmGuestStatus),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn get_vm_guest_status(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<vm::VmGuestStatus>> {
+    let connect_uri = state.connect_uri;
+    let status = run_libvirt(move || vm::get_guest_status(&connect_uri, &name)).await?;
+    Ok(Json(status))
 }
 
 #[utoipa::path(
@@ -2445,6 +2468,7 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request, routing::get};
     use tower::ServiceExt;
+    use virt::{connect::Connect, domain::Domain, sys};
 
     fn test_state() -> AppState {
         AppState {
@@ -2691,6 +2715,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guest_status_reports_inactive_test_driver_domain_without_agent() {
+        let connect_uri = "test:///default";
+        let connection = Connect::open(Some(connect_uri)).unwrap();
+        let template = Domain::lookup_by_name(&connection, "test").unwrap();
+        let mut xml = template.get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE).unwrap();
+        let name = format!("qtr-guest-status-test-{}", Uuid::new_v4());
+        xml = xml.replacen("<name>test</name>", &format!("<name>{name}</name>"), 1);
+        let uuid_start = xml.find("<uuid>").unwrap() + "<uuid>".len();
+        let uuid_end = xml[uuid_start..].find("</uuid>").unwrap() + uuid_start;
+        xml.replace_range(uuid_start..uuid_end, &Uuid::new_v4().to_string());
+        let domain = Domain::define_xml(&connection, &xml).unwrap();
+
+        let router = app(
+            connect_uri.to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            None,
+        );
+        let path = format!("/api/v1/vms/{name}/guest-status");
+        let unauthorized = router
+            .clone()
+            .oneshot(Request::get(&path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .oneshot(
+                Request::get(&path)
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["name"], name);
+        assert_eq!(body["domainState"], "shutoff");
+        assert_eq!(body["guestAgentReady"], false);
+        assert_eq!(body["networkInterfacesAvailable"], false);
+        assert_eq!(body["interfaces"], serde_json::json!([]));
+        assert!(body["observedAtMs"].as_u64().is_some());
+
+        domain.undefine().unwrap();
+    }
+
+    #[tokio::test]
     async fn openapi_document_describes_versioned_bearer_api() {
         let router = app(
             "test:///default".to_string(),
@@ -2714,6 +2789,11 @@ mod tests {
         let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(document["openapi"], "3.1.0");
         assert!(document["paths"]["/api/v1/vms"].is_object());
+        assert!(document["paths"]["/api/v1/vms/{name}/guest-status"].is_object());
+        assert_eq!(
+            document["paths"]["/api/v1/vms/{name}/guest-status"]["get"]["security"][0],
+            serde_json::json!({"bearerAuth": []})
+        );
         assert!(document["paths"]["/api/v1/install-jobs"].is_object());
         assert!(document["paths"]["/api/v1/images"].is_object());
         assert!(document["paths"]["/api/v1/media"].is_object());

@@ -1,4 +1,5 @@
 use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     thread,
     time::{Duration, Instant},
 };
@@ -8,6 +9,40 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use virt::domain::Domain;
+
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, utoipa::ToSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestNetworkAddressType {
+    Ipv4,
+    Ipv6,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestNetworkAddress {
+    #[serde(rename = "type")]
+    pub address_type: GuestNetworkAddressType,
+    pub address: String,
+    pub prefix: u8,
+    pub usable: bool,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestNetworkInterface {
+    pub name: String,
+    pub hardware_address: Option<String>,
+    pub addresses: Vec<GuestNetworkAddress>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct GuestNetworkObservation {
+    pub guest_agent_ready: bool,
+    pub network_interfaces_available: bool,
+    pub interfaces: Vec<GuestNetworkInterface>,
+}
 
 #[derive(Debug)]
 pub struct GuestExecResult {
@@ -57,6 +92,30 @@ impl GuestAgentDeadline {
 pub struct GuestFileChunk {
     pub data: Vec<u8>,
     pub eof: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestNetworkInterfacesResponse {
+    #[serde(rename = "return")]
+    result: Vec<GuestNetworkInterfaceResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestNetworkInterfaceResponse {
+    name: String,
+    #[serde(rename = "hardware-address")]
+    hardware_address: Option<String>,
+    #[serde(default, rename = "ip-addresses")]
+    ip_addresses: Vec<GuestNetworkAddressResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestNetworkAddressResponse {
+    #[serde(rename = "ip-address-type")]
+    address_type: GuestNetworkAddressType,
+    #[serde(rename = "ip-address")]
+    address: String,
+    prefix: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +215,108 @@ struct GuestExecArgs<'a> {
     arg: Vec<&'a str>,
     #[serde(rename = "capture-output")]
     capture_output: bool,
+}
+
+pub fn observe_network(domain: &Domain, timeout: Duration) -> GuestNetworkObservation {
+    let deadline = GuestAgentDeadline::new(timeout);
+    if send_deadline_command(domain, r#"{"execute":"guest-ping"}"#, &deadline).is_err() {
+        return GuestNetworkObservation::default();
+    }
+
+    let response = send_deadline_command(
+        domain,
+        r#"{"execute":"guest-network-get-interfaces"}"#,
+        &deadline,
+    )
+    .ok();
+    observation_from_network_response(true, response.as_deref())
+}
+
+fn observation_from_network_response(
+    guest_agent_ready: bool,
+    response: Option<&str>,
+) -> GuestNetworkObservation {
+    if !guest_agent_ready {
+        return GuestNetworkObservation::default();
+    }
+    let Some(response) = response else {
+        return GuestNetworkObservation {
+            guest_agent_ready: true,
+            ..GuestNetworkObservation::default()
+        };
+    };
+    match parse_network_interfaces(response) {
+        Ok(interfaces) => GuestNetworkObservation {
+            guest_agent_ready: true,
+            network_interfaces_available: true,
+            interfaces,
+        },
+        Err(_) => GuestNetworkObservation {
+            guest_agent_ready: true,
+            ..GuestNetworkObservation::default()
+        },
+    }
+}
+
+fn parse_network_interfaces(response: &str) -> Result<Vec<GuestNetworkInterface>> {
+    let response: GuestNetworkInterfacesResponse =
+        serde_json::from_str(response).context("invalid guest-network-get-interfaces response")?;
+    let mut interfaces = response
+        .result
+        .into_iter()
+        .map(|interface| {
+            let mut addresses = interface
+                .ip_addresses
+                .into_iter()
+                .map(|address| GuestNetworkAddress {
+                    usable: is_usable_address(
+                        address.address_type,
+                        &address.address,
+                        address.prefix,
+                    ),
+                    address_type: address.address_type,
+                    address: address.address,
+                    prefix: address.prefix,
+                })
+                .collect::<Vec<_>>();
+            addresses.sort();
+            addresses.dedup();
+            GuestNetworkInterface {
+                name: interface.name,
+                hardware_address: interface.hardware_address,
+                addresses,
+            }
+        })
+        .collect::<Vec<_>>();
+    interfaces.sort();
+    interfaces.dedup();
+    Ok(interfaces)
+}
+
+fn is_usable_address(address_type: GuestNetworkAddressType, address: &str, prefix: u8) -> bool {
+    match (address_type, address.parse::<IpAddr>()) {
+        (GuestNetworkAddressType::Ipv4, Ok(IpAddr::V4(address))) if prefix <= 32 => {
+            is_usable_ipv4(address)
+        }
+        (GuestNetworkAddressType::Ipv6, Ok(IpAddr::V6(address))) if prefix <= 128 => {
+            is_usable_ipv6(address)
+        }
+        _ => false,
+    }
+}
+
+fn is_usable_ipv4(address: Ipv4Addr) -> bool {
+    !address.is_loopback()
+        && !address.is_unspecified()
+        && !address.is_multicast()
+        && !address.is_link_local()
+}
+
+fn is_usable_ipv6(address: Ipv6Addr) -> bool {
+    !address.is_loopback()
+        && !address.is_unspecified()
+        && !address.is_multicast()
+        && !address.is_unicast_link_local()
 }
 
 pub fn wait_ready_with_deadline(domain: &Domain, deadline: &GuestAgentDeadline) -> Result<()> {
@@ -649,6 +810,94 @@ mod tests {
 
         assert!(response.result.out_truncated);
         assert!(response.result.err_truncated);
+    }
+
+    #[test]
+    fn parses_sorts_and_deduplicates_guest_network_interfaces() {
+        let interfaces = parse_network_interfaces(
+            r#"{"return":[
+                {"name":"eth1","hardware-address":"52:54:00:00:00:02","ip-addresses":[
+                    {"ip-address-type":"ipv6","ip-address":"2001:db8::2","prefix":64},
+                    {"ip-address-type":"ipv4","ip-address":"192.0.2.2","prefix":24},
+                    {"ip-address-type":"ipv4","ip-address":"192.0.2.2","prefix":24}
+                ],"future-field":true},
+                {"name":"eth0"},
+                {"name":"eth0"}
+            ],"future-top-level-field":{}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(interfaces.len(), 2);
+        assert_eq!(interfaces[0].name, "eth0");
+        assert_eq!(interfaces[0].hardware_address, None);
+        assert!(interfaces[0].addresses.is_empty());
+        assert_eq!(interfaces[1].addresses.len(), 2);
+        assert_eq!(
+            interfaces[1].addresses[0].address_type,
+            GuestNetworkAddressType::Ipv4
+        );
+        assert_eq!(interfaces[1].addresses[0].address, "192.0.2.2");
+        assert!(interfaces[1].addresses[0].usable);
+    }
+
+    #[test]
+    fn rejects_malformed_guest_network_payloads() {
+        for response in [
+            r#"{}"#,
+            r#"{"return":{}}"#,
+            r#"{"return":[{"hardware-address":"52:54:00:00:00:01"}]}"#,
+            r#"{"return":[{"name":"eth0","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"192.0.2.1"}]}]}"#,
+            r#"{"return":[{"name":"eth0","ip-addresses":[{"ip-address-type":"ipx","ip-address":"x","prefix":1}]}]}"#,
+        ] {
+            assert!(parse_network_interfaces(response).is_err(), "{response}");
+        }
+    }
+
+    #[test]
+    fn classifies_ipv4_and_ipv6_address_usability_conservatively() {
+        for (address_type, address, prefix, expected) in [
+            (GuestNetworkAddressType::Ipv4, "192.0.2.1", 24, true),
+            (GuestNetworkAddressType::Ipv4, "127.0.0.1", 8, false),
+            (GuestNetworkAddressType::Ipv4, "0.0.0.0", 0, false),
+            (GuestNetworkAddressType::Ipv4, "224.0.0.1", 4, false),
+            (GuestNetworkAddressType::Ipv4, "169.254.1.2", 16, false),
+            (GuestNetworkAddressType::Ipv4, "192.0.2.1", 33, false),
+            (GuestNetworkAddressType::Ipv6, "2001:db8::1", 64, true),
+            (GuestNetworkAddressType::Ipv6, "::1", 128, false),
+            (GuestNetworkAddressType::Ipv6, "::", 0, false),
+            (GuestNetworkAddressType::Ipv6, "ff02::1", 16, false),
+            (GuestNetworkAddressType::Ipv6, "fe80::1", 64, false),
+            (GuestNetworkAddressType::Ipv6, "2001:db8::1", 129, false),
+            (GuestNetworkAddressType::Ipv4, "2001:db8::1", 24, false),
+            (GuestNetworkAddressType::Ipv6, "not-an-address", 64, false),
+        ] {
+            assert_eq!(
+                is_usable_address(address_type, address, prefix),
+                expected,
+                "{address}/{prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_agent_ready_when_network_discovery_is_unavailable() {
+        assert_eq!(
+            observation_from_network_response(false, Some(r#"{"return":[]}"#)),
+            GuestNetworkObservation::default()
+        );
+
+        let unavailable = observation_from_network_response(true, None);
+        assert!(unavailable.guest_agent_ready);
+        assert!(!unavailable.network_interfaces_available);
+
+        let malformed = observation_from_network_response(true, Some(r#"{"return":{}}"#));
+        assert!(malformed.guest_agent_ready);
+        assert!(!malformed.network_interfaces_available);
+
+        let available = observation_from_network_response(true, Some(r#"{"return":[]}"#));
+        assert!(available.guest_agent_ready);
+        assert!(available.network_interfaces_available);
+        assert!(available.interfaces.is_empty());
     }
 
     #[test]
