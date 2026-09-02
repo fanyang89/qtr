@@ -732,7 +732,7 @@ fn validate_ssh_key(value: &str) -> Result<&str> {
     Ok(value)
 }
 
-fn validate_hostname(value: &str) -> Result<()> {
+pub(crate) fn validate_hostname(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 253
         || value.split('.').any(|label| {

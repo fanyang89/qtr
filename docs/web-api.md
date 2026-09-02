@@ -28,6 +28,8 @@ The ISOs page supports authenticated, streaming upload and protected deletion. U
 
 The inventory reports invalid files, install-job reservations, and every live or persistent VM tray reference. Deletion is blocked while any reference remains.
 
+`POST /api/v1/media/cloud-init` creates a managed NoCloud seed ISO for a cloud image. The JSON request supplies an `.iso` ID, `instanceId`, `localHostname`, `userData`, and optional `networkConfig` and `vendorData`. qtr writes the standard root-level NoCloud files, generates YAML `meta-data`, and builds an ISO9660 filesystem with the `cidata` volume label. Attach the resulting media ID as a VM CD-ROM. Existing media is never overwritten. The host needs `genisoimage`, which the RPM installs as a runtime dependency.
+
 VMs support multiple CD-ROM trays with stable IDs. The VM detail page can insert, replace, or eject managed ISO media while a VM is running, blocked, paused, or shut off. Adding or removing an entire tray requires the VM to be shut off without a managed save image. Eject keeps the virtual drive and removes only its media; removing a tray never deletes its ISO. qtr does not force eject guest-locked media.
 
 ## Managed Disks

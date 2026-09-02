@@ -1,6 +1,9 @@
 use std::{
-    os::unix::fs::PermissionsExt as _,
+    fs::{DirBuilder, File, OpenOptions},
+    io::Write as _,
+    os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -96,6 +99,78 @@ impl FedoraInstallRequest {
             bail!("SSH authorized key must not be empty");
         }
         Ok(())
+    }
+}
+
+const MAX_CLOUD_INIT_ID_BYTES: usize = 255;
+const MAX_CLOUD_INIT_FIELD_BYTES: usize = 1024 * 1024;
+const MAX_CLOUD_INIT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudInitSeedRequest {
+    pub id: String,
+    pub instance_id: String,
+    pub local_hostname: String,
+    pub user_data: String,
+    pub network_config: Option<String>,
+    pub vendor_data: Option<String>,
+}
+
+impl CloudInitSeedRequest {
+    pub fn validate(&self) -> Result<()> {
+        validate_iso_id(&self.id)?;
+        if self.instance_id.trim().is_empty() {
+            bail!("instanceId must not be empty");
+        }
+        if self.instance_id.len() > MAX_CLOUD_INIT_ID_BYTES {
+            bail!("instanceId must not exceed {MAX_CLOUD_INIT_ID_BYTES} bytes");
+        }
+        if self.instance_id.contains('\0') {
+            bail!("instanceId must not contain NUL bytes");
+        }
+        installer::validate_hostname(&self.local_hostname)?;
+
+        let fields = [
+            ("userData", Some(self.user_data.as_str())),
+            ("networkConfig", self.network_config.as_deref()),
+            ("vendorData", self.vendor_data.as_deref()),
+        ];
+        let mut total = self
+            .instance_id
+            .len()
+            .checked_add(self.local_hostname.len())
+            .context("cloud-init seed content is too large")?;
+        for (name, value) in fields {
+            let Some(value) = value else {
+                continue;
+            };
+            if value.len() > MAX_CLOUD_INIT_FIELD_BYTES {
+                bail!("{name} must not exceed {MAX_CLOUD_INIT_FIELD_BYTES} bytes");
+            }
+            total = total
+                .checked_add(value.len())
+                .context("cloud-init seed content is too large")?;
+        }
+        if total > MAX_CLOUD_INIT_TOTAL_BYTES {
+            bail!("cloud-init seed content must not exceed {MAX_CLOUD_INIT_TOTAL_BYTES} bytes");
+        }
+        Ok(())
+    }
+
+    fn metadata_yaml(&self) -> Result<String> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct Metadata<'a> {
+            instance_id: &'a str,
+            local_hostname: &'a str,
+        }
+
+        serde_yaml::to_string(&Metadata {
+            instance_id: &self.instance_id,
+            local_hostname: &self.local_hostname,
+        })
+        .context("failed to serialize cloud-init meta-data")
     }
 }
 
@@ -939,6 +1014,106 @@ impl JobService {
         Ok(ImagePublishOutcome::Created(image))
     }
 
+    pub fn create_cloud_init_seed(
+        &self,
+        request: &CloudInitSeedRequest,
+    ) -> Result<IsoPublishOutcome> {
+        request.validate()?;
+        let builder = which::which("genisoimage").context(
+            "genisoimage is required to create cloud-init seed ISOs; install the genisoimage package",
+        )?;
+        self.create_cloud_init_seed_with_builder(request, &builder)
+    }
+
+    fn create_cloud_init_seed_with_builder(
+        &self,
+        request: &CloudInitSeedRequest,
+        builder: &Path,
+    ) -> Result<IsoPublishOutcome> {
+        request.validate()?;
+        let uploads = self.roots.media.join(".uploads");
+        std::fs::create_dir_all(&uploads)
+            .with_context(|| format!("failed to create {}", uploads.display()))?;
+        let source_directory = uploads.join(format!("cloud-init-{}", Uuid::new_v4()));
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&source_directory)
+            .with_context(|| {
+                format!(
+                    "failed to create cloud-init staging directory {}",
+                    source_directory.display()
+                )
+            })?;
+        let _source_guard = TemporaryDirectory(source_directory.clone());
+
+        write_private_file(&source_directory.join("user-data"), &request.user_data)?;
+        write_private_file(
+            &source_directory.join("meta-data"),
+            &request.metadata_yaml()?,
+        )?;
+        let mut source_names = vec!["user-data", "meta-data"];
+        if let Some(network_config) = &request.network_config {
+            write_private_file(&source_directory.join("network-config"), network_config)?;
+            source_names.push("network-config");
+        }
+        if let Some(vendor_data) = &request.vendor_data {
+            write_private_file(&source_directory.join("vendor-data"), vendor_data)?;
+            source_names.push("vendor-data");
+        }
+
+        let staging = self.create_iso_staging_path()?;
+        let _staging_guard = TemporaryFile(staging.clone());
+        let staging_parent = staging
+            .parent()
+            .context("cloud-init ISO staging path has no parent")?
+            .canonicalize()
+            .with_context(|| {
+                format!(
+                    "failed to resolve cloud-init ISO staging directory {}",
+                    uploads.display()
+                )
+            })?;
+        let staging_file_name = staging
+            .file_name()
+            .context("cloud-init ISO staging path has no file name")?;
+        let absolute_staging = staging_parent.join(staging_file_name);
+
+        let output = Command::new(builder)
+            .current_dir(&source_directory)
+            .args([
+                "-quiet",
+                "-output",
+                absolute_staging
+                    .to_str()
+                    .context("cloud-init ISO staging path is not valid UTF-8")?,
+                "-volid",
+                "cidata",
+                "-rational-rock",
+                "-joliet",
+            ])
+            .args(&source_names)
+            .output()
+            .with_context(|| format!("failed to execute ISO builder {}", builder.display()))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "ISO builder {} failed with {}: {}",
+                builder.display(),
+                output.status,
+                stderr.trim()
+            );
+        }
+        if !absolute_staging.is_file() {
+            bail!(
+                "ISO builder {} did not create {}",
+                builder.display(),
+                absolute_staging.display()
+            );
+        }
+
+        self.publish_iso(&request.id, &absolute_staging)
+    }
+
     pub fn create_iso_staging_path(&self) -> Result<PathBuf> {
         let directory = self.roots.media.join(".uploads");
         std::fs::create_dir_all(&directory)
@@ -953,6 +1128,17 @@ impl JobService {
     pub fn publish_iso(&self, id: &str, staging: &Path) -> Result<IsoPublishOutcome> {
         let _guard = self.lock_resources()?;
         validate_iso_id(id)?;
+        let staged_iso = iso_from_path(id, staging)?;
+        if staged_iso.status != ManagedIsoStatus::Ready {
+            bail!("ISO {id:?} is not a valid ISO9660 image");
+        }
+        File::open(staging)
+            .with_context(|| format!("failed to open staged ISO {id:?}"))?
+            .sync_all()
+            .with_context(|| format!("failed to sync staged ISO {id:?}"))?;
+        std::fs::set_permissions(staging, std::fs::Permissions::from_mode(0o660))
+            .with_context(|| format!("failed to set ISO permissions for {id:?}"))?;
+
         let destination = self.roots.media.join(id);
         match std::fs::symlink_metadata(&destination) {
             Ok(_) => return Ok(IsoPublishOutcome::Exists),
@@ -966,8 +1152,18 @@ impl JobService {
             }
             Err(error) => return Err(error.into()),
         }
-        std::fs::remove_file(staging)?;
-        Ok(IsoPublishOutcome::Created(iso_from_path(id, &destination)?))
+        let iso = match iso_from_path(id, &destination) {
+            Ok(iso) => iso,
+            Err(error) => {
+                let _ = std::fs::remove_file(&destination);
+                return Err(error);
+            }
+        };
+        if let Err(error) = std::fs::remove_file(staging) {
+            let _ = std::fs::remove_file(&destination);
+            return Err(error.into());
+        }
+        Ok(IsoPublishOutcome::Created(iso))
     }
 
     pub fn delete_iso<F>(&self, id: &str, vm_users: F) -> Result<IsoDeleteOutcome>
@@ -1397,6 +1593,36 @@ fn resource_from_path(id: &str, path: &Path) -> Result<ManagedResource> {
     })
 }
 
+struct TemporaryDirectory(PathBuf);
+
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct TemporaryFile(PathBuf);
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        remove_staging_file(&self.0);
+    }
+}
+
+fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", path.display()))?;
+    Ok(())
+}
+
 fn remove_staging_file(path: &Path) {
     match std::fs::remove_file(path) {
         Ok(()) => {}
@@ -1418,8 +1644,11 @@ fn cleanup_staging(directory: &Path) -> Result<()> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.ends_with(".partial") && entry.file_type()?.is_file() {
+        let file_type = entry.file_type()?;
+        if name.ends_with(".partial") && file_type.is_file() {
             std::fs::remove_file(entry.path())?;
+        } else if name.starts_with("cloud-init-") && file_type.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
         }
     }
     Ok(())
@@ -1493,6 +1722,59 @@ mod tests {
         std::fs::create_dir(&directory).unwrap();
         let store = JobStore::open(directory.join("jobs.sqlite3")).unwrap();
         (directory, store)
+    }
+
+    fn service(directory: &Path) -> JobService {
+        JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("media"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap()
+    }
+
+    fn cloud_init_request() -> CloudInitSeedRequest {
+        CloudInitSeedRequest {
+            id: "node-1-seed.iso".to_string(),
+            instance_id: "node-1".to_string(),
+            local_hostname: "node-1".to_string(),
+            user_data: String::new(),
+            network_config: Some("version: 2\n".to_string()),
+            vendor_data: Some("#cloud-config\npackages: []\n".to_string()),
+        }
+    }
+
+    fn fake_iso_builder(directory: &Path, fail: bool) -> PathBuf {
+        std::fs::create_dir_all(directory).unwrap();
+        let builder = directory.join("genisoimage");
+        let body = if fail {
+            "#!/bin/sh\necho builder-failed >&2\nexit 42\n".to_string()
+        } else {
+            r#"#!/bin/sh
+set -eu
+capture=$(dirname "$0")
+printf '%s\n' "$@" > "$capture/args"
+for name in user-data meta-data network-config vendor-data; do
+  if test -f "$name"; then cp "$name" "$capture/$name"; fi
+done
+output=
+while test "$#" -gt 0; do
+  if test "$1" = "-output"; then output=$2; break; fi
+  shift
+done
+test -n "$output"
+dd if=/dev/zero of="$output" bs=32774 count=1 2>/dev/null
+printf CD001 | dd of="$output" bs=1 seek=32769 conv=notrunc 2>/dev/null
+"#
+            .to_string()
+        };
+        std::fs::write(&builder, body).unwrap();
+        let mut permissions = std::fs::metadata(&builder).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&builder, permissions).unwrap();
+        builder
     }
 
     #[test]
@@ -1742,6 +2024,144 @@ mod tests {
                 .to_string()
                 .contains("cannot verify whether managed qcow2 image")
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn validates_cloud_init_seed_requests_and_serializes_metadata() {
+        let request = cloud_init_request();
+        assert!(request.validate().is_ok());
+        assert_eq!(
+            request.metadata_yaml().unwrap(),
+            "instance-id: node-1\nlocal-hostname: node-1\n"
+        );
+
+        let mut invalid = request.clone();
+        invalid.instance_id = " ".to_string();
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("instanceId")
+        );
+        invalid = request.clone();
+        invalid.local_hostname = "bad_host".to_string();
+        assert!(invalid.validate().is_err());
+        invalid = request.clone();
+        invalid.user_data = "x".repeat(MAX_CLOUD_INIT_FIELD_BYTES + 1);
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("userData")
+        );
+        invalid = request;
+        invalid.network_config = Some("x".repeat(MAX_CLOUD_INIT_FIELD_BYTES));
+        invalid.vendor_data = Some("x".repeat(MAX_CLOUD_INIT_FIELD_BYTES));
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("cloud-init seed content")
+        );
+    }
+
+    #[test]
+    fn creates_cloud_init_seed_with_exact_sources_and_cleans_staging() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-cloud-init-test-{}", Uuid::new_v4()));
+        let service = service(&directory);
+        let builder_directory = directory.join("builder");
+        let builder = fake_iso_builder(&builder_directory, false);
+        let request = cloud_init_request();
+
+        let outcome = service
+            .create_cloud_init_seed_with_builder(&request, &builder)
+            .unwrap();
+        let created = match outcome {
+            IsoPublishOutcome::Created(created) => created,
+            IsoPublishOutcome::Exists => panic!("first seed creation unexpectedly conflicted"),
+        };
+        assert_eq!(created.id, request.id);
+        assert_eq!(created.status, ManagedIsoStatus::Ready);
+        assert_eq!(
+            std::fs::read_to_string(builder_directory.join("user-data")).unwrap(),
+            request.user_data
+        );
+        assert_eq!(
+            std::fs::read_to_string(builder_directory.join("meta-data")).unwrap(),
+            request.metadata_yaml().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(builder_directory.join("network-config")).unwrap(),
+            request.network_config.as_deref().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(builder_directory.join("vendor-data")).unwrap(),
+            request.vendor_data.as_deref().unwrap()
+        );
+        let args = std::fs::read_to_string(builder_directory.join("args")).unwrap();
+        assert!(args.contains("-volid\ncidata\n"));
+        assert!(args.contains("-rational-rock\n-joliet\n"));
+        for name in ["user-data", "meta-data", "network-config", "vendor-data"] {
+            assert!(args.lines().any(|arg| arg == name));
+        }
+        let mode = std::fs::metadata(directory.join("media/node-1-seed.iso"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o660);
+        assert_eq!(service.list_media().unwrap().len(), 1);
+        assert!(
+            std::fs::read_dir(directory.join("media/.uploads"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+
+        assert!(matches!(
+            service
+                .create_cloud_init_seed_with_builder(&request, &builder)
+                .unwrap(),
+            IsoPublishOutcome::Exists
+        ));
+        assert!(
+            std::fs::read_dir(directory.join("media/.uploads"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+
+        drop(service);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cloud_init_builder_failure_does_not_publish_or_leak_staging() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-cloud-init-failure-test-{}", Uuid::new_v4()));
+        let service = service(&directory);
+        let builder = fake_iso_builder(&directory.join("builder"), true);
+        let error =
+            match service.create_cloud_init_seed_with_builder(&cloud_init_request(), &builder) {
+                Ok(_) => panic!("failing builder unexpectedly created an ISO"),
+                Err(error) => error,
+            };
+
+        assert!(error.to_string().contains("builder-failed"));
+        assert!(!directory.join("media/node-1-seed.iso").exists());
+        assert!(
+            std::fs::read_dir(directory.join("media/.uploads"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+
+        drop(service);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

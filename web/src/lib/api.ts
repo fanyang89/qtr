@@ -203,6 +203,23 @@ export type ImageCreateInput = {
   sizeBytes: number
 }
 
+export const cloudInitSeedInputSchema = z.object({
+  id: z.string().min(1),
+  instanceId: z.string().min(1).max(255),
+  localHostname: z.string().min(1).max(253),
+  userData: z.string().max(1024 * 1024),
+  networkConfig: z
+    .string()
+    .max(1024 * 1024)
+    .optional(),
+  vendorData: z
+    .string()
+    .max(1024 * 1024)
+    .optional(),
+})
+
+export type CloudInitSeedInput = z.infer<typeof cloudInitSeedInputSchema>
+
 export type VmCreateInput = {
   name: string
   resources: {
@@ -402,6 +419,15 @@ export async function detachDisk(
 
 export async function getIsos(): Promise<ManagedIso[]> {
   return parseResponse(apiClient.get('/media'), managedIsoArraySchema)
+}
+
+export async function createCloudInitSeed(
+  input: CloudInitSeedInput
+): Promise<ManagedIso> {
+  return parseResponse(
+    apiClient.post('/media/cloud-init', input),
+    managedIsoSchema
+  )
 }
 
 export async function uploadDiskImage(

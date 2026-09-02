@@ -807,6 +807,81 @@
         ]
       }
     },
+    "/api/v1/media/cloud-init": {
+      "post": {
+        "tags": [
+          "resources"
+        ],
+        "operationId": "create_cloud_init_seed",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloudInitSeedRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedIsoResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/media/{id}": {
       "put": {
         "tags": [
@@ -2246,6 +2321,42 @@
         "properties": {
           "id": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CloudInitSeedRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "instanceId",
+          "localHostname",
+          "userData"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "instanceId": {
+            "type": "string"
+          },
+          "localHostname": {
+            "type": "string"
+          },
+          "networkConfig": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userData": {
+            "type": "string"
+          },
+          "vendorData": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false

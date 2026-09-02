@@ -43,10 +43,10 @@ use crate::config::GraphicsMode;
 use crate::{
     config::WebArgs,
     jobs::{
-        FedoraInstallRequest, ImageCloneOutcome, ImageCreateOutcome, ImageDeleteOutcome,
-        ImagePublishOutcome, ImageResizeOutcome, InstallJob, InstallJobCreateOutcome,
-        IsoDeleteOutcome, IsoPublishOutcome, JobRoots, JobService, ManagedImage,
-        ManagedImageStatus, ManagedIso, ManagedIsoStatus,
+        CloudInitSeedRequest, FedoraInstallRequest, ImageCloneOutcome, ImageCreateOutcome,
+        ImageDeleteOutcome, ImagePublishOutcome, ImageResizeOutcome, InstallJob,
+        InstallJobCreateOutcome, IsoDeleteOutcome, IsoPublishOutcome, JobRoots, JobService,
+        ManagedImage, ManagedImageStatus, ManagedIso, ManagedIsoStatus,
     },
     network, vm,
 };
@@ -719,6 +719,7 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(set_cdrom_media, eject_cdrom_media))
         .routes(routes!(remove_cdrom_tray))
         .routes(routes!(list_media))
+        .routes(routes!(create_cloud_init_seed))
         .routes(routes!(upload_iso, delete_iso))
         .routes(routes!(list_networks))
         .route_layer(middleware::from_fn_with_state(
@@ -1859,6 +1860,49 @@ async fn receive_upload(
 }
 
 #[utoipa::path(
+    post,
+    path = "/media/cloud-init",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    request_body = CloudInitSeedRequest,
+    responses(
+        (status = CREATED, body = ManagedIsoResponse),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn create_cloud_init_seed(
+    State(state): State<AppState>,
+    request: std::result::Result<Json<CloudInitSeedRequest>, JsonRejection>,
+) -> AppResult<(StatusCode, Json<ManagedIsoResponse>)> {
+    let request = api_json(request)?;
+    request.validate().map_err(AppError::BadRequest)?;
+    let _permit = state
+        .iso_uploads
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    let jobs = job_service(&state)?;
+    let seed_id = request.id.clone();
+    let outcome = run_job_store(move || jobs.create_cloud_init_seed(&request)).await?;
+    let resource = match outcome {
+        IsoPublishOutcome::Created(resource) => resource,
+        IsoPublishOutcome::Exists => {
+            return Err(AppError::Conflict(format!(
+                "ISO {seed_id:?} already exists"
+            )));
+        }
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(ManagedIsoResponse::new(resource, Vec::new(), Vec::new())),
+    ))
+}
+
+#[utoipa::path(
     put,
     path = "/media/{id}",
     tag = "resources",
@@ -2618,6 +2662,7 @@ mod tests {
         assert!(document["paths"]["/api/v1/install-jobs"].is_object());
         assert!(document["paths"]["/api/v1/images"].is_object());
         assert!(document["paths"]["/api/v1/media"].is_object());
+        assert!(document["paths"]["/api/v1/media/cloud-init"].is_object());
         assert!(document["paths"]["/api/v1/networks"].is_object());
         for path in ["/api/v1/images/{id}", "/api/v1/media/{id}"] {
             let schema = &document["paths"][path]["put"]["requestBody"]["content"]["application/octet-stream"]
@@ -2634,6 +2679,11 @@ mod tests {
         let update_properties = &document["components"]["schemas"]["UpdateVmRequest"]["properties"];
         assert!(update_properties["vcpuTune"]["oneOf"].is_array());
         assert!(update_properties["numaTune"]["oneOf"].is_array());
+        let cloud_init_properties =
+            &document["components"]["schemas"]["CloudInitSeedRequest"]["properties"];
+        assert!(cloud_init_properties["instanceId"].is_object());
+        assert!(cloud_init_properties["localHostname"].is_object());
+        assert!(cloud_init_properties["userData"].is_object());
         let install_properties =
             &document["components"]["schemas"]["FedoraInstallRequest"]["properties"];
         assert!(install_properties["mediaId"].is_object());
