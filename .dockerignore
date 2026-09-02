@@ -1,0 +1,11 @@
+.git
+.pi
+.tmp
+.qtr
+.opencode
+.venv
+dist
+target
+web/coverage
+web/dist
+web/node_modules

@@ -16,8 +16,13 @@ readonly api_state_dir="$work_dir/server"
 readonly api_image_root="$work_dir/images"
 readonly api_media_root="$work_dir/media"
 readonly api_log_root="$work_dir/logs"
+readonly curl_connect_timeout_secs=2
+readonly curl_max_time_secs=30
+readonly cleanup_curl_max_time_secs=3
+readonly web_start_timeout_secs=30
 
 web_pid=
+reset_event_pid=
 
 mkdir -p \
     "$artifact_dir" \
@@ -34,8 +39,47 @@ api_request() {
         --silent \
         --show-error \
         --fail-with-body \
+        --connect-timeout "$curl_connect_timeout_secs" \
+        --max-time "$curl_max_time_secs" \
         --header "Authorization: Bearer $api_token" \
         "$@"
+}
+
+cleanup_api_request() {
+    curl \
+        --silent \
+        --show-error \
+        --fail-with-body \
+        --connect-timeout "$curl_connect_timeout_secs" \
+        --max-time "$cleanup_curl_max_time_secs" \
+        --header "Authorization: Bearer $api_token" \
+        "$@"
+}
+
+stop_web() {
+    local state
+
+    if ! kill -0 "$web_pid" >/dev/null 2>&1; then
+        wait "$web_pid" >/dev/null 2>&1 || true
+        return
+    fi
+
+    kill "$web_pid" >/dev/null 2>&1 || true
+    for _ in {1..20}; do
+        if ! kill -0 "$web_pid" >/dev/null 2>&1; then
+            break
+        fi
+        state=$(awk '{print $3}' "/proc/$web_pid/stat" 2>/dev/null || true)
+        if [[ $state == Z ]]; then
+            break
+        fi
+        sleep 0.25
+    done
+    state=$(awk '{print $3}' "/proc/$web_pid/stat" 2>/dev/null || true)
+    if kill -0 "$web_pid" >/dev/null 2>&1 && [[ $state != Z ]]; then
+        kill -KILL "$web_pid" >/dev/null 2>&1 || true
+    fi
+    wait "$web_pid" >/dev/null 2>&1 || true
 }
 
 cleanup() {
@@ -43,14 +87,19 @@ cleanup() {
     trap - EXIT
     set +e
 
+    if [[ -n $reset_event_pid ]]; then
+        if kill -0 "$reset_event_pid" >/dev/null 2>&1; then
+            kill "$reset_event_pid" >/dev/null 2>&1
+        fi
+        wait "$reset_event_pid" >/dev/null 2>&1 || true
+    fi
     if [[ -n $web_pid ]]; then
         if kill -0 "$web_pid" >/dev/null 2>&1; then
-            api_request --request DELETE "$api_url/images/$clone_image_id" >/dev/null 2>&1
-            api_request --request DELETE "$api_url/images/$base_image_id" >/dev/null 2>&1
-            api_request --request DELETE "$api_url/media/$seed_id" >/dev/null 2>&1
-            kill "$web_pid" >/dev/null 2>&1
+            cleanup_api_request --request DELETE "$api_url/images/$clone_image_id" >/dev/null 2>&1
+            cleanup_api_request --request DELETE "$api_url/images/$base_image_id" >/dev/null 2>&1
+            cleanup_api_request --request DELETE "$api_url/media/$seed_id" >/dev/null 2>&1
         fi
-        wait "$web_pid" >/dev/null 2>&1
+        stop_web
     fi
     rm -f \
         "$api_image_root/$clone_image_id" \
@@ -85,10 +134,19 @@ assert_state() {
 }
 
 wait_for_web() {
-    local attempt
-    for attempt in {1..30}; do
-        if curl --silent --show-error --fail "$api_url/health" \
-            >"$artifact_dir/api-health.json"; then
+    local deadline=$((SECONDS + web_start_timeout_secs))
+
+    while ((SECONDS < deadline)); do
+        if curl \
+            --silent \
+            --show-error \
+            --fail \
+            --connect-timeout "$curl_connect_timeout_secs" \
+            --max-time 2 \
+            "$api_url/health" \
+            >"$artifact_dir/api-health.json" \
+            && jq -e '.ok == true and .libvirtUri == "qemu:///system"' \
+                "$artifact_dir/api-health.json" >/dev/null; then
             return 0
         fi
         if ! kill -0 "$web_pid" >/dev/null 2>&1; then
@@ -133,12 +191,12 @@ virsh --connect qemu:///system uri
     >"$artifact_dir/qtr-web.log" 2>&1 &
 web_pid=$!
 wait_for_web
-jq -e '.ok == true and .libvirtUri == "qemu:///system"' "$artifact_dir/api-health.json" \
-    >/dev/null
 
 unauthorized_status=$(curl \
     --silent \
     --show-error \
+    --connect-timeout "$curl_connect_timeout_secs" \
+    --max-time "$curl_max_time_secs" \
     --output "$artifact_dir/api-unauthorized.json" \
     --write-out '%{http_code}' \
     "$api_url/vms")
@@ -181,6 +239,8 @@ jq -e \
 base_delete_status=$(curl \
     --silent \
     --show-error \
+    --connect-timeout "$curl_connect_timeout_secs" \
+    --max-time "$curl_max_time_secs" \
     --request DELETE \
     --header "Authorization: Bearer $api_token" \
     --output "$artifact_dir/api-delete-backing-conflict.json" \
@@ -221,8 +281,9 @@ isoinfo -R -x /meta-data -i "$api_media_root/$seed_id" \
     >"$artifact_dir/cloud-init-meta-data"
 awk -F ': *' '/Volume id:/{print toupper($2)}' "$artifact_dir/cloud-init-volume.txt" \
     | grep -Fxq CIDATA
-grep -Fxq /user-data "$artifact_dir/cloud-init-files.txt"
-grep -Fxq /meta-data "$artifact_dir/cloud-init-files.txt"
+printf '/meta-data\n/user-data\n' >"$work_dir/expected-cloud-init-files.txt"
+LC_ALL=C sort "$artifact_dir/cloud-init-files.txt" >"$artifact_dir/cloud-init-files-sorted.txt"
+cmp "$work_dir/expected-cloud-init-files.txt" "$artifact_dir/cloud-init-files-sorted.txt"
 cmp "$work_dir/expected-user-data" "$artifact_dir/cloud-init-user-data"
 grep -Fxq 'instance-id: jepsen-node-1' "$artifact_dir/cloud-init-meta-data"
 grep -Fxq 'local-hostname: n1' "$artifact_dir/cloud-init-meta-data"
@@ -250,7 +311,29 @@ api_request --request POST "$api_url/vms/$vm_name/suspend" --output /dev/null
 assert_state paused
 api_request --request POST "$api_url/vms/$vm_name/resume" --output /dev/null
 assert_state running
+virsh --connect qemu:///system event \
+    --domain "$vm_name" \
+    --event reboot \
+    --timeout 10 \
+    --timestamp \
+    >"$artifact_dir/reset-event.txt" 2>&1 &
+reset_event_pid=$!
+sleep 1
+if ! kill -0 "$reset_event_pid" >/dev/null 2>&1; then
+    wait "$reset_event_pid" || true
+    printf 'libvirt reset event monitor exited before the reset request\n' >&2
+    cat "$artifact_dir/reset-event.txt" >&2
+    exit 1
+fi
 api_request --request POST "$api_url/vms/$vm_name/reset" --output /dev/null
+if ! wait "$reset_event_pid"; then
+    printf 'libvirt reset event monitor failed\n' >&2
+    cat "$artifact_dir/reset-event.txt" >&2
+    exit 1
+fi
+reset_event_pid=
+grep -Fq reboot "$artifact_dir/reset-event.txt"
+grep -Fq "$vm_name" "$artifact_dir/reset-event.txt"
 assert_state running
 printf 'REST reboot intentionally omitted: the empty test disk has no guest to acknowledge reboot.\n'
 
