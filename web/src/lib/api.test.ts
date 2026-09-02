@@ -139,6 +139,19 @@ describe('VM API contract', () => {
       }).backingImageId
     ).toBe('base.qcow2')
     expect(
+      managedImageSchema.parse({
+        id: 'debian.raw',
+        sizeBytes: 1024,
+        virtualSizeBytes: 1024,
+        modifiedAtMs: 1,
+        format: 'raw',
+        backingImageId: null,
+        status: 'ready',
+        attachments: [],
+        reservedByJobId: null,
+      }).format
+    ).toBe('raw')
+    expect(
       managedIsoSchema.parse({
         id: 'Fedora.iso',
         sizeBytes: 42,

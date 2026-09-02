@@ -44,9 +44,9 @@ use crate::{
     config::WebArgs,
     jobs::{
         FedoraInstallRequest, ImageCloneOutcome, ImageCreateOutcome, ImageDeleteOutcome,
-        ImageResizeOutcome, InstallJob, InstallJobCreateOutcome, IsoDeleteOutcome,
-        IsoPublishOutcome, JobRoots, JobService, ManagedImage, ManagedImageStatus, ManagedIso,
-        ManagedIsoStatus,
+        ImagePublishOutcome, ImageResizeOutcome, InstallJob, InstallJobCreateOutcome,
+        IsoDeleteOutcome, IsoPublishOutcome, JobRoots, JobService, ManagedImage,
+        ManagedImageStatus, ManagedIso, ManagedIsoStatus,
     },
     network, vm,
 };
@@ -57,7 +57,9 @@ struct AppState {
     api_token: Arc<str>,
     vnc_tickets: Arc<Mutex<HashMap<String, VncTicket>>>,
     jobs: Option<JobService>,
+    max_image_upload_bytes: u64,
     max_iso_upload_bytes: u64,
+    image_uploads: Arc<Semaphore>,
     iso_uploads: Arc<Semaphore>,
 }
 
@@ -575,11 +577,12 @@ async fn run_async(args: WebArgs, api_token: String) -> Result<()> {
         logs: args.log_root,
         connect_uri: args.connect_uri.clone(),
     })?;
-    let app = app_with_iso_limit(
+    let app = app_with_upload_limits(
         args.connect_uri,
         args.web_dir,
         api_token,
         Some(jobs),
+        args.max_image_upload_bytes,
         args.max_iso_upload_bytes,
     );
     let listener = TcpListener::bind(listen)
@@ -617,9 +620,17 @@ fn app(
     api_token: String,
     jobs: Option<JobService>,
 ) -> Router {
-    app_with_iso_limit(connect_uri, web_dir, api_token, jobs, 34_359_738_368)
+    app_with_upload_limits(
+        connect_uri,
+        web_dir,
+        api_token,
+        jobs,
+        68_719_476_736,
+        34_359_738_368,
+    )
 }
 
+#[cfg(test)]
 fn app_with_iso_limit(
     connect_uri: String,
     web_dir: PathBuf,
@@ -627,12 +638,32 @@ fn app_with_iso_limit(
     jobs: Option<JobService>,
     max_iso_upload_bytes: u64,
 ) -> Router {
+    app_with_upload_limits(
+        connect_uri,
+        web_dir,
+        api_token,
+        jobs,
+        68_719_476_736,
+        max_iso_upload_bytes,
+    )
+}
+
+fn app_with_upload_limits(
+    connect_uri: String,
+    web_dir: PathBuf,
+    api_token: String,
+    jobs: Option<JobService>,
+    max_image_upload_bytes: u64,
+    max_iso_upload_bytes: u64,
+) -> Router {
     let state = AppState {
         connect_uri,
         api_token: api_token.into(),
         vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
         jobs,
+        max_image_upload_bytes,
         max_iso_upload_bytes,
+        image_uploads: Arc::new(Semaphore::new(1)),
         iso_uploads: Arc::new(Semaphore::new(1)),
     };
     let index_html = web_dir.join("index.html");
@@ -665,6 +696,7 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(get_install_job))
         .routes(routes!(cancel_install_job))
         .routes(routes!(list_images, create_image))
+        .routes(routes!(upload_image))
         .routes(routes!(clone_image))
         .routes(routes!(resize_image, delete_image))
         .routes(routes!(attach_image, detach_image))
@@ -700,7 +732,9 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         api_token: Arc::from("unused"),
         vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
         jobs: None,
+        max_image_upload_bytes: 68_719_476_736,
         max_iso_upload_bytes: 34_359_738_368,
+        image_uploads: Arc::new(Semaphore::new(1)),
         iso_uploads: Arc::new(Semaphore::new(1)),
     };
     documented_api(&state).1
@@ -1247,6 +1281,70 @@ async fn create_image(
 }
 
 #[utoipa::path(
+    put,
+    path = "/images/{id}",
+    tag = "resources",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Managed image ID ending in .qcow2 or .raw")),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    responses(
+        (status = CREATED, body = ManagedImageResponse),
+        (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = PAYLOAD_TOO_LARGE, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNSUPPORTED_MEDIA_TYPE, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn upload_image(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> AppResult<(StatusCode, Json<ManagedImageResponse>)> {
+    validate_upload_headers(&headers, state.max_image_upload_bytes)?;
+    let jobs = job_service(&state)?;
+    let expected_format = jobs
+        .image_format_for_id(&id)
+        .map_err(AppError::BadRequest)?;
+    let _permit = state
+        .image_uploads
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    let staging = jobs
+        .create_image_staging_path()
+        .map_err(AppError::Internal)?;
+    let partial = receive_upload(
+        body,
+        state.max_image_upload_bytes,
+        staging.clone(),
+        "disk image",
+    )
+    .await?;
+
+    let publish_jobs = jobs.clone();
+    let publish_id = id.clone();
+    let outcome =
+        run_job_store(move || publish_jobs.publish_image(&publish_id, expected_format, &staging))
+            .await?;
+    let image = match outcome {
+        ImagePublishOutcome::Created(image) => image,
+        ImagePublishOutcome::Invalid(detail) => {
+            return Err(AppError::BadRequest(anyhow::anyhow!(detail)));
+        }
+        ImagePublishOutcome::Conflict(detail) => return Err(AppError::Conflict(detail)),
+    };
+    drop(partial);
+    Ok((
+        StatusCode::CREATED,
+        Json(ManagedImageResponse::new(image, Vec::new(), None)),
+    ))
+}
+
+#[utoipa::path(
     post,
     path = "/images/{id}/clone",
     tag = "resources",
@@ -1681,6 +1779,68 @@ impl Drop for PartialUpload {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+fn validate_upload_headers(headers: &HeaderMap, max_bytes: u64) -> AppResult<()> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if content_type != "application/octet-stream" {
+        return Err(AppError::UnsupportedMediaType);
+    }
+    if headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > max_bytes)
+    {
+        return Err(AppError::PayloadTooLarge);
+    }
+    Ok(())
+}
+
+async fn receive_upload(
+    body: Body,
+    max_bytes: u64,
+    staging: PathBuf,
+    kind: &str,
+) -> AppResult<PartialUpload> {
+    let partial = PartialUpload(staging.clone());
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&staging)
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    let mut stream = body.into_data_stream();
+    let mut written = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| AppError::BadRequest(error.into()))?;
+        written = written
+            .checked_add(chunk.len() as u64)
+            .ok_or(AppError::PayloadTooLarge)?;
+        if written > max_bytes {
+            return Err(AppError::PayloadTooLarge);
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| AppError::Internal(error.into()))?;
+    }
+    if written == 0 {
+        return Err(AppError::BadRequest(anyhow::anyhow!(
+            "{kind} upload must not be empty"
+        )));
+    }
+    file.flush()
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    file.sync_all()
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    drop(file);
+    Ok(partial)
 }
 
 #[utoipa::path(
@@ -2210,7 +2370,9 @@ mod tests {
             api_token: Arc::from("test-token"),
             vnc_tickets: Arc::new(Mutex::new(HashMap::new())),
             jobs: None,
+            max_image_upload_bytes: 1024,
             max_iso_upload_bytes: 1024,
+            image_uploads: Arc::new(Semaphore::new(1)),
             iso_uploads: Arc::new(Semaphore::new(1)),
         }
     }
@@ -2226,6 +2388,7 @@ mod tests {
             image_root: PathBuf::from(".tmp/disks"),
             media_root: PathBuf::from(".tmp/iso"),
             log_root: PathBuf::from(".tmp/logs"),
+            max_image_upload_bytes: 1024,
             max_iso_upload_bytes: 1024,
         }
     }
@@ -2608,6 +2771,185 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
 
         drop(app);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn disk_image_upload_is_streamed_validated_and_cloneable() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-web-image-upload-test-{}", Uuid::new_v4()));
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("isos"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        let qcow2_source = directory.join("source.qcow2");
+        crate::disk::create_image(&qcow2_source, crate::config::DiskFormat::Qcow2, "1048576")
+            .unwrap();
+        let qcow2 = std::fs::read(&qcow2_source).unwrap();
+        let raw_source = directory.join("source.raw");
+        crate::disk::create_image(&raw_source, crate::config::DiskFormat::Raw, "1048576").unwrap();
+        let raw = std::fs::read(&raw_source).unwrap();
+        let overlay_source = directory.join("external-backing.qcow2");
+        crate::disk::create_overlay(&overlay_source, &raw_source, crate::config::DiskFormat::Raw)
+            .unwrap();
+        let external_backing = std::fs::read(&overlay_source).unwrap();
+        let oversized_virtual_source = directory.join("oversized-virtual.qcow2");
+        crate::disk::create_image(
+            &oversized_virtual_source,
+            crate::config::DiskFormat::Qcow2,
+            &(crate::jobs::MAX_IMAGE_SIZE_BYTES + 1).to_string(),
+        )
+        .unwrap();
+        let oversized_virtual = std::fs::read(&oversized_virtual_source).unwrap();
+        let max_image_upload_bytes = 2 * 1024 * 1024;
+        let router = app_with_upload_limits(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+            max_image_upload_bytes,
+            40_000,
+        );
+        let upload = |id: &str, bytes: Vec<u8>| {
+            Request::put(format!("/api/v1/images/{id}"))
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(bytes))
+                .unwrap()
+        };
+
+        let response = router
+            .clone()
+            .oneshot(upload("debian.qcow2", qcow2.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let image: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(image["format"], "qcow2");
+        assert_eq!(image["backingImageId"], serde_json::Value::Null);
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(directory.join("images/debian.qcow2"))
+                    .unwrap()
+                    .permissions()
+            ) & 0o777,
+            0o600
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/images/debian.qcow2/clone")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"id":"node-1.qcow2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = router
+            .clone()
+            .oneshot(upload("debian.qcow2", qcow2.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = router
+            .clone()
+            .oneshot(upload("scratch.raw", raw))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = router
+            .clone()
+            .oneshot(upload("mismatch.raw", qcow2.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!directory.join("images/mismatch.raw").exists());
+
+        let response = router
+            .clone()
+            .oneshot(upload("invalid.qcow2", b"not a disk image".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!directory.join("images/invalid.qcow2").exists());
+
+        let response = router
+            .clone()
+            .oneshot(upload("oversized-virtual.qcow2", oversized_virtual))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!directory.join("images/oversized-virtual.qcow2").exists());
+
+        let response = router
+            .clone()
+            .oneshot(upload("external-backing.qcow2", external_backing))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!directory.join("images/external-backing.qcow2").exists());
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/images/wrong-content-type.qcow2")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(qcow2.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/images/declared-too-large.qcow2")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(
+                        header::CONTENT_LENGTH,
+                        (max_image_upload_bytes + 1).to_string(),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let response = router
+            .clone()
+            .oneshot(upload(
+                "streamed-too-large.raw",
+                vec![0_u8; (max_image_upload_bytes + 1) as usize],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(!directory.join("images/streamed-too-large.raw").exists());
+
+        assert_eq!(
+            std::fs::read_dir(directory.join("images/.uploads"))
+                .unwrap()
+                .count(),
+            0
+        );
+        drop(router);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

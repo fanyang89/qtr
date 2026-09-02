@@ -145,6 +145,10 @@ pub struct WebArgs {
     #[arg(long, default_value = ".tmp/logs")]
     pub log_root: PathBuf,
 
+    /// Maximum size of one disk image upload in bytes.
+    #[arg(long, default_value_t = 68_719_476_736)]
+    pub max_image_upload_bytes: u64,
+
     /// Maximum size of one ISO upload in bytes.
     #[arg(long, default_value_t = 34_359_738_368)]
     pub max_iso_upload_bytes: u64,

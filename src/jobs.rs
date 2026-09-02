@@ -175,6 +175,12 @@ pub enum IsoPublishOutcome {
     Exists,
 }
 
+pub enum ImagePublishOutcome {
+    Created(ManagedImage),
+    Invalid(String),
+    Conflict(String),
+}
+
 pub enum ImageCreateOutcome {
     Created(ManagedImage),
     Conflict(String),
@@ -568,6 +574,10 @@ impl JobService {
         validate_image_id(id, format)
     }
 
+    pub fn image_format_for_id(&self, id: &str) -> Result<DiskFormat> {
+        image_format_for_id(id)
+    }
+
     pub fn validate_existing_image_id(&self, id: &str) -> Result<()> {
         validate_existing_image_id(id)
     }
@@ -841,6 +851,84 @@ impl JobService {
             }
         }
         Ok(ids)
+    }
+
+    pub fn create_image_staging_path(&self) -> Result<PathBuf> {
+        let directory = self.roots.images.join(".uploads");
+        std::fs::create_dir_all(&directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+        Ok(directory.join(format!("{}.partial", Uuid::new_v4())))
+    }
+
+    pub fn publish_image(
+        &self,
+        id: &str,
+        expected_format: DiskFormat,
+        staging: &Path,
+    ) -> Result<ImagePublishOutcome> {
+        let _guard = self.lock_resources()?;
+        validate_image_id(id, expected_format)?;
+        if let Some(job_id) = self.active_image_user(id)? {
+            return Ok(ImagePublishOutcome::Conflict(format!(
+                "image is reserved by automated install job {job_id}"
+            )));
+        }
+
+        let info = match disk::image_info(staging) {
+            Ok(info) => info,
+            Err(_) => {
+                return Ok(ImagePublishOutcome::Invalid(format!(
+                    "uploaded image {id:?} is not a valid disk"
+                )));
+            }
+        };
+        if info.format != expected_format {
+            return Ok(ImagePublishOutcome::Invalid(format!(
+                "uploaded image format is {}, but image ID {id:?} requires {}",
+                info.format.as_qemu_arg(),
+                expected_format.as_qemu_arg()
+            )));
+        }
+        if info.backing_file.is_some() {
+            return Ok(ImagePublishOutcome::Invalid(
+                "uploaded image must not reference an external backing file".to_string(),
+            ));
+        }
+        if let Err(error) = validate_image_size(info.virtual_size_bytes) {
+            return Ok(ImagePublishOutcome::Invalid(error.to_string()));
+        }
+
+        let destination = self.roots.images.join(id);
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                return Ok(ImagePublishOutcome::Conflict(format!(
+                    "image {id:?} already exists"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        match std::fs::hard_link(staging, &destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(ImagePublishOutcome::Conflict(format!(
+                    "image {id:?} already exists"
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let image = match image_from_path(id, &destination) {
+            Ok(image) => image,
+            Err(error) => {
+                let _ = std::fs::remove_file(&destination);
+                return Err(error);
+            }
+        };
+        if let Err(error) = std::fs::remove_file(staging) {
+            let _ = std::fs::remove_file(&destination);
+            return Err(error.into());
+        }
+        Ok(ImagePublishOutcome::Created(image))
     }
 
     pub fn create_iso_staging_path(&self) -> Result<PathBuf> {
@@ -1249,6 +1337,15 @@ fn validate_image_id(id: &str, format: DiskFormat) -> Result<()> {
     Ok(())
 }
 
+fn image_format_for_id(id: &str) -> Result<DiskFormat> {
+    validate_existing_image_id(id)?;
+    if id.to_ascii_lowercase().ends_with(".raw") {
+        Ok(DiskFormat::Raw)
+    } else {
+        Ok(DiskFormat::Qcow2)
+    }
+}
+
 fn validate_existing_image_id(id: &str) -> Result<()> {
     validate_id(id, "image ID")?;
     if id.len() > 255 {
@@ -1536,6 +1633,38 @@ mod tests {
 
         first.join().unwrap();
         second.join().unwrap();
+        drop(service);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn image_publish_preserves_active_install_reservations() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-image-publish-test-{}", Uuid::new_v4()));
+        let service = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("media"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        let reserved = service.store.create(&request()).unwrap();
+        let staging = service.create_image_staging_path().unwrap();
+        disk::create_image(&staging, DiskFormat::Qcow2, "1048576").unwrap();
+
+        let outcome = service
+            .publish_image("fedora-test.qcow2", DiskFormat::Qcow2, &staging)
+            .unwrap();
+        match outcome {
+            ImagePublishOutcome::Conflict(detail) => {
+                assert!(detail.contains(&reserved.id));
+            }
+            _ => panic!("reserved image publish should conflict"),
+        }
+        assert!(!directory.join("images/fedora-test.qcow2").exists());
+
+        std::fs::remove_file(staging).unwrap();
         drop(service);
         std::fs::remove_dir_all(directory).unwrap();
     }

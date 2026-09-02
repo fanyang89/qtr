@@ -17,7 +17,7 @@ qtr combines a command-line interface, authenticated Web UI, and REST API for ma
 - Declarative YAML definitions for VM, disk, network, CPU, and memory configuration
 - VM lifecycle operations, managed save state, disk resize, and QEMU Guest Agent commands
 - Browser dashboard with authenticated management APIs and ticketed noVNC consoles
-- Managed disk images, installation media, and live CD-ROM tray operations
+- Managed disk creation, streaming image import, linked clones, installation media, and live CD-ROM tray operations
 - Automated, unattended Fedora Server installation
 - External iSCSI storage discovery and host connections
 - RPM, systemd, and Ansible deployment support for Fedora hosts

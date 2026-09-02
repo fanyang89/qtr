@@ -404,6 +404,25 @@ export async function getIsos(): Promise<ManagedIso[]> {
   return parseResponse(apiClient.get('/media'), managedIsoArraySchema)
 }
 
+export async function uploadDiskImage(
+  id: string,
+  file: File,
+  options: {
+    signal?: AbortSignal
+    onProgress?: (loaded: number, total: number) => void
+  } = {}
+): Promise<ManagedImage> {
+  return parseResponse(
+    apiClient.put(`/images/${encodeURIComponent(id)}`, file, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+      signal: options.signal,
+      onUploadProgress: (event) =>
+        options.onProgress?.(event.loaded, file.size),
+    }),
+    managedImageSchema
+  )
+}
+
 export async function uploadIso(
   id: string,
   file: File,
