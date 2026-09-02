@@ -1,15 +1,16 @@
 use std::{
     fs::{DirBuilder, File, OpenOptions},
-    io::Write as _,
+    io::{Read as _, Write as _},
     os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Sender},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -105,15 +106,26 @@ impl FedoraInstallRequest {
 const MAX_CLOUD_INIT_ID_BYTES: usize = 255;
 const MAX_CLOUD_INIT_FIELD_BYTES: usize = 1024 * 1024;
 const MAX_CLOUD_INIT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+const CLOUD_INIT_BUILDER_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloudInitSeedRequest {
+    #[schema(
+        min_length = 5,
+        max_length = 255,
+        pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*\.[iI][sS][oO]$"
+    )]
     pub id: String,
+    #[schema(min_length = 1, max_length = 255)]
     pub instance_id: String,
+    #[schema(min_length = 1, max_length = 253)]
     pub local_hostname: String,
+    #[schema(max_length = 1048576)]
     pub user_data: String,
+    #[schema(max_length = 1048576)]
     pub network_config: Option<String>,
+    #[schema(max_length = 1048576)]
     pub vendor_data: Option<String>,
 }
 
@@ -1022,13 +1034,31 @@ impl JobService {
         let builder = which::which("genisoimage").context(
             "genisoimage is required to create cloud-init seed ISOs; install the genisoimage package",
         )?;
-        self.create_cloud_init_seed_with_builder(request, &builder)
+        self.create_cloud_init_seed_with_builder_timeout(
+            request,
+            &builder,
+            CLOUD_INIT_BUILDER_TIMEOUT,
+        )
     }
 
+    #[cfg(test)]
     fn create_cloud_init_seed_with_builder(
         &self,
         request: &CloudInitSeedRequest,
         builder: &Path,
+    ) -> Result<IsoPublishOutcome> {
+        self.create_cloud_init_seed_with_builder_timeout(
+            request,
+            builder,
+            CLOUD_INIT_BUILDER_TIMEOUT,
+        )
+    }
+
+    fn create_cloud_init_seed_with_builder_timeout(
+        &self,
+        request: &CloudInitSeedRequest,
+        builder: &Path,
+        timeout: Duration,
     ) -> Result<IsoPublishOutcome> {
         request.validate()?;
         let uploads = self.roots.media.join(".uploads");
@@ -1061,57 +1091,30 @@ impl JobService {
             source_names.push("vendor-data");
         }
 
-        let staging = self.create_iso_staging_path()?;
-        let _staging_guard = TemporaryFile(staging.clone());
-        let staging_parent = staging
-            .parent()
-            .context("cloud-init ISO staging path has no parent")?
-            .canonicalize()
-            .with_context(|| {
-                format!(
-                    "failed to resolve cloud-init ISO staging directory {}",
-                    uploads.display()
-                )
-            })?;
-        let staging_file_name = staging
-            .file_name()
-            .context("cloud-init ISO staging path has no file name")?;
-        let absolute_staging = staging_parent.join(staging_file_name);
-
-        let output = Command::new(builder)
+        let staging = source_directory.join("seed.iso");
+        let mut command = Command::new(builder);
+        command
             .current_dir(&source_directory)
             .args([
                 "-quiet",
                 "-output",
-                absolute_staging
-                    .to_str()
-                    .context("cloud-init ISO staging path is not valid UTF-8")?,
+                "seed.iso",
                 "-volid",
                 "cidata",
                 "-rational-rock",
                 "-joliet",
             ])
-            .args(&source_names)
-            .output()
-            .with_context(|| format!("failed to execute ISO builder {}", builder.display()))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "ISO builder {} failed with {}: {}",
-                builder.display(),
-                output.status,
-                stderr.trim()
-            );
-        }
-        if !absolute_staging.is_file() {
+            .args(&source_names);
+        run_builder_with_timeout(&mut command, builder, timeout)?;
+        if !staging.is_file() {
             bail!(
                 "ISO builder {} did not create {}",
                 builder.display(),
-                absolute_staging.display()
+                staging.display()
             );
         }
 
-        self.publish_iso(&request.id, &absolute_staging)
+        self.publish_iso(&request.id, &staging)
     }
 
     pub fn create_iso_staging_path(&self) -> Result<PathBuf> {
@@ -1159,9 +1162,18 @@ impl JobService {
                 return Err(error);
             }
         };
+        if let Err(error) = sync_directory(&self.roots.media) {
+            let _ = std::fs::remove_file(&destination);
+            let _ = sync_directory(&self.roots.media);
+            return Err(error);
+        }
         if let Err(error) = std::fs::remove_file(staging) {
             let _ = std::fs::remove_file(&destination);
+            let _ = sync_directory(&self.roots.media);
             return Err(error.into());
+        }
+        if let Some(parent) = staging.parent() {
+            sync_directory(parent)?;
         }
         Ok(IsoPublishOutcome::Created(iso))
     }
@@ -1597,16 +1609,93 @@ struct TemporaryDirectory(PathBuf);
 
 impl Drop for TemporaryDirectory {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let parent = self.0.parent().map(Path::to_path_buf);
+        if std::fs::remove_dir_all(&self.0).is_ok()
+            && let Some(parent) = parent
+        {
+            let _ = sync_directory(&parent);
+        }
     }
 }
 
-struct TemporaryFile(PathBuf);
+fn run_builder_with_timeout(
+    command: &mut Command,
+    builder: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    const STDERR_LIMIT: usize = 64 * 1024;
 
-impl Drop for TemporaryFile {
-    fn drop(&mut self) {
-        remove_staging_file(&self.0);
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to execute ISO builder {}", builder.display()))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("failed to capture ISO builder stderr")?;
+    let stderr_reader = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut kept = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = stderr.read(&mut buffer)?;
+            if count == 0 {
+                return Ok(kept);
+            }
+            let remaining = STDERR_LIMIT.saturating_sub(kept.len());
+            kept.extend_from_slice(&buffer[..count.min(remaining)]);
+        }
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let kill_result = child.kill();
+                let wait_result = child.wait();
+                let _ = stderr_reader.join();
+                kill_result.with_context(|| {
+                    format!(
+                        "failed to terminate timed-out ISO builder {}",
+                        builder.display()
+                    )
+                })?;
+                wait_result.with_context(|| {
+                    format!("failed to reap timed-out ISO builder {}", builder.display())
+                })?;
+                bail!(
+                    "ISO builder {} timed out after {} seconds",
+                    builder.display(),
+                    timeout.as_secs_f64()
+                );
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stderr_reader.join();
+                return Err(error).with_context(|| {
+                    format!("failed to wait for ISO builder {}", builder.display())
+                });
+            }
+        }
+    };
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("ISO builder stderr reader panicked"))?
+        .context("failed to read ISO builder stderr")?;
+    if !status.success() {
+        bail!(
+            "ISO builder {} failed with {}: {}",
+            builder.display(),
+            status,
+            String::from_utf8_lossy(&stderr).trim()
+        );
     }
+    Ok(())
 }
 
 fn write_private_file(path: &Path, contents: &str) -> Result<()> {
@@ -1621,6 +1710,13 @@ fn write_private_file(path: &Path, contents: &str) -> Result<()> {
     file.sync_all()
         .with_context(|| format!("failed to sync {}", path.display()))?;
     Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("failed to open directory {}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to sync directory {}", path.display()))
 }
 
 fn remove_staging_file(path: &Path) {
@@ -1771,6 +1867,24 @@ printf CD001 | dd of="$output" bs=1 seek=32769 conv=notrunc 2>/dev/null
             .to_string()
         };
         std::fs::write(&builder, body).unwrap();
+        let mut permissions = std::fs::metadata(&builder).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&builder, permissions).unwrap();
+        builder
+    }
+
+    fn blocking_iso_builder(directory: &Path) -> PathBuf {
+        std::fs::create_dir_all(directory).unwrap();
+        let builder = directory.join("genisoimage-blocking");
+        std::fs::write(
+            &builder,
+            r#"#!/bin/sh
+set -eu
+printf '%s' "$PWD" > "$(dirname "$0")/started"
+while :; do :; done
+"#,
+        )
+        .unwrap();
         let mut permissions = std::fs::metadata(&builder).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&builder, permissions).unwrap();
@@ -2129,6 +2243,59 @@ printf CD001 | dd of="$output" bs=1 seek=32769 conv=notrunc 2>/dev/null
                 .unwrap(),
             IsoPublishOutcome::Exists
         ));
+        assert!(
+            std::fs::read_dir(directory.join("media/.uploads"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+
+        drop(service);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cloud_init_builder_timeout_keeps_partial_output_private_and_cleans_it() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-cloud-init-timeout-test-{}", Uuid::new_v4()));
+        let service = service(&directory);
+        let builder_directory = directory.join("builder");
+        let builder = blocking_iso_builder(&builder_directory);
+        let worker_service = service.clone();
+        let worker_builder = builder.clone();
+        let worker = thread::spawn(move || {
+            worker_service.create_cloud_init_seed_with_builder_timeout(
+                &cloud_init_request(),
+                &worker_builder,
+                Duration::from_millis(500),
+            )
+        });
+        let started = builder_directory.join("started");
+        for _ in 0..100 {
+            if started.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let source_directory = PathBuf::from(std::fs::read_to_string(&started).unwrap());
+        let mode = std::fs::metadata(&source_directory)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+        assert!(
+            std::fs::read_dir(directory.join("media/.uploads"))
+                .unwrap()
+                .all(|entry| entry.unwrap().file_type().unwrap().is_dir())
+        );
+
+        let error = match worker.join().unwrap() {
+            Ok(_) => panic!("blocking builder unexpectedly created an ISO"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("timed out"));
+        assert!(!directory.join("media/node-1-seed.iso").exists());
         assert!(
             std::fs::read_dir(directory.join("media/.uploads"))
                 .unwrap()

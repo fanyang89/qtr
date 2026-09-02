@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{
-        Path, Query, Request, State,
+        DefaultBodyLimit, Path, Query, Request, State,
         rejection::{JsonRejection, QueryRejection},
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
@@ -50,6 +50,8 @@ use crate::{
     },
     network, vm,
 };
+
+const MAX_CLOUD_INIT_JSON_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
@@ -699,6 +701,9 @@ fn app_with_upload_limits(
 }
 
 fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenApi) {
+    let cloud_init_api = OpenApiRouter::new()
+        .routes(routes!(create_cloud_init_seed))
+        .layer(DefaultBodyLimit::max(MAX_CLOUD_INIT_JSON_BYTES));
     let protected_api = OpenApiRouter::new()
         .routes(routes!(list_vms, create_vm))
         .routes(routes!(get_vm, update_vm, undefine_vm))
@@ -719,7 +724,7 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(set_cdrom_media, eject_cdrom_media))
         .routes(routes!(remove_cdrom_tray))
         .routes(routes!(list_media))
-        .routes(routes!(create_cloud_init_seed))
+        .merge(cloud_init_api)
         .routes(routes!(upload_iso, delete_iso))
         .routes(routes!(list_networks))
         .route_layer(middleware::from_fn_with_state(
@@ -1870,6 +1875,7 @@ async fn receive_upload(
         (status = BAD_REQUEST, body = ProblemDetails, content_type = "application/problem+json"),
         (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
         (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = PAYLOAD_TOO_LARGE, body = ProblemDetails, content_type = "application/problem+json"),
         (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
     )
 )]
@@ -1879,15 +1885,12 @@ async fn create_cloud_init_seed(
 ) -> AppResult<(StatusCode, Json<ManagedIsoResponse>)> {
     let request = api_json(request)?;
     request.validate().map_err(AppError::BadRequest)?;
-    let _permit = state
-        .iso_uploads
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| AppError::Internal(error.into()))?;
     let jobs = job_service(&state)?;
     let seed_id = request.id.clone();
-    let outcome = run_job_store(move || jobs.create_cloud_init_seed(&request)).await?;
+    let outcome = run_serialized_job(state.iso_uploads, move || {
+        jobs.create_cloud_init_seed(&request)
+    })
+    .await?;
     let resource = match outcome {
         IsoPublishOutcome::Created(resource) => resource,
         IsoPublishOutcome::Exists => {
@@ -2098,6 +2101,22 @@ where
         .map_err(AppError::Internal)
 }
 
+async fn run_serialized_job<T, F>(semaphore: Arc<Semaphore>, task: F) -> AppResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    let permit = semaphore
+        .acquire_owned()
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    run_job_store(move || {
+        let _permit = permit;
+        task()
+    })
+    .await
+}
+
 const VNC_TICKET_LIFETIME: Duration = Duration::from_secs(30);
 
 #[utoipa::path(
@@ -2251,9 +2270,13 @@ async fn require_bearer_token(
 }
 
 fn api_json<T>(request: std::result::Result<Json<T>, JsonRejection>) -> AppResult<T> {
-    request
-        .map(|Json(value)| value)
-        .map_err(|error| vm::VmApiError::InvalidRequest(anyhow::anyhow!(error.body_text())).into())
+    request.map(|Json(value)| value).map_err(|error| {
+        if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            AppError::PayloadTooLarge
+        } else {
+            vm::VmApiError::InvalidRequest(anyhow::anyhow!(error.body_text())).into()
+        }
+    })
 }
 
 async fn api_not_found() -> Response {
@@ -2636,6 +2659,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_serialized_job_retains_permit_until_worker_exits() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task_semaphore = semaphore.clone();
+        let task = tokio::spawn(async move {
+            run_serialized_job(task_semaphore, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("worker did not start in time")
+            .expect("worker exited before signaling start");
+
+        task.abort();
+        tokio::task::yield_now().await;
+        assert!(semaphore.try_acquire().is_err());
+        release_tx.send(()).unwrap();
+        for _ in 0..100 {
+            if semaphore.available_permits() == 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("worker did not release serialized job permit");
+    }
+
+    #[tokio::test]
     async fn openapi_document_describes_versioned_bearer_api() {
         let router = app(
             "test:///default".to_string(),
@@ -2681,9 +2736,13 @@ mod tests {
         assert!(update_properties["numaTune"]["oneOf"].is_array());
         let cloud_init_properties =
             &document["components"]["schemas"]["CloudInitSeedRequest"]["properties"];
-        assert!(cloud_init_properties["instanceId"].is_object());
-        assert!(cloud_init_properties["localHostname"].is_object());
-        assert!(cloud_init_properties["userData"].is_object());
+        assert_eq!(cloud_init_properties["id"]["maxLength"], 255);
+        assert_eq!(cloud_init_properties["instanceId"]["maxLength"], 255);
+        assert_eq!(cloud_init_properties["localHostname"]["maxLength"], 253);
+        assert_eq!(cloud_init_properties["userData"]["maxLength"], 1_048_576);
+        assert!(
+            document["paths"]["/api/v1/media/cloud-init"]["post"]["responses"]["413"].is_object()
+        );
         let install_properties =
             &document["components"]["schemas"]["FedoraInstallRequest"]["properties"];
         assert!(install_properties["mediaId"].is_object());
@@ -2694,6 +2753,50 @@ mod tests {
             document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
             "bearer"
         );
+    }
+
+    #[tokio::test]
+    async fn cloud_init_endpoint_accepts_escaped_payloads_above_default_json_limit() {
+        let router = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            None,
+        );
+        let body = serde_json::to_vec(&serde_json::json!({
+            "id": "node-1.iso",
+            "instanceId": "node-1",
+            "localHostname": "node-1",
+            "userData": "\u{1}".repeat(400_000),
+        }))
+        .unwrap();
+        assert!(body.len() > 2 * 1024 * 1024);
+        assert!(body.len() < MAX_CLOUD_INIT_JSON_BYTES);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/media/cloud-init")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let response = router
+            .oneshot(
+                Request::post("/api/v1/media/cloud-init")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(vec![b' '; MAX_CLOUD_INIT_JSON_BYTES + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

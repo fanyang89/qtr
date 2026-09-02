@@ -864,6 +864,16 @@
               }
             }
           },
+          "413": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
           "500": {
             "description": "",
             "content": {
@@ -2335,28 +2345,38 @@
         ],
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 5,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.[iI][sS][oO]$"
           },
           "instanceId": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1
           },
           "localHostname": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 253,
+            "minLength": 1
           },
           "networkConfig": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 1048576
           },
           "userData": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 1048576
           },
           "vendorData": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 1048576
           }
         },
         "additionalProperties": false

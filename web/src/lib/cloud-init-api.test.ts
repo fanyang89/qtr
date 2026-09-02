@@ -44,9 +44,26 @@ describe('cloud-init seed API', () => {
 
   test('accepts empty user data and optional NoCloud content', () => {
     expect(cloudInitSeedInputSchema.parse(input)).toEqual(input)
-    expect(() =>
-      cloudInitSeedInputSchema.parse({ ...input, instanceId: '' })
-    ).toThrow()
+  })
+
+  test('enforces server ID, hostname, UTF-8 byte, and aggregate limits', () => {
+    for (const invalid of [
+      { ...input, id: '../node.iso' },
+      { ...input, id: '.hidden.iso' },
+      { ...input, instanceId: ' ' },
+      { ...input, instanceId: 'node\0one' },
+      { ...input, instanceId: 'é'.repeat(128) },
+      { ...input, localHostname: 'bad_host' },
+      { ...input, localHostname: '-node' },
+      { ...input, userData: '🙂'.repeat(262_145) },
+      {
+        ...input,
+        networkConfig: 'x'.repeat(1024 * 1024),
+        vendorData: 'x'.repeat(1024 * 1024),
+      },
+    ]) {
+      expect(() => cloudInitSeedInputSchema.parse(invalid)).toThrow()
+    }
   })
 
   test('posts the camel-case seed request and parses managed media', async () => {
@@ -54,5 +71,12 @@ describe('cloud-init seed API', () => {
 
     await expect(createCloudInitSeed(input)).resolves.toEqual(response)
     expect(axiosMocks.post).toHaveBeenCalledWith('/media/cloud-init', input)
+  })
+
+  test('rejects invalid input before sending a request', async () => {
+    await expect(
+      createCloudInitSeed({ ...input, localHostname: 'bad_host' })
+    ).rejects.toThrow()
+    expect(axiosMocks.post).not.toHaveBeenCalled()
   })
 })

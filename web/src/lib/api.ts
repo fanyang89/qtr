@@ -203,20 +203,90 @@ export type ImageCreateInput = {
   sizeBytes: number
 }
 
-export const cloudInitSeedInputSchema = z.object({
-  id: z.string().min(1),
-  instanceId: z.string().min(1).max(255),
-  localHostname: z.string().min(1).max(253),
-  userData: z.string().max(1024 * 1024),
-  networkConfig: z
-    .string()
-    .max(1024 * 1024)
-    .optional(),
-  vendorData: z
-    .string()
-    .max(1024 * 1024)
-    .optional(),
-})
+const cloudInitTextEncoder = new TextEncoder()
+const cloudInitFieldMaxBytes = 1024 * 1024
+const cloudInitTotalMaxBytes = 2 * 1024 * 1024
+const cloudInitIsoIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]*\.iso$/i
+const cloudInitHostnameLabelPattern =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/
+
+function utf8Bytes(value: string): number {
+  return cloudInitTextEncoder.encode(value).byteLength
+}
+
+export const cloudInitSeedInputSchema = z
+  .object({
+    id: z.string(),
+    instanceId: z.string(),
+    localHostname: z.string(),
+    userData: z.string(),
+    networkConfig: z.string().optional(),
+    vendorData: z.string().optional(),
+  })
+  .superRefine((value, context) => {
+    if (!cloudInitIsoIdPattern.test(value.id) || utf8Bytes(value.id) > 255) {
+      context.addIssue({
+        code: 'custom',
+        path: ['id'],
+        message: 'Use a safe managed media ID ending in .iso',
+      })
+    }
+    if (
+      value.instanceId.trim().length === 0 ||
+      value.instanceId.includes('\0') ||
+      utf8Bytes(value.instanceId) > 255
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['instanceId'],
+        message:
+          'Instance ID must be non-blank, NUL-free, and at most 255 bytes',
+      })
+    }
+    const hostnameBytes = utf8Bytes(value.localHostname)
+    if (
+      hostnameBytes === 0 ||
+      hostnameBytes > 253 ||
+      value.localHostname
+        .split('.')
+        .some((label) => !cloudInitHostnameLabelPattern.test(label))
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['localHostname'],
+        message: 'Use a valid DNS hostname of at most 253 bytes',
+      })
+    }
+    const contentFields = [
+      ['userData', value.userData],
+      ['networkConfig', value.networkConfig],
+      ['vendorData', value.vendorData],
+    ] as const
+    for (const [name, content] of contentFields) {
+      if (
+        content !== undefined &&
+        utf8Bytes(content) > cloudInitFieldMaxBytes
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: [name],
+          message: `Must not exceed ${cloudInitFieldMaxBytes} UTF-8 bytes`,
+        })
+      }
+    }
+    const totalBytes =
+      utf8Bytes(value.instanceId) +
+      hostnameBytes +
+      utf8Bytes(value.userData) +
+      utf8Bytes(value.networkConfig ?? '') +
+      utf8Bytes(value.vendorData ?? '')
+    if (totalBytes > cloudInitTotalMaxBytes) {
+      context.addIssue({
+        code: 'custom',
+        message: `Cloud-init seed content must not exceed ${cloudInitTotalMaxBytes} UTF-8 bytes`,
+      })
+    }
+  })
 
 export type CloudInitSeedInput = z.infer<typeof cloudInitSeedInputSchema>
 
@@ -424,8 +494,9 @@ export async function getIsos(): Promise<ManagedIso[]> {
 export async function createCloudInitSeed(
   input: CloudInitSeedInput
 ): Promise<ManagedIso> {
+  const request = cloudInitSeedInputSchema.parse(input)
   return parseResponse(
-    apiClient.post('/media/cloud-init', input),
+    apiClient.post('/media/cloud-init', request),
     managedIsoSchema
   )
 }
