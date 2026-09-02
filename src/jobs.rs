@@ -620,7 +620,7 @@ impl JobService {
             let image = image_from_path(id, &destination)?;
             Ok(ImageCreateOutcome::Created(image))
         })();
-        let _ = std::fs::remove_file(staging);
+        remove_staging_file(&staging);
         result
     }
 
@@ -701,7 +701,7 @@ impl JobService {
             let image = image_from_path(destination_id, &destination)?;
             Ok(ImageCloneOutcome::Created(image))
         })();
-        let _ = std::fs::remove_file(staging);
+        remove_staging_file(&staging);
         result
     }
 
@@ -715,6 +715,12 @@ impl JobService {
 
     pub fn active_image_user(&self, id: &str) -> Result<Option<String>> {
         self.store.active_resource_user("", &[id.to_string()])
+    }
+
+    pub fn managed_image_dependents(&self, id: &str) -> Result<Vec<String>> {
+        validate_existing_image_id(id)?;
+        let path = self.resolve_image(id)?;
+        dependent_image_ids(&self.roots.images, &path)
     }
 
     pub fn delete_image<F>(&self, id: &str, vm_users: F) -> Result<ImageDeleteOutcome>
@@ -1144,9 +1150,30 @@ fn dependent_image_ids(root: &Path, backing_file: &Path) -> Result<Vec<String>> 
         if path.canonicalize().ok().as_ref() == Some(&backing_file) {
             continue;
         }
-        let Ok(info) = disk::image_info(&path) else {
-            continue;
+        let is_qcow2_candidate = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("qcow2"));
+        let info = match disk::image_info(&path) {
+            Ok(info) => info,
+            Err(error) if is_qcow2_candidate => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "cannot verify whether managed qcow2 image {} depends on {}",
+                        path.display(),
+                        backing_file.display()
+                    )
+                });
+            }
+            Err(_) => continue,
         };
+        if is_qcow2_candidate && info.format != DiskFormat::Qcow2 {
+            bail!(
+                "cannot verify whether managed qcow2 image {} depends on {}: image format is not qcow2",
+                path.display(),
+                backing_file.display()
+            );
+        }
         let Some(candidate) = info.backing_file.as_deref() else {
             continue;
         };
@@ -1263,6 +1290,20 @@ fn resource_from_path(id: &str, path: &Path) -> Result<ManagedResource> {
         virtual_size_bytes: None,
         modified_at_ms,
     })
+}
+
+fn remove_staging_file(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to remove staged image"
+            );
+        }
+    }
 }
 
 fn cleanup_staging(directory: &Path) -> Result<()> {
@@ -1546,6 +1587,24 @@ mod tests {
         assert_eq!(images[0].id, "broken.qcow2");
         assert_eq!(images[0].status, ManagedImageStatus::Invalid);
         assert_eq!(images[1].status, ManagedImageStatus::Invalid);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn dependency_discovery_fails_closed_for_uninspectable_qcow2_images() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-dependency-test-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let backing = directory.join("base.raw");
+        disk::create_image(&backing, DiskFormat::Raw, "1048576").unwrap();
+        std::fs::write(directory.join("uninspectable.qcow2"), b"not a qcow2 image").unwrap();
+
+        let error = dependent_image_ids(&directory, &backing).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot verify whether managed qcow2 image")
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 

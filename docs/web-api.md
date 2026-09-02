@@ -36,7 +36,7 @@ The Disks page creates, expands, and deletes managed raw and qcow2 images withou
 
 Managed images can be attached to or detached from powered-off VMs on the VM detail page. A writable image can be attached to only one VM, and qtr refuses to detach a VM's last disk. Expanding virtual capacity does not resize guest partitions or filesystems.
 
-`POST /api/v1/images/{id}/clone` creates a managed qcow2 linked clone of an existing raw or qcow2 image. The request body supplies the new `.qcow2` image ID, and the response reports the source as `backingImageId`. The source must not be attached to a VM or reserved by an install job. A backing image cannot be resized or deleted while a managed overlay depends on it; deleting an overlay leaves its backing image intact.
+`POST /api/v1/images/{id}/clone` creates a managed qcow2 linked clone of an existing raw or qcow2 image. The request body supplies the new `.qcow2` image ID, and the response reports the source as `backingImageId`. The source must not be attached to a VM or reserved by an install job. A backing image cannot be attached writable, resized, or deleted while a managed overlay depends on it; deleting an overlay leaves its backing image intact.
 
 ## Network Security
 

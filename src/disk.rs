@@ -53,6 +53,7 @@ fn qemu_img_info(path: &Path) -> Result<QemuImgInfo> {
         "qemu-img",
         [
             OsString::from("info"),
+            OsString::from("-U"),
             OsString::from("--output=json"),
             path.as_os_str().to_os_string(),
         ],

@@ -844,6 +844,7 @@ async fn create_vm(
             let manifest = request
                 .into_manifest(&jobs)
                 .map_err(vm::VmApiError::InvalidRequest)?;
+            reject_writable_backing_images(&jobs, &image_ids)?;
             let network_id = manifest.network.clone().unwrap_or_default();
             network::ensure_active(&connect_uri, &network_id)
                 .map_err(vm::VmApiError::InvalidRequest)?;
@@ -900,7 +901,16 @@ async fn update_vm(
                     .filter_map(vm::VmDiskEntry::as_present)
                     .map(|disk| disk.path.as_path()),
             )?;
+            let writable_image_ids = jobs.managed_image_ids(
+                manifest
+                    .disks
+                    .iter()
+                    .filter_map(vm::VmDiskEntry::as_present)
+                    .filter(|disk| disk.readonly != Some(true))
+                    .map(|disk| disk.path.as_path()),
+            )?;
             reject_active_install(&jobs, &vm_name, &image_ids)?;
+            reject_writable_backing_images(&jobs, &writable_image_ids)?;
             for attachment in vm::managed_image_attachments(&connect_uri, jobs.image_root())? {
                 if attachment.vm_name != vm_name && image_ids.contains(&attachment.image_id) {
                     return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
@@ -1095,6 +1105,17 @@ fn reject_active_install(
         return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
             "VM is reserved by automated install job {job_id}"
         )));
+    }
+    Ok(())
+}
+
+fn reject_writable_backing_images(jobs: &JobService, image_ids: &[String]) -> vm::VmApiResult<()> {
+    for image_id in image_ids {
+        if let Some(dependent_id) = jobs.managed_image_dependents(image_id)?.into_iter().next() {
+            return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
+                "image {image_id} is the backing image for managed overlay {dependent_id}"
+            )));
+        }
     }
     Ok(())
 }
@@ -1395,6 +1416,7 @@ async fn attach_image(
                     "image {image_id:?} is not a valid disk"
                 ))
             })?;
+            reject_writable_backing_images(&jobs, std::slice::from_ref(&image_id))?;
             for attachment in vm::managed_image_attachments(&connect_uri, jobs.image_root())? {
                 if attachment.image_id == image_id && attachment.vm_name != name {
                     return Err(vm::VmApiError::Conflict(anyhow::anyhow!(
@@ -2730,6 +2752,28 @@ mod tests {
             .unwrap();
         let image: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(image["backingImageId"], "base.qcow2");
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/vms")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "name":"backing-image-user",
+                            "resources":{"vcpus":1,"memoryMib":512},
+                            "disks":[{"imageId":"base.raw","format":"raw","bus":"virtio-blk"}],
+                            "networkId":"default",
+                            "mediaId":null,
+                            "console":{"graphics":"none","serialLog":false}
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
 
         let response = router.clone().oneshot(clone_request()).await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
