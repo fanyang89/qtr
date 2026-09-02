@@ -874,6 +874,7 @@ async fn get_vm(
         (status = OK, body = vm::VmGuestStatus),
         (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
         (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
         (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
     )
 )]
@@ -2793,6 +2794,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/vms/{name}/guest-status"]["get"]["security"][0],
             serde_json::json!({"bearerAuth": []})
+        );
+        assert!(
+            document["paths"]["/api/v1/vms/{name}/guest-status"]["get"]["responses"]["409"]
+                .is_object()
         );
         assert!(document["paths"]["/api/v1/install-jobs"].is_object());
         assert!(document["paths"]["/api/v1/images"].is_object());

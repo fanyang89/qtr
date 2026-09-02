@@ -95,9 +95,17 @@ pub struct GuestFileChunk {
 }
 
 #[derive(Debug, Deserialize)]
+struct GuestPingResponse {
+    #[serde(rename = "return")]
+    _result: serde_json::Map<String, serde_json::Value>,
+    error: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
 struct GuestNetworkInterfacesResponse {
     #[serde(rename = "return")]
     result: Vec<GuestNetworkInterfaceResponse>,
+    error: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,7 +227,11 @@ struct GuestExecArgs<'a> {
 
 pub fn observe_network(domain: &Domain, timeout: Duration) -> GuestNetworkObservation {
     let deadline = GuestAgentDeadline::new(timeout);
-    if send_deadline_command(domain, r#"{"execute":"guest-ping"}"#, &deadline).is_err() {
+    let Ok(ping_response) = send_deadline_command(domain, r#"{"execute":"guest-ping"}"#, &deadline)
+    else {
+        return GuestNetworkObservation::default();
+    };
+    if parse_guest_ping_response(&ping_response).is_err() {
         return GuestNetworkObservation::default();
     }
 
@@ -258,9 +270,21 @@ fn observation_from_network_response(
     }
 }
 
+fn parse_guest_ping_response(response: &str) -> Result<()> {
+    let response: GuestPingResponse =
+        serde_json::from_str(response).context("invalid guest-ping response")?;
+    if response.error.is_some() {
+        bail!("guest-ping response contains an error");
+    }
+    Ok(())
+}
+
 fn parse_network_interfaces(response: &str) -> Result<Vec<GuestNetworkInterface>> {
     let response: GuestNetworkInterfacesResponse =
         serde_json::from_str(response).context("invalid guest-network-get-interfaces response")?;
+    if response.error.is_some() {
+        bail!("guest-network-get-interfaces response contains an error");
+    }
     let mut interfaces = response
         .result
         .into_iter()
@@ -310,6 +334,7 @@ fn is_usable_ipv4(address: Ipv4Addr) -> bool {
         && !address.is_unspecified()
         && !address.is_multicast()
         && !address.is_link_local()
+        && !address.is_broadcast()
 }
 
 fn is_usable_ipv6(address: Ipv6Addr) -> bool {
@@ -317,6 +342,7 @@ fn is_usable_ipv6(address: Ipv6Addr) -> bool {
         && !address.is_unspecified()
         && !address.is_multicast()
         && !address.is_unicast_link_local()
+        && address.to_ipv4_mapped().is_none()
 }
 
 pub fn wait_ready_with_deadline(domain: &Domain, deadline: &GuestAgentDeadline) -> Result<()> {
@@ -841,10 +867,27 @@ mod tests {
     }
 
     #[test]
+    fn validates_guest_ping_success_envelopes() {
+        assert!(parse_guest_ping_response(r#"{"return":{}}"#).is_ok());
+        assert!(parse_guest_ping_response(r#"{"return":{},"future":true}"#).is_ok());
+        for response in [
+            "not-json",
+            r#"{}"#,
+            r#"{"return":[]}"#,
+            r#"{"error":{"class":"GenericError","desc":"failed"}}"#,
+            r#"{"return":{},"error":{"class":"GenericError","desc":"failed"}}"#,
+        ] {
+            assert!(parse_guest_ping_response(response).is_err(), "{response}");
+        }
+    }
+
+    #[test]
     fn rejects_malformed_guest_network_payloads() {
         for response in [
             r#"{}"#,
             r#"{"return":{}}"#,
+            r#"{"error":{"class":"GenericError","desc":"disabled"}}"#,
+            r#"{"return":[],"error":{"class":"GenericError","desc":"failed"}}"#,
             r#"{"return":[{"hardware-address":"52:54:00:00:00:01"}]}"#,
             r#"{"return":[{"name":"eth0","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"192.0.2.1"}]}]}"#,
             r#"{"return":[{"name":"eth0","ip-addresses":[{"ip-address-type":"ipx","ip-address":"x","prefix":1}]}]}"#,
@@ -861,12 +904,31 @@ mod tests {
             (GuestNetworkAddressType::Ipv4, "0.0.0.0", 0, false),
             (GuestNetworkAddressType::Ipv4, "224.0.0.1", 4, false),
             (GuestNetworkAddressType::Ipv4, "169.254.1.2", 16, false),
+            (GuestNetworkAddressType::Ipv4, "255.255.255.255", 32, false),
             (GuestNetworkAddressType::Ipv4, "192.0.2.1", 33, false),
             (GuestNetworkAddressType::Ipv6, "2001:db8::1", 64, true),
             (GuestNetworkAddressType::Ipv6, "::1", 128, false),
             (GuestNetworkAddressType::Ipv6, "::", 0, false),
             (GuestNetworkAddressType::Ipv6, "ff02::1", 16, false),
             (GuestNetworkAddressType::Ipv6, "fe80::1", 64, false),
+            (
+                GuestNetworkAddressType::Ipv6,
+                "::ffff:127.0.0.1",
+                128,
+                false,
+            ),
+            (
+                GuestNetworkAddressType::Ipv6,
+                "::ffff:169.254.1.2",
+                128,
+                false,
+            ),
+            (
+                GuestNetworkAddressType::Ipv6,
+                "::ffff:192.0.2.1",
+                128,
+                false,
+            ),
             (GuestNetworkAddressType::Ipv6, "2001:db8::1", 129, false),
             (GuestNetworkAddressType::Ipv4, "2001:db8::1", 24, false),
             (GuestNetworkAddressType::Ipv6, "not-an-address", 64, false),

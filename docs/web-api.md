@@ -26,7 +26,7 @@ SQLite uses WAL mode, queued jobs resume after restart, and jobs that were runni
 
 Authenticated automation can query `GET /api/v1/vms/{name}/guest-status` without adding Guest Agent latency to the normal VM list or detail endpoints. Each request is a one-shot observation bounded to about two seconds. Existing inactive VMs and running guests without a responsive QEMU Guest Agent still return `200`: inspect `domainState`, `guestAgentReady`, and `networkInterfacesAvailable` instead of treating HTTP success as guest readiness.
 
-When the Guest Agent supports `guest-network-get-interfaces`, the response includes deterministically ordered interfaces and addresses. `usable` is false for malformed, loopback, unspecified, multicast, or link-local addresses. Poll this endpoint with a deadline and backoff until `guestAgentReady`, `networkInterfacesAvailable`, and at least one address suitable for the caller are present; then perform a protocol-specific readiness check such as opening SSH. The endpoint does not wait for SSH or expose Guest Agent errors.
+When the Guest Agent supports `guest-network-get-interfaces`, the response includes deterministically ordered interfaces and addresses. `usable` is false for malformed, loopback, unspecified, multicast, link-local, IPv4 broadcast, or IPv4-mapped IPv6 addresses. Poll this endpoint with a deadline and backoff until `guestAgentReady`, `networkInterfacesAvailable`, and at least one address suitable for the caller are present; then perform a protocol-specific readiness check such as opening SSH. The endpoint does not wait for SSH or expose Guest Agent errors.
 
 ## Installation Media
 
