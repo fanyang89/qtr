@@ -811,6 +811,14 @@ impl JobService {
         self.store.active_resource_user(vm_name, image_ids)
     }
 
+    #[cfg(test)]
+    pub(crate) fn create_install_reservation_for_test(
+        &self,
+        request: &FedoraInstallRequest,
+    ) -> Result<InstallJob> {
+        self.store.create(request)
+    }
+
     pub fn active_image_user(&self, id: &str) -> Result<Option<String>> {
         self.store.active_resource_user("", &[id.to_string()])
     }

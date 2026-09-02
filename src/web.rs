@@ -2995,6 +2995,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fault_lifecycle_endpoint_rejects_matching_install_reservation() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-web-lifecycle-job-test-{}", Uuid::new_v4()));
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("media"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        let request: FedoraInstallRequest = serde_json::from_value(serde_json::json!({
+            "name": "test",
+            "mediaId": "installer.iso",
+            "imageId": "test.qcow2",
+            "sshAuthorizedKey": "ssh-ed25519 AAAA"
+        }))
+        .unwrap();
+        let reservation = jobs.create_install_reservation_for_test(&request).unwrap();
+        let router = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/vms/test/reset")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["title"], "Conflict");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(&reservation.id))
+        );
+
+        drop(router);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fault_lifecycle_endpoint_waits_for_resource_lock() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-web-lifecycle-lock-test-{}", Uuid::new_v4()));
+        let connect_uri = "test:///default";
+        let connection = Connect::open(Some(connect_uri)).unwrap();
+        let template = Domain::lookup_by_name(&connection, "test").unwrap();
+        let mut xml = template.get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE).unwrap();
+        let name = format!("qtr-lifecycle-lock-test-{}", Uuid::new_v4());
+        xml = xml.replacen("<name>test</name>", &format!("<name>{name}</name>"), 1);
+        let uuid_start = xml.find("<uuid>").unwrap() + "<uuid>".len();
+        let uuid_end = xml[uuid_start..].find("</uuid>").unwrap() + uuid_start;
+        xml.replace_range(uuid_start..uuid_end, &Uuid::new_v4().to_string());
+        let domain = Domain::define_xml(&connection, &xml).unwrap();
+        domain.create().unwrap();
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("media"),
+            logs: directory.join("logs"),
+            connect_uri: connect_uri.to_string(),
+        })
+        .unwrap();
+        let router = app(
+            connect_uri.to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs.clone()),
+        );
+
+        let (lock_entered_tx, lock_entered_rx) = std::sync::mpsc::channel();
+        let (release_lock_tx, release_lock_rx) = std::sync::mpsc::channel();
+        let lock_jobs = jobs.clone();
+        let lock_holder = std::thread::spawn(move || {
+            lock_jobs
+                .with_resource_lock(|| {
+                    lock_entered_tx.send(()).unwrap();
+                    release_lock_rx.recv().unwrap();
+                    Ok::<_, anyhow::Error>(())
+                })
+                .unwrap();
+        });
+        lock_entered_rx.recv().unwrap();
+
+        let path = format!("/api/v1/vms/{name}/suspend");
+        let mut action = tokio::spawn(
+            router.clone().oneshot(
+                Request::post(path)
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut action)
+                .await
+                .is_err()
+        );
+        assert_eq!(domain.get_state().unwrap().0, sys::VIR_DOMAIN_RUNNING);
+
+        release_lock_tx.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), action)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(domain.get_state().unwrap().0, sys::VIR_DOMAIN_PAUSED);
+        lock_holder.join().unwrap();
+
+        domain.destroy().unwrap();
+        domain.undefine().unwrap();
+        drop(router);
+        drop(jobs);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn openapi_document_describes_versioned_bearer_api() {
         let router = app(
             "test:///default".to_string(),
