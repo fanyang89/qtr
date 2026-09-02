@@ -709,6 +709,10 @@ fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenA
         .routes(routes!(get_vm, update_vm, undefine_vm))
         .routes(routes!(get_vm_guest_status))
         .routes(routes!(start_vm))
+        .routes(routes!(reboot_vm))
+        .routes(routes!(reset_vm))
+        .routes(routes!(suspend_vm))
+        .routes(routes!(resume_vm))
         .routes(routes!(shutdown_vm))
         .routes(routes!(destroy_vm))
         .routes(routes!(create_vnc_ticket))
@@ -1034,6 +1038,110 @@ async fn start_vm(
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn run_locked_vm_action<T>(
+    state: AppState,
+    name: String,
+    action: fn(&str, &str) -> vm::VmApiResult<T>,
+) -> AppResult<StatusCode>
+where
+    T: Send + 'static,
+{
+    let jobs = job_service(&state)?;
+    let connect_uri = state.connect_uri;
+    run_libvirt(move || {
+        jobs.with_resource_lock(|| {
+            reject_active_install(&jobs, &name, &[])?;
+            action(&connect_uri, &name).map(|_| ())
+        })
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post,
+    path = "/vms/{name}/reboot",
+    tag = "vm lifecycle",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = NO_CONTENT),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn reboot_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<StatusCode> {
+    run_locked_vm_action(state, name, vm::reboot_by_name).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/vms/{name}/reset",
+    tag = "vm lifecycle",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = NO_CONTENT),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn reset_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<StatusCode> {
+    run_locked_vm_action(state, name, vm::reset_by_name).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/vms/{name}/suspend",
+    tag = "vm lifecycle",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = NO_CONTENT),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn suspend_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<StatusCode> {
+    run_locked_vm_action(state, name, vm::suspend_by_name).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/vms/{name}/resume",
+    tag = "vm lifecycle",
+    security(("bearerAuth" = [])),
+    params(("name" = String, Path, description = "VM name")),
+    responses(
+        (status = NO_CONTENT),
+        (status = NOT_FOUND, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = UNAUTHORIZED, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = CONFLICT, body = ProblemDetails, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn resume_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<StatusCode> {
+    run_locked_vm_action(state, name, vm::resume_by_name).await
 }
 
 #[utoipa::path(
@@ -2767,6 +2875,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fault_lifecycle_endpoints_enforce_auth_and_state_semantics() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-web-lifecycle-test-{}", Uuid::new_v4()));
+        let connect_uri = "test:///default";
+        let connection = Connect::open(Some(connect_uri)).unwrap();
+        let template = Domain::lookup_by_name(&connection, "test").unwrap();
+        let mut xml = template.get_xml_desc(sys::VIR_DOMAIN_XML_INACTIVE).unwrap();
+        let name = format!("qtr-lifecycle-test-{}", Uuid::new_v4());
+        xml = xml.replacen("<name>test</name>", &format!("<name>{name}</name>"), 1);
+        let uuid_start = xml.find("<uuid>").unwrap() + "<uuid>".len();
+        let uuid_end = xml[uuid_start..].find("</uuid>").unwrap() + uuid_start;
+        xml.replace_range(uuid_start..uuid_end, &Uuid::new_v4().to_string());
+        let domain = Domain::define_xml(&connection, &xml).unwrap();
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("media"),
+            logs: directory.join("logs"),
+            connect_uri: connect_uri.to_string(),
+        })
+        .unwrap();
+        let router = app(
+            connect_uri.to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/vms/{name}/reset"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        for action in ["reboot", "reset", "suspend", "resume"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(format!("/api/v1/vms/{name}/{action}"))
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{action}");
+        }
+
+        domain.create().unwrap();
+        for action in ["suspend", "suspend"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(format!("/api/v1/vms/{name}/{action}"))
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{action}");
+            assert_eq!(domain.get_state().unwrap().0, sys::VIR_DOMAIN_PAUSED);
+        }
+        for action in ["resume", "resume"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(format!("/api/v1/vms/{name}/{action}"))
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{action}");
+            assert_eq!(domain.get_state().unwrap().0, sys::VIR_DOMAIN_RUNNING);
+        }
+
+        for action in ["reset", "reboot"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(format!("/api/v1/vms/{name}/{action}"))
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{action}");
+        }
+
+        for action in ["reboot", "reset", "suspend", "resume"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(format!("/api/v1/vms/missing-{name}/{action}"))
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{action}");
+        }
+
+        if domain.is_active().unwrap() {
+            domain.destroy().unwrap();
+        }
+        domain.undefine().unwrap();
+        drop(router);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn openapi_document_describes_versioned_bearer_api() {
         let router = app(
             "test:///default".to_string(),
@@ -2795,6 +3023,16 @@ mod tests {
             document["paths"]["/api/v1/vms/{name}/guest-status"]["get"]["security"][0],
             serde_json::json!({"bearerAuth": []})
         );
+        for action in ["reboot", "reset", "suspend", "resume"] {
+            let path = format!("/api/v1/vms/{{name}}/{action}");
+            let operation = &document["paths"].get(&path).unwrap()["post"];
+            assert_eq!(
+                operation["security"][0],
+                serde_json::json!({"bearerAuth": []})
+            );
+            assert!(operation["responses"]["409"].is_object());
+            assert!(operation["responses"]["500"].is_object());
+        }
         assert!(
             document["paths"]["/api/v1/vms/{name}/guest-status"]["get"]["responses"]["409"]
                 .is_object()

@@ -13,6 +13,18 @@ export const vmStateSchema = z.enum([
   'unknown',
 ])
 
+export const VM_LIFECYCLE_ACTIONS = [
+  'start',
+  'shutdown',
+  'destroy',
+  'reboot',
+  'reset',
+  'suspend',
+  'resume',
+] as const
+
+export type VmLifecycleAction = (typeof VM_LIFECYCLE_ACTIONS)[number]
+
 const vmMetricsSchema = z.object({
   cpuTimeNs: z.number(),
   memoryUsedMib: z.number(),
@@ -410,7 +422,7 @@ export async function getVmGuestStatus(name: string): Promise<VmGuestStatus> {
 
 export async function postVmAction(
   name: string,
-  action: string
+  action: VmLifecycleAction
 ): Promise<void> {
   await apiClient.post(`/vms/${encodeURIComponent(name)}/${action}`)
 }

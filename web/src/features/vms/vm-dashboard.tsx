@@ -13,7 +13,13 @@ import {
   Trash2,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { deleteVm, getVms, postVmAction, type VmSummary } from '@/lib/api'
+import {
+  deleteVm,
+  getVms,
+  postVmAction,
+  type VmLifecycleAction,
+  type VmSummary,
+} from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -75,8 +81,13 @@ export function VmDashboard() {
   }, [vms, search])
 
   const actionMutation = useMutation({
-    mutationFn: ({ name, action }: { name: string; action: string }) =>
-      postVmAction(name, action),
+    mutationFn: ({
+      name,
+      action,
+    }: {
+      name: string
+      action: VmLifecycleAction
+    }) => postVmAction(name, action),
     onSuccess: async (_, { action }) => {
       await queryClient.invalidateQueries({ queryKey: ['vms'] })
       toast.success(`VM ${action} queued`)
@@ -201,7 +212,7 @@ function VmRow({
 }: {
   vm: VmSummary
   previousMetrics?: VmMetricSnapshot
-  onAction: (name: string, action: string) => void
+  onAction: (name: string, action: VmLifecycleAction) => void
   onDelete: (vm: VmSummary) => void
   actionPending: boolean
 }) {

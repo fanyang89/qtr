@@ -28,6 +28,12 @@ Authenticated automation can query `GET /api/v1/vms/{name}/guest-status` without
 
 When the Guest Agent supports `guest-network-get-interfaces`, the response includes deterministically ordered interfaces and addresses. `usable` is false for malformed, loopback, unspecified, multicast, link-local, IPv4 broadcast, or IPv4-mapped IPv6 addresses. Poll this endpoint with a deadline and backoff until `guestAgentReady`, `networkInterfacesAvailable`, and at least one address suitable for the caller are present; then perform a protocol-specific readiness check such as opening SSH. The endpoint does not wait for SSH or expose Guest Agent errors.
 
+## VM Lifecycle API
+
+Authenticated lifecycle operations use `POST /api/v1/vms/{name}/{action}`. In addition to `start`, `shutdown`, and `destroy`, the API exposes `reboot`, `reset`, `suspend`, and `resume`. `reboot` requests an orderly guest reboot, while `reset` immediately resets the virtual hardware and may cause data loss. Suspending an already paused VM and resuming an already running VM are successful no-ops; other invalid source states return a conflict. Lifecycle mutations are serialized with install and resource changes for the same qtr server.
+
+The REST lifecycle handlers are covered with libvirt's test driver. The current real-libvirt E2E harness exercises suspend/resume through the CLI but does not start the Web server, so reset and the HTTP lifecycle transport against real libvirt remain explicit validation gaps.
+
 ## Installation Media
 
 The ISOs page supports authenticated, streaming upload and protected deletion. Uploads are limited to 32 GiB by default; override the limit with `--max-iso-upload-bytes`. Existing ISO IDs are never overwritten.

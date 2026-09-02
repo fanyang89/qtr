@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import vmStatesJson from '../../../fixtures/vm-states.json?raw'
 import {
   API_TOKEN_STORAGE_KEY,
+  VM_LIFECYCLE_ACTIONS,
   getApiToken,
   installJobSchema,
   managedImageSchema,
@@ -28,6 +29,18 @@ describe('VM API contract', () => {
       'crashed',
       'pmsuspended',
       'unknown',
+    ])
+  })
+
+  test('limits VM mutations to supported lifecycle actions', () => {
+    expect(VM_LIFECYCLE_ACTIONS).toEqual([
+      'start',
+      'shutdown',
+      'destroy',
+      'reboot',
+      'reset',
+      'suspend',
+      'resume',
     ])
   })
 
