@@ -3,6 +3,9 @@ FROM fedora:44
 RUN dnf install -y \
         acl \
         cargo \
+        curl \
+        genisoimage \
+        jq \
         libvirt-client \
         libvirt-daemon \
         libvirt-daemon-kvm \
