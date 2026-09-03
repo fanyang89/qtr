@@ -30,6 +30,17 @@ jobs:
       - run: cargo test
       - run: cargo build
 
+  jepsen-adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: clojure:temurin-21-lein-2.13.0
+    defaults:
+      run:
+        working-directory: integrations/jepsen
+    steps:
+      - uses: actions/checkout@v4
+      - run: lein test
+
   libvirt-e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

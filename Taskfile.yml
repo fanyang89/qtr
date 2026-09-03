@@ -39,6 +39,12 @@ tasks:
     cmds:
       - ./e2e/libvirt/run-container.sh
 
+  jepsen:test:
+    desc: Run the qtr Jepsen adapter tests in the pinned Clojure container
+    cmds:
+      - mkdir -p "{{.ROOT_DIR}}/.tmp/lein-m2"
+      - docker run --rm -v "{{.ROOT_DIR}}/integrations/jepsen:/workspace" -v "{{.ROOT_DIR}}/.tmp/lein-m2:/root/.m2" -w /workspace clojure:temurin-21-lein-2.13.0 lein test
+
   e2e:kernel-acpi-idle:
     desc: Run one isolated kernel ACPI idle VM test
     cmds:

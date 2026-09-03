@@ -52,6 +52,7 @@ cargo run -- vm --help
 | [Automated Fedora installation](docs/fedora-installation.md) | Build a Fedora VM from a local DVD ISO |
 | [External storage](docs/external-storage.md) | Register, scan, and connect iSCSI-backed volumes |
 | [Deployment](docs/deployment.md) | Build and deploy the RPM with systemd and Ansible |
+| [Jepsen adapter](integrations/jepsen/README.md) | Provision ephemeral test nodes and inject hypervisor lifecycle faults |
 
 The frontend-specific development notes are in [`web/README.md`](web/README.md). The committed OpenAPI 3.1 document is [`openapi/qtr-v1.json`](openapi/qtr-v1.json).
 
