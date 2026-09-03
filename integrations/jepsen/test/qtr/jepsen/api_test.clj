@@ -44,6 +44,27 @@
       (finally
         (.stop server 0)))))
 
+(deftest caps-an-individual-request-timeout
+  (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (.createContext
+     server "/"
+     (reify HttpHandler
+       (handle [_ exchange]
+         (Thread/sleep 500)
+         (try
+           (.sendResponseHeaders exchange 204 -1)
+           (catch Exception _)))))
+    (.start server)
+    (try
+      (let [client (api/client
+                    {:endpoint (str "http://127.0.0.1:" (.getPort (.getAddress server)))
+                     :token "token"
+                     :request-timeout-ms 5000})]
+        (is (thrown? java.net.http.HttpTimeoutException
+                     (api/get! client ["slow"] 50))))
+      (finally
+        (.stop server 0)))))
+
 (deftest sends-authenticated-json-and-redacts-error-diagnostics
   (let [observed (atom nil)
         token "test-bearer-secret"

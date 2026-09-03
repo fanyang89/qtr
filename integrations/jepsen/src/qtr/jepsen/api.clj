@@ -13,7 +13,10 @@
 
 (defprotocol QtrApi
   (request! [api method path-segments body]
-    "Executes one qtr API request. Path segments are encoded by the client."))
+            [api method path-segments body timeout-ms]
+    "Executes one qtr API request. Path segments are encoded by the client.
+
+    The five-argument form caps the request timeout for deadline-bound calls."))
 
 (defn- bounded-string [value]
   (let [value (str value)]
@@ -90,15 +93,21 @@
   (toString [_] "#<HttpQtrApi>")
 
   QtrApi
-  (request! [_ method path-segments body]
+  (request! [this method path-segments body]
+    (request! this method path-segments body (.toMillis request-timeout)))
+  (request! [_ method path-segments body timeout-ms]
+    (when-not (pos-int? timeout-ms)
+      (throw (ex-info "qtr request timeout must be positive integer milliseconds"
+                      {:type ::invalid-timeout})))
     (let [method-name (str/upper-case (name method))
           body-json (when (some? body) (json/generate-string body))
           publisher (if body-json
                       (HttpRequest$BodyPublishers/ofString body-json)
                       (HttpRequest$BodyPublishers/noBody))
+          timeout (Duration/ofMillis (min timeout-ms (.toMillis request-timeout)))
           builder (doto (HttpRequest/newBuilder
                          (request-uri endpoint path-segments))
-                    (.timeout request-timeout)
+                    (.timeout timeout)
                     (.header "Accept" "application/json")
                     (.header "Authorization" (str "Bearer " token))
                     (.method method-name publisher))
@@ -141,8 +150,11 @@
     (HttpQtrApi. endpoint (str token) http-client
                  (Duration/ofMillis request-timeout-ms))))
 
-(defn get! [api path-segments]
-  (request! api :get path-segments nil))
+(defn get!
+  ([api path-segments]
+   (request! api :get path-segments nil))
+  ([api path-segments timeout-ms]
+   (request! api :get path-segments nil timeout-ms)))
 
 (defn post! [api path-segments body]
   (request! api :post path-segments body))

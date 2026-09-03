@@ -82,7 +82,7 @@ as `checkouts/qtr-jepsen` in the test project's Leiningen checkout path.
                     (qtr/test-options cluster)
                     {:name "my-qtr-test"
                      :nemesis hypervisor
-                     :generator (gen/nemesis fault-schedule client-workload)})]
+                     :generator (gen/nemesis client-workload fault-schedule)})]
     (jepsen/run! test)))
 ```
 

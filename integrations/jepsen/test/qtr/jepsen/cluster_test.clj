@@ -9,6 +9,11 @@
   (request! [_ method path body]
     (let [call {:method method :path (vec path) :body body}]
       (swap! calls conj call)
+      (handler call)))
+  (request! [_ method path body timeout-ms]
+    (let [call {:method method :path (vec path) :body body
+                :timeout-ms timeout-ms}]
+      (swap! calls conj call)
       (handler call))))
 
 (defn fake-api [handler]
@@ -49,11 +54,21 @@
          (cluster/resource-names "run-123" "n1")))
   (is (thrown? clojure.lang.ExceptionInfo
                (cluster/resource-names "bad/run" "n1")))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (cluster/resource-names "run-123" "n_1")))
   (let [qtr (fake-api (constantly nil))]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #"unique"
                           (cluster/provision! qtr (base-config ["n1" "n1"]))))
-    (is (empty? @(:calls qtr)))))
+    (is (empty? @(:calls qtr))))
+  (doseq [[field value] [[:nodes ["bad_node"]]
+                         [:nodes ["bad-"]]
+                         [:nodes ["bad..node"]]
+                         [:base-image-id "debian-base"]]]
+    (let [qtr (fake-api (constantly nil))]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (cluster/provision! qtr (assoc (base-config) field value))))
+      (is (empty? @(:calls qtr))))))
 
 (deftest builds-debian-cloud-config-without-passwords-or-unsafe-keys
   (let [key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey jepsen@test"
@@ -115,6 +130,63 @@
           (cluster/cleanup! created)
           (cluster/cleanup! created)
           (is (= (+ before 8) (count @(:calls qtr)))))))))
+
+(deftest readiness-deadline-caps-request-probe-and-sleep
+  (let [now (atom 0)
+        qtr (fake-api (fn [_] {:guestAgentReady false
+                               :networkInterfacesAvailable false
+                               :interfaces []}))
+        config (assoc (base-config ["n1"])
+                      :readiness-timeout-ms 1000
+                      :poll-interval-ms 60000
+                      :ssh-connect-timeout-ms 60000)
+        error (binding [cluster/*nano-time* #(long @now)
+                        cluster/*sleep!* #(swap! now + (* 1000000 %))]
+                (try
+                  (cluster/provision! qtr config)
+                  nil
+                  (catch clojure.lang.ExceptionInfo throwable throwable)))
+        status-calls (filter #(= "guest-status" (last (:path %))) @(:calls qtr))]
+    (is (= :qtr.jepsen.cluster/readiness-timeout (:type (ex-data error))))
+    (is (= 1 (count status-calls)))
+    (is (= 1000 (:timeout-ms (first status-calls))))
+    (is (= 1000000000 @now))))
+
+(deftest readiness-rejects-a-ready-response-after-the-deadline
+  (let [now (atom 0)
+        qtr (fake-api
+             (fn [{:keys [path]}]
+               (when (= "guest-status" (last path))
+                 (swap! now + 1001000000)
+                 (ready-status "192.0.2.11"))))
+        config (assoc (base-config ["n1"])
+                      :readiness-timeout-ms 1000
+                      :require-ssh? false)
+        error (binding [cluster/*nano-time* #(long @now)]
+                (try
+                  (cluster/provision! qtr config)
+                  nil
+                  (catch clojure.lang.ExceptionInfo throwable throwable)))]
+    (is (= :qtr.jepsen.cluster/readiness-timeout (:type (ex-data error))))))
+
+(deftest readiness-deadline-caps-ssh-probe-to-remaining-budget
+  (let [now (atom 0)
+        probe-timeout (atom nil)
+        qtr (fake-api
+             (fn [{:keys [path]}]
+               (when (= "guest-status" (last path))
+                 (swap! now + 700000000)
+                 (ready-status "192.0.2.11"))))
+        config (assoc (base-config ["n1"])
+                      :readiness-timeout-ms 1000
+                      :ssh-connect-timeout-ms 60000)]
+    (binding [cluster/*nano-time* #(long @now)
+              cluster/*tcp-ready?* (fn [_ _ timeout-ms]
+                                     (reset! probe-timeout timeout-ms)
+                                     true)]
+      (let [created (cluster/provision! qtr config)]
+        (is (= 300 @probe-timeout))
+        (cluster/cleanup! created)))))
 
 (deftest rolls-back-exact-resources-after-partial-failure
   (let [qtr (fake-api
@@ -191,6 +263,26 @@
              :path ["images" "run-123-n1.qcow2"]
              :body nil}]
            @(:calls qtr)))))
+
+(deftest with-cluster-preserves-body-failure-when-cleanup-also-fails
+  (let [qtr (fake-api
+             (fn [{:keys [method path]}]
+               (when (and (= :delete method)
+                          (= ["images" "run-123-n1.qcow2"] path))
+                 (throw (ex-info "cleanup failed" {})))))
+        qtr-cluster (cluster/->Cluster
+                     qtr "run-123"
+                     (atom [{:kind :image :id "run-123-n1.qcow2"}])
+                     (atom {}) [] {} (Object.) (atom false))
+        error (try
+                (cluster/with-cluster [_ qtr-cluster]
+                  (throw (ex-info "body failed" {})))
+                nil
+                (catch clojure.lang.ExceptionInfo throwable throwable))]
+    (is (= "body failed" (.getMessage error)))
+    (is (= 1 (alength (.getSuppressed error))))
+    (is (= "qtr cluster cleanup failed"
+           (.getMessage (aget (.getSuppressed error) 0))))))
 
 (deftest cleanup-attempts-all-resources-surfaces-errors-and-can-retry
   (let [seed-failures (atom 0)

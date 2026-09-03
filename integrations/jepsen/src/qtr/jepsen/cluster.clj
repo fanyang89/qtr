@@ -7,6 +7,8 @@
            (java.util UUID)))
 
 (def ^:private public-id-pattern #"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+(def ^:private hostname-label-pattern #"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+(def ^:private image-id-pattern #"(?i).+\.(?:raw|qcow2)$")
 (def ^:private linux-user-pattern #"^[a-z_][a-z0-9_-]{0,31}$")
 (def ^:private max-name-length 63)
 (def ^:private max-cleanup-diagnostics 20)
@@ -53,10 +55,24 @@
                     {:type ::invalid-config :field label})))
   value)
 
+(defn- valid-hostname? [value]
+  (and (string? value)
+       (<= 1 (count value) 253)
+       (every? #(and (<= 1 (count %) 63)
+                     (re-matches hostname-label-pattern %))
+               (str/split value #"\." -1))))
+
+(defn- require-hostname! [value label]
+  (when-not (valid-hostname? value)
+    (throw (ex-info (str label " must be a valid hostname")
+                    {:type ::invalid-config :field label})))
+  value)
+
 (defn resource-names
   "Returns deterministic qtr resource names for one logical node."
   [run-id logical-node]
   (require-public-id! run-id "run-id" 24)
+  (require-hostname! logical-node "logical node")
   (require-public-id! logical-node "logical node" 24)
   (let [stem (str run-id "-" logical-node)
         names {:logical-node logical-node
@@ -72,6 +88,7 @@
     (throw (ex-info "nodes must be a non-empty sequence"
                     {:type ::invalid-config :field "nodes"})))
   (doseq [node nodes]
+    (require-hostname! node "logical node")
     (require-public-id! node "logical node" 24))
   (when-not (= (count nodes) (count (distinct nodes)))
     (throw (ex-info "logical node names must be unique"
@@ -82,6 +99,9 @@
   (let [run-id (require-public-id! (:run-id config) "run-id" 24)
         nodes (validate-nodes! (:nodes config))
         base-image-id (require-public-id! (:base-image-id config) "base-image-id" 255)
+        _ (when-not (re-matches image-id-pattern base-image-id)
+            (throw (ex-info "base-image-id must end with .raw or .qcow2"
+                            {:type ::invalid-config :field "base-image-id"})))
         network-id (require-public-id! (or (:network-id config) "default") "network-id" 255)
         vcpus (require-positive-int! (or (:vcpus config) 2) "vcpus")
         memory-mib (require-positive-int! (or (:memory-mib config) 2048) "memory-mib")
@@ -216,26 +236,45 @@
        sort
        first))
 
+(defn- remaining-millis [deadline]
+  (let [remaining-ns (- deadline (*nano-time*))]
+    (when (>= remaining-ns 1000000)
+      (quot remaining-ns 1000000))))
+
+(defn- readiness-timeout [vm-id]
+  (ex-info (str "timed out waiting for node " vm-id " readiness")
+           {:type ::readiness-timeout :vm-id vm-id}))
+
 (defn- wait-for-node! [cluster config vm-id]
   (let [timeout-ns (* 1000000 (:readiness-timeout-ms config))
         deadline (+ (*nano-time*) timeout-ns)]
     (loop []
-      (let [status (api/get! (:api cluster) ["vms" vm-id "guest-status"])
+      (let [request-timeout-ms (or (remaining-millis deadline)
+                                   (throw (readiness-timeout vm-id)))
+            status (api/get! (:api cluster) ["vms" vm-id "guest-status"]
+                             request-timeout-ms)
             address (when (and (true? (:guestAgentReady status))
                                (true? (:networkInterfacesAvailable status)))
                       (usable-ipv4 status))
+            before-probe-ms (or (remaining-millis deadline)
+                                (throw (readiness-timeout vm-id)))
             ssh-ready? (and address
                             (or (not (:require-ssh? config))
                                 (*tcp-ready?* address 22
-                                              (:ssh-connect-timeout-ms config))))]
-        (if ssh-ready?
+                                              (min (:ssh-connect-timeout-ms config)
+                                                   before-probe-ms))))
+            after-probe-ms (remaining-millis deadline)]
+        (cond
+          (nil? after-probe-ms)
+          (throw (readiness-timeout vm-id))
+
+          ssh-ready?
           address
-          (if (>= (*nano-time*) deadline)
-            (throw (ex-info (str "timed out waiting for node " vm-id " readiness")
-                            {:type ::readiness-timeout :vm-id vm-id}))
-            (do
-              (*sleep!* (:poll-interval-ms config))
-              (recur))))))))
+
+          :else
+          (do
+            (*sleep!* (min (:poll-interval-ms config) after-probe-ms))
+            (recur)))))))
 
 (defn- provision-node! [cluster config logical-node]
   (let [{:keys [vm-id image-id seed-id] :as names}
@@ -375,13 +414,26 @@
      :ssh (:ssh cluster)}))
 
 (defmacro with-cluster
-  "Binds an already-provisioned Cluster expression and always cleans it up."
+  "Binds an already-provisioned Cluster expression and always cleans it up.
+
+  A body failure remains primary when cleanup also fails; the cleanup failure
+  is attached as a suppressed throwable."
   [[binding cluster-expression] & body]
-  `(let [~binding ~cluster-expression]
-     (try
-       ~@body
-       (finally
-         (cleanup! ~binding)))))
+  `(let [~binding ~cluster-expression
+         outcome# (try
+                    {:value (do ~@body)}
+                    (catch Throwable throwable#
+                      {:throwable throwable#}))]
+     (if-let [throwable# (:throwable outcome#)]
+       (do
+         (try
+           (cleanup! ~binding)
+           (catch Throwable cleanup-error#
+             (.addSuppressed ^Throwable throwable# cleanup-error#)))
+         (throw throwable#))
+       (do
+         (cleanup! ~binding)
+         (:value outcome#)))))
 
 (defn generated-run-id
   "Returns a qtr-safe random run ID for callers that do not need repeatability."

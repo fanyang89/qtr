@@ -10,6 +10,11 @@
   (request! [_ method path body]
     (let [call {:method method :path (vec path) :body body}]
       (swap! calls conj call)
+      (handler call)))
+  (request! [_ method path body timeout-ms]
+    (let [call {:method method :path (vec path) :body body
+                :timeout-ms timeout-ms}]
+      (swap! calls conj call)
       (handler call))))
 
 (defn test-cluster [qtr]
@@ -54,6 +59,27 @@
         (is (string? (:qtr/error result)))
         (is (= (:value operation) (:value result)))))
     (is (empty? @(:calls qtr)))))
+
+(deftest reports-partial-success-and-heals-ambiguous-suspend
+  (let [qtr (->FakeApi
+             (atom [])
+             (fn [{:keys [path]}]
+               (when (= ["vms" "run-123-n2" "suspend"] path)
+                 (throw (ex-info "response timed out" {})))))
+        subject (qtr-nemesis/qtr-nemesis (test-cluster qtr))
+        result (nemesis/invoke!
+                subject {}
+                {:type :invoke :f :suspend :value ["n1" "n2"]})]
+    (is (= :info (:type result)))
+    (is (= ["n1"] (:qtr/logical-nodes result)))
+    (is (= ["run-123-n1"] (:qtr/vms result)))
+    (is (= {:logical-node "n2" :vm-id "run-123-n2"}
+           (:qtr/ambiguous-target result)))
+    (is (= "response timed out" (:qtr/error result)))
+    (nemesis/teardown! subject {})
+    (is (= [["vms" "run-123-n1" "resume"]
+            ["vms" "run-123-n2" "resume"]]
+           (mapv :path (drop 2 @(:calls qtr)))))))
 
 (deftest tracks-suspends-and-reports-bounded-teardown-errors
   (let [qtr (->FakeApi

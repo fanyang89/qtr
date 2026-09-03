@@ -56,16 +56,34 @@
           (throw (ex-info (str "unsupported qtr nemesis action " action)
                           {:type ::unsupported-action})))
         (let [targets (resolve-targets qtr-cluster (:value operation))]
-          (doseq [{:keys [vm-id]} targets]
-            (api/post! (:api qtr-cluster) ["vms" vm-id (name action)] nil)
-            (case action
-              :suspend (swap! suspended conj vm-id)
-              :resume (swap! suspended disj vm-id)
-              nil))
-          (assoc operation
-                 :type :info
-                 :qtr/logical-nodes (mapv :logical-node targets)
-                 :qtr/vms (mapv :vm-id targets))))
+          (loop [remaining targets
+                 completed []]
+            (if-let [{:keys [vm-id logical-node] :as target} (first remaining)]
+              (do
+                ;; A timed-out response may still mean qtr applied the suspend.
+                ;; Conservatively retain it so teardown retries idempotent resume.
+                (when (= :suspend action)
+                  (swap! suspended conj vm-id))
+                (let [failure (try
+                                (api/post! (:api qtr-cluster)
+                                           ["vms" vm-id (name action)] nil)
+                                (when (= :resume action)
+                                  (swap! suspended disj vm-id))
+                                nil
+                                (catch Throwable throwable throwable))]
+                  (if failure
+                    (assoc operation
+                           :type :info
+                           :qtr/logical-nodes (mapv :logical-node completed)
+                           :qtr/vms (mapv :vm-id completed)
+                           :qtr/ambiguous-target {:logical-node logical-node
+                                                  :vm-id vm-id}
+                           :qtr/error (bounded (.getMessage ^Throwable failure)))
+                    (recur (rest remaining) (conj completed target)))))
+              (assoc operation
+                     :type :info
+                     :qtr/logical-nodes (mapv :logical-node completed)
+                     :qtr/vms (mapv :vm-id completed))))))
       (catch Throwable throwable
         (assoc operation
                :type :info
