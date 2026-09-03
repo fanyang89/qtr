@@ -12,6 +12,7 @@
 - [Automated Fedora installation](fedora-installation.md): install Fedora Server from a local DVD ISO.
 - [External storage](external-storage.md): discover and connect iSCSI-backed volumes.
 - [Deployment](deployment.md): package qtr as an RPM and deploy it with systemd or Ansible.
+- [GitHub Actions](github-actions.md): start an ephemeral qtr service on an Ubuntu CI runner.
 - [Jepsen adapter](../integrations/jepsen/README.md): provision ephemeral nodes and inject hypervisor lifecycle faults.
 
 ## Reference

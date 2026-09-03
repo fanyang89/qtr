@@ -1,0 +1,62 @@
+name: Setup qtr
+
+description: Install qtr and start an ephemeral QEMU/libvirt service for CI
+
+author: fanyang
+
+branding:
+  icon: box
+  color: blue
+
+inputs:
+  version:
+    description: Exact qtr release version, without a moving tag such as latest
+    required: true
+  repository:
+    description: GitHub repository that publishes the qtr release assets
+    required: false
+    default: fanyang89/qtr
+  require-kvm:
+    description: Fail when a readable and writable /dev/kvm is unavailable
+    required: false
+    default: "true"
+  api-port:
+    description: Loopback TCP port for the qtr API
+    required: false
+    default: "8080"
+  archive-url:
+    description: Optional HTTPS or file URL overriding the release archive URL
+    required: false
+  checksum-url:
+    description: Optional HTTPS or file URL overriding the SHA-256 sidecar URL
+    required: false
+
+outputs:
+  qtr-path:
+    description: Absolute path to the installed qtr executable
+  qtr-version:
+    description: Resolved qtr version
+  api-url:
+    description: Loopback URL for the qtr v1 API
+  api-token-file:
+    description: Path to the mode-0600 API bearer-token file
+  state-dir:
+    description: qtr server state and VM manifest directory
+  image-root:
+    description: Managed VM image directory
+  media-root:
+    description: Managed installation-media directory
+  log-root:
+    description: qtr job and serial-log directory
+  service-log:
+    description: qtr service log path
+  kvm-available:
+    description: Whether /dev/kvm passed the runtime access probe
+  libvirt-uri:
+    description: Verified libvirt connection URI
+
+runs:
+  using: node24
+  main: action/main.mjs
+  post: action/post.mjs
+  post-if: always()

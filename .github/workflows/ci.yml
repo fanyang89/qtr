@@ -67,6 +67,60 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  setup-action:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvirt-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build local release asset
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release
+          pnpm -C web install --frozen-lockfile
+          pnpm -C web build
+          ./scripts/package-release.sh
+          version=$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n 1)
+          archive="$GITHUB_WORKSPACE/dist/qtr-v${version}-x86_64-unknown-linux-gnu.tar.gz"
+          {
+            echo "version=$version"
+            echo "archive-url=file://$archive"
+            echo "checksum-url=file://$archive.sha256"
+          } >> "$GITHUB_OUTPUT"
+      - name: Start qtr with the local action
+        id: qtr
+        uses: ./
+        with:
+          version: ${{ steps.release.outputs.version }}
+          archive-url: ${{ steps.release.outputs.archive-url }}
+          checksum-url: ${{ steps.release.outputs.checksum-url }}
+      - name: Verify qtr remains available to later steps
+        env:
+          API_URL: ${{ steps.qtr.outputs.api-url }}
+          TOKEN_FILE: ${{ steps.qtr.outputs.api-token-file }}
+          EXPECTED_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          test "$(qtr --version)" = "qtr $EXPECTED_VERSION"
+          test -s "$TOKEN_FILE"
+          test "$(virsh --connect qemu:///system uri)" = "qemu:///system"
+          curl --fail --silent --show-error "$API_URL/health" | jq -e '.ok == true'
+          qtr vm capabilities --json | jq -e '.domainType == "kvm"'
+
   web:
     runs-on: ubuntu-latest
     defaults:
