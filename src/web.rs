@@ -861,8 +861,8 @@ async fn get_vm(
     let jobs = job_service(&state)?;
     let connect_uri = state.connect_uri;
     let vm = run_libvirt(move || {
-        let summary = vm::get_summary(&connect_uri, &name).map_err(anyhow::Error::new)?;
-        managed_vm_summary(&jobs, summary)
+        let summary = vm::get_summary(&connect_uri, &name)?;
+        managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
     })
     .await?;
     Ok(Json(vm))
@@ -2821,6 +2821,44 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("worker did not release serialized job permit");
+    }
+
+    #[tokio::test]
+    async fn vm_detail_preserves_not_found_status() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-web-detail-test-{}", Uuid::new_v4()));
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("media"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        let router = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+        );
+        let name = format!("qtr-missing-{}", Uuid::new_v4());
+        let response = router
+            .oneshot(
+                Request::get(format!("/api/v1/vms/{name}"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], 404);
+        assert_eq!(body["detail"], name);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
