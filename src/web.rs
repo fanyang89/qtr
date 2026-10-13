@@ -2870,6 +2870,10 @@ mod tests {
 
     #[tokio::test]
     async fn guest_status_reports_inactive_test_driver_domain_without_agent() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         let connect_uri = "test:///default";
         let connection = Connect::open(Some(connect_uri)).unwrap();
         let template = Domain::lookup_by_name(&connection, "test").unwrap();
@@ -2921,6 +2925,10 @@ mod tests {
 
     #[tokio::test]
     async fn fault_lifecycle_endpoints_enforce_auth_and_state_semantics() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         let directory =
             std::env::temp_dir().join(format!("qtr-web-lifecycle-test-{}", Uuid::new_v4()));
         let connect_uri = "test:///default";
@@ -3094,6 +3102,10 @@ mod tests {
 
     #[tokio::test]
     async fn fault_lifecycle_endpoint_waits_for_resource_lock() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         let directory =
             std::env::temp_dir().join(format!("qtr-web-lifecycle-lock-test-{}", Uuid::new_v4()));
         let connect_uri = "test:///default";
@@ -3944,6 +3956,10 @@ mod tests {
 
     #[tokio::test]
     async fn managed_image_lifecycle_is_safe_and_complete() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         // The test driver forgets domains when its last connection is closed.
         let _test_driver = Connect::open(Some("test:///default")).unwrap();
         let directory = std::env::temp_dir().join(format!("qtr-web-image-test-{}", Uuid::new_v4()));
@@ -4100,6 +4116,10 @@ mod tests {
 
     #[tokio::test]
     async fn managed_cdrom_lifecycle_supports_multiple_trays() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         // The test driver forgets domains when its last connection is closed.
         let _test_driver = Connect::open(Some("test:///default")).unwrap();
         let directory = std::env::temp_dir().join(format!("qtr-web-cdrom-test-{}", Uuid::new_v4()));

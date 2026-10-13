@@ -945,6 +945,10 @@ mod tests {
 
     #[test]
     fn final_manifest_apply_preserves_domain_uuid() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         // The test driver forgets domains when its last connection is closed.
         let _test_driver = Connect::open(Some("test:///default")).unwrap();
         let dir = std::env::temp_dir().join(format!("qtr-installer-test-{}", Uuid::new_v4()));

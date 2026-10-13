@@ -87,6 +87,13 @@ Run the complete local verification suite:
 task check
 ```
 
+Rust tests run in parallel with `cargo test`. Tests that mutate libvirt's
+process-global `test:///default` driver, or depend on exact socket FD lifetimes,
+use `crate::test_support::in_subprocess()` at test entry and return when it returns
+`true`. Each child runs only that exact test; the parent verifies it actually ran
+and propagates failures. This prevents unrelated domain mutations and forked FD
+copies from interfering without serializing the full suite or adding sleeps.
+
 Run the real libvirt lifecycle test in a Fedora 44 container:
 
 ```bash

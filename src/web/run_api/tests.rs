@@ -240,25 +240,8 @@ async fn replacement_and_unowned_files_are_never_deleted() {
 
 #[tokio::test]
 async fn vm_cleanup_uses_uuid_and_stops_before_deleting_mismatched_resources() {
-    // libvirt's test:///default state is process-global. Domain replacement must
-    // not race inventory scans in the existing parallel API tests.
-    const CHILD: &str = "QTR_RUN_VM_TEST_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "web::run_api::tests::vm_cleanup_uses_uuid_and_stops_before_deleting_mismatched_resources",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    // Domain replacement must not race other tests' inventory scans.
+    if crate::test_support::in_subprocess() {
         return;
     }
     let (directory, jobs, app) = setup();

@@ -15,3 +15,6 @@ pub mod vm;
 pub mod vm_model;
 mod vm_reconcile;
 pub mod web;
+
+#[cfg(test)]
+mod test_support;

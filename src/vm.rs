@@ -8770,6 +8770,10 @@ interfaces:
 
     #[test]
     fn libvirt_test_driver_supports_managed_save_lifecycle() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         let conn = Connect::open(Some("test:///default")).expect("test driver should connect");
         let domain = Domain::lookup_by_name(&conn, "test").expect("test domain should exist");
 
