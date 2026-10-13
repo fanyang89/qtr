@@ -32,7 +32,7 @@ When the Guest Agent supports `guest-network-get-interfaces`, the response inclu
 
 Authenticated lifecycle operations use `POST /api/v1/vms/{name}/{action}`. In addition to `start`, `shutdown`, and `destroy`, the API exposes `reboot`, `reset`, `suspend`, and `resume`. `reboot` requests an orderly guest reboot, while `reset` immediately resets the virtual hardware and may cause data loss. Suspending an already paused VM and resuming an already running VM are successful no-ops; other invalid source states return a conflict. Lifecycle mutations are serialized with install and resource changes for the same qtr server.
 
-The REST lifecycle handlers are covered with libvirt's test driver. The current real-libvirt E2E harness exercises suspend/resume through the CLI but does not start the Web server, so reset and the HTTP lifecycle transport against real libvirt remain explicit validation gaps.
+The REST lifecycle handlers are covered with libvirt's test driver. The real-libvirt E2E harness also starts the authenticated Web server and exercises REST start, suspend, resume, and reset. It uses an empty disk; the separate [cloud guest E2E](cloud-vm-e2e.md) validates Guest Agent readiness, SSH, cloud-init completion, and orderly reboot with a real guest.
 
 ## Installation Media
 

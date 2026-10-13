@@ -137,3 +137,10 @@ The archive contains the qtr executable and built Web UI. The release workflow
 also publishes a GitHub artifact attestation for the archive. The setup action
 accepts exact versions only and verifies the SHA-256 sidecar before extracting
 or executing the artifact.
+
+## Real guest validation
+
+The repository CI workflow accepts an optional `cloud-vm` input on manual runs.
+It exercises the locally built setup action with a real cloud guest, SSH, and
+orderly reboot. See [Cloud guest E2E](cloud-vm-e2e.md) for prerequisites, the
+pinned image, diagnostics, and local execution.

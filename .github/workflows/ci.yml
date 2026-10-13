@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      cloud-vm:
+        description: Run the real cloud guest E2E through the setup action
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -69,7 +75,7 @@ jobs:
 
   setup-action:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -120,6 +126,27 @@ jobs:
           test "$(virsh --connect qemu:///system uri)" = "qemu:///system"
           curl --fail --silent --show-error "$API_URL/health" | jq -e '.ok == true'
           qtr vm capabilities --json | jq -e '.domainType == "kvm"'
+
+      - name: Run real cloud guest E2E
+        if: github.event_name == 'workflow_dispatch' && inputs.cloud-vm
+        env:
+          QTR_E2E_ARTIFACT_DIR: ${{ runner.temp }}/qtr-cloud-e2e
+          QTR_CLOUD_SERVICE_LOG: ${{ steps.qtr.outputs.service-log }}
+        run: timeout --signal=TERM --kill-after=90s 20m python3 e2e/cloud-vm/run.py
+      - name: Upload cloud guest diagnostics
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.cloud-vm
+        uses: actions/upload-artifact@v4
+        with:
+          name: qtr-cloud-e2e-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qtr-cloud-e2e
+          if-no-files-found: warn
+          retention-days: 7
+
+  cloud-harness:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s e2e/cloud-vm -p 'test_*.py'
 
   web:
     runs-on: ubuntu-latest

@@ -98,6 +98,10 @@ cloning, backing-image protection, and real NoCloud seed generation, then writes
 diagnostics to `.tmp/e2e/libvirt/`. It uses an empty test disk and does not download
 a guest image.
 
+For an opt-in real cloud guest test (cloud-init, SSH, and reboot), see the
+[cloud guest E2E guide](docs/cloud-vm-e2e.md). Run `task e2e:cloud-vm:test` to
+check its harness without KVM or image downloads.
+
 After changing API handlers, regenerate the OpenAPI document:
 
 ```bash

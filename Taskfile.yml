@@ -16,6 +16,7 @@ tasks:
     cmds:
       - cargo test
       - pnpm -C web test
+      - task: e2e:cloud-vm:test
 
   lint:
     desc: Run Rust and web linters
@@ -38,6 +39,16 @@ tasks:
     desc: Run the Fedora 44 libvirt lifecycle test in Docker
     cmds:
       - ./e2e/libvirt/run-container.sh
+
+  e2e:cloud-vm:
+    desc: Run a real cloud guest against a dedicated local qtr API (requires QTR_* environment)
+    cmds:
+      - timeout --signal=TERM --kill-after=90s 20m python3 e2e/cloud-vm/run.py
+
+  e2e:cloud-vm:test:
+    desc: Test the cloud guest harness without KVM or downloads
+    cmds:
+      - python3 -m unittest discover -s e2e/cloud-vm -p 'test_*.py'
 
   jepsen:test:
     desc: Run the qtr Jepsen adapter tests in the pinned Clojure container
