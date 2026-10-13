@@ -83,6 +83,8 @@ class CloudTest:
         self.overlay = self.name + ".qcow2"
         self.seed = self.name + ".iso"
         self.resources = []
+        self.managed_run = os.environ.get("QTR_CLOUD_MANAGED_RUN", "0") == "1"
+        self.run_started = False
         self.address = None
         self.key = work / "id_ed25519"
         # Restrict trust-on-first-use to this disposable VM and this run only.
@@ -116,6 +118,12 @@ class CloudTest:
             return json.loads(body) if body else None
 
     def create(self, resource, method, route, **kwargs):
+        if self.managed_run and resource != ("images", self.base):
+            kinds = {"images": "imageClone", "media": "cloudInit", "vms": "vm"}
+            request = {"kind": kinds[resource[0]], "request": kwargs["data"]}
+            if resource[0] == "images":
+                request["sourceImageId"] = self.base
+            return self.api("POST", f"/runs/{self.name}/resources", data=request)
         # Record intent before transport: a response can be lost after creation.
         self.resources.append(resource)
         try:
@@ -174,6 +182,12 @@ class CloudTest:
             shutil.copyfile(service_log, self.artifacts / "qtr-service.log")
 
     def cleanup(self):
+        if self.run_started:
+            # Do not delete even the separately tracked base if run cleanup fails.
+            run = self.api("POST", f"/runs/{self.name}/cleanup")
+            if run["state"] != "closed":
+                raise RuntimeError("server-managed run did not close")
+            self.run_started = False
         errors = []
         for kind, resource_id in reversed(self.resources[:]):
             try:
@@ -211,6 +225,9 @@ class CloudTest:
             "runcmd": [["systemctl", "enable", "--now", "qemu-guest-agent"],
                        ["touch", "/var/lib/qtr-cloud-e2e-ready"]],
         })
+        if self.managed_run:
+            self.run_started = True
+            self.api("PUT", f"/runs/{self.name}")
         self.create(("images", self.base), "PUT", f"/images/{self.base}", image=image)
         print("Base imported; creating linked clone and cloud-init seed", flush=True)
         before = digest(self.images / self.base)

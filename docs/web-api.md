@@ -22,6 +22,14 @@ Fedora installations are persistent jobs under `/api/v1/install-jobs`. Requests 
 
 SQLite uses WAL mode, queued jobs resume after restart, and jobs that were running are marked `interrupted` without deleting uncertain VM resources. Cancelling an interrupted job acknowledges it and releases its resource reservations.
 
+## Server-managed Runs
+
+`/api/v1/runs` provides opt-in persistent ownership for VM definitions, linked
+clones and cloud-init seeds. Record intent before creation, retry identical
+requests after lost responses, and explicitly recover cleanup after client or
+server restart. Cleanup verifies file identity and VM UUIDs; it forcibly stops
+owned VMs but never adopts resources by name. See [Server-managed runs](managed-runs.md).
+
 ## Guest Readiness and Addresses
 
 Authenticated automation can query `GET /api/v1/vms/{name}/guest-status` without adding Guest Agent latency to the normal VM list or detail endpoints. Each request is a one-shot observation bounded to about two seconds. Existing inactive VMs and running guests without a responsive QEMU Guest Agent still return `200`: inspect `domainState`, `guestAgentReady`, and `networkInterfacesAvailable` instead of treating HTTP success as guest readiness.

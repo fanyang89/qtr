@@ -8,6 +8,7 @@ pub mod host;
 pub mod installer;
 pub mod jobs;
 pub mod network;
+pub mod runs;
 pub mod storage;
 pub mod vm;
 pub mod vm_model;

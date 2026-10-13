@@ -109,3 +109,11 @@
           (is (str/includes? diagnostic "[REDACTED]"))))
       (finally
         (.stop server 0)))))
+
+(deftest managed-run-seed-payloads-are-redacted
+  (let [secrets (#'api/sensitive-values "token"
+                 {:kind "cloudInit"
+                  :request {:userData "user-secret" :vendorData "vendor-secret"
+                            :networkConfig "network-secret"}})
+        diagnostic (#'api/redact "token user-secret vendor-secret network-secret" secrets)]
+    (is (= "[REDACTED] [REDACTED] [REDACTED] [REDACTED]" diagnostic))))

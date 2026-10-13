@@ -1,3 +1,5 @@
+mod run_api;
+
 use std::{
     collections::HashMap,
     path::{Path as FsPath, PathBuf},
@@ -220,7 +222,7 @@ impl IntoResponse for AppError {
     }
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmRequest {
     name: String,
@@ -232,14 +234,14 @@ struct CreateVmRequest {
     console: CreateVmConsole,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmCdrom {
     id: String,
     media_id: Option<String>,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmResources {
     vcpus: u32,
@@ -247,7 +249,7 @@ struct CreateVmResources {
     memory_mib: u64,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmDisk {
     image_id: String,
@@ -256,7 +258,7 @@ struct CreateVmDisk {
     bus: vm::VmDiskBus,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmConsole {
     graphics: GraphicsMode,
@@ -272,7 +274,7 @@ struct CreateImageRequest {
     size_bytes: u64,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CloneImageRequest {
     id: String,
@@ -703,8 +705,12 @@ fn app_with_upload_limits(
 fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenApi) {
     let cloud_init_api = OpenApiRouter::new()
         .routes(routes!(create_cloud_init_seed))
+        .routes(routes!(run_api::create_resource))
         .layer(DefaultBodyLimit::max(MAX_CLOUD_INIT_JSON_BYTES));
     let protected_api = OpenApiRouter::new()
+        .routes(routes!(run_api::create_run, run_api::get_run))
+        .routes(routes!(run_api::list_runs))
+        .routes(routes!(run_api::cleanup_run))
         .routes(routes!(list_vms, create_vm))
         .routes(routes!(get_vm, update_vm, undefine_vm))
         .routes(routes!(get_vm_guest_status))

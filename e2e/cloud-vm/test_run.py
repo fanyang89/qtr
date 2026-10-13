@@ -22,6 +22,7 @@ class CloudHarnessTests(unittest.TestCase):
         token.write_text("test-secret")
         environment = {
             "QTR_API_URL": "http://127.0.0.1:8080/api/v1",
+            "QTR_CLOUD_MANAGED_RUN": "0",
             "QTR_API_TOKEN_FILE": str(token),
             "QTR_IMAGE_ROOT": str(self.root),
             "QTR_MEDIA_ROOT": str(self.root),
@@ -141,6 +142,44 @@ class CloudHarnessTests(unittest.TestCase):
         self.assertEqual(unrelated.read_bytes(), b"unrelated")
         self.assertIn(("POST", f"/vms/{self.test.name}/reboot"), requests)
         self.assertFalse((self.root / self.test.base).exists())
+
+    def test_managed_run_cleanup_precedes_base_deletion(self):
+        self.test.managed_run = True
+        self.test.run_started = True
+        self.test.resources = [("images", self.test.base)]
+        calls = []
+        def api(method, route, **kwargs):
+            calls.append((method, route))
+            return {"state": "closed"}
+        self.test.api = api
+        self.test.cleanup()
+        self.test.cleanup()
+        self.assertEqual(calls, [
+            ("POST", f"/runs/{self.test.name}/cleanup"),
+            ("DELETE", f"/images/{self.test.base}"),
+        ])
+
+    def test_managed_run_conflict_preserves_base_for_retry(self):
+        self.test.run_started = True
+        self.test.resources = [("images", self.test.base)]
+        def api(method, route):
+            raise http_error(409)
+        self.test.api = api
+        with self.assertRaises(HTTPError):
+            self.test.cleanup()
+        self.assertTrue(self.test.run_started)
+        self.assertEqual(self.test.resources, [("images", self.test.base)])
+
+    def test_managed_creation_uses_persisted_server_intent(self):
+        self.test.managed_run = True
+        with patch.object(self.test, "api") as api:
+            self.test.create(("images", self.test.overlay), "POST", "/unused",
+                             data={"id": self.test.overlay})
+        api.assert_called_once_with("POST", f"/runs/{self.test.name}/resources", data={
+            "kind": "imageClone", "sourceImageId": self.test.base,
+            "request": {"id": self.test.overlay},
+        })
+        self.assertEqual(self.test.resources, [])
 
     def test_bad_download_is_not_published(self):
         with patch.object(run.urllib.request, "urlopen", return_value=io.BytesIO(b"corrupt")):

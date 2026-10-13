@@ -53,6 +53,7 @@ cargo run -- vm --help
 | [External storage](docs/external-storage.md) | Register, scan, and connect iSCSI-backed volumes |
 | [Deployment](docs/deployment.md) | Build and deploy the RPM with systemd and Ansible |
 | [GitHub Actions](docs/github-actions.md) | Start an ephemeral qtr service for VM-backed CI workloads |
+| [Server-managed runs](docs/managed-runs.md) | Persist ephemeral resource ownership and recover cleanup after restart |
 | [Jepsen adapter](integrations/jepsen/README.md) | Provision ephemeral test nodes and inject hypervisor lifecycle faults |
 
 The frontend-specific development notes are in [`web/README.md`](web/README.md). The committed OpenAPI 3.1 document is [`openapi/qtr-v1.json`](openapi/qtr-v1.json).

@@ -313,3 +313,53 @@
     (let [calls (count @(:calls qtr))]
       (cluster/cleanup! qtr-cluster)
       (is (= calls (count @(:calls qtr)))))))
+
+(deftest managed-runs-route-creations-and-cleanup-through-server
+  (let [qtr (fake-api
+             (fn [{:keys [method path]}]
+               (cond
+                 (= method :put) {:state "active"}
+                 (= "guest-status" (last path)) (ready-status "192.0.2.11")
+                 :else nil)))]
+    (binding [cluster/*tcp-ready?* (constantly true)]
+      (let [created (cluster/provision! qtr (assoc (base-config ["n1"]) :managed-run? true))]
+        (is (= "192.0.2.11" (get-in (cluster/node-map created) ["n1" :address])))
+        (cluster/cleanup! created)
+        (cluster/cleanup! created)))
+    (let [calls @(:calls qtr)
+          creates (filter #(= ["runs" "run-123" "resources"] (:path %)) calls)]
+      (is (= [:put ["runs" "run-123"]] ((juxt :method :path) (first calls))))
+      (is (= ["imageClone" "cloudInit" "vm"] (mapv #(get-in % [:body :kind]) creates)))
+      (is (= "debian-base.qcow2" (get-in (first creates) [:body :sourceImageId])))
+      (is (= 1 (count (filter #(= ["runs" "run-123" "cleanup"] (:path %)) calls))))
+      (is (not-any? #(= :delete (:method %)) calls)))))
+
+(deftest managed-run-ambiguous-create-is-cleaned-even-without-local-resource-record
+  (let [qtr (fake-api
+             (fn [{:keys [method path]}]
+               (cond
+                 (= method :put) {:state "active"}
+                 (= "resources" (last path)) (throw (ex-info "response lost" {}))
+                 :else nil)))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"response lost"
+                         (cluster/provision! qtr (assoc (base-config ["n1"]) :managed-run? true))))
+    (is (= ["runs" "run-123" "cleanup"] (:path (last @(:calls qtr))))))
+  (let [qtr (fake-api (constantly {:state "closed"}))]
+    (is (= {:state "closed"} (cluster/cleanup-run! qtr "run-from-previous-process")))
+    (is (= ["runs" "run-from-previous-process" "cleanup"] (:path (first @(:calls qtr)))))))
+
+(deftest managed-cleanup-failure-remains-retryable
+  (let [fail? (atom true)
+        qtr (fake-api (fn [_]
+                        (when @fail? (throw (ex-info "identity conflict" {})))
+                        {:state "closed"}))
+        created (assoc (cluster/->Cluster qtr "run-123" (atom []) (atom {}) []
+                                         {} (Object.) (atom false))
+                       :managed-run? true)]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"identity conflict"
+                         (cluster/cleanup! created)))
+    (is (false? @(:closed? created)))
+    (reset! fail? false)
+    (cluster/cleanup! created)
+    (is (true? @(:closed? created)))
+    (is (= 2 (count @(:calls qtr))))))

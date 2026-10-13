@@ -7,7 +7,7 @@ REST API. It is separate from the fast, empty-disk `task e2e:libvirt` test.
 
 Run the **CI** workflow with the `cloud-vm` input enabled. The `setup-action`
 job builds the current checkout, starts it using the local setup action, then
-runs the cloud test. Ordinary push and pull-request runs do not download or
+runs the cloud test with server-managed runs enabled. Ordinary push and pull-request runs do not download or
 boot a cloud image. Harness unit tests run on every CI invocation.
 
 The test checks:
@@ -44,6 +44,12 @@ export QTR_CLOUD_SERVICE_LOG=/path/to/test/qtr.log  # optional diagnostics
 task e2e:cloud-vm
 ```
 
+Set `QTR_CLOUD_MANAGED_RUN=1` to create the clone, seed and VM through the
+[server-managed run API](managed-runs.md). Cleanup then uses the persisted run,
+not the local resource list; the separately imported base is verified and deleted
+only after run cleanup succeeds. Without this option, the legacy direct API path
+remains available.
+
 Resource IDs contain a random per-run suffix. The test never searches or deletes
 by prefix. Cleanup records creation intent before requests, so a lost response
 still leads to a cleanup attempt; a rejected creation does not claim an existing
@@ -51,7 +57,9 @@ resource. Failed deletions remain tracked and make the test fail.
 
 `TERM` and ordinary errors attempt cleanup. An uncatchable kill or unavailable
 server can still leave resources; use the exact IDs in `resources.json` for
-manual recovery. This is not a persistent lease or a resource ownership API.
+manual recovery. Managed mode can recover with `POST /api/v1/runs/{vm}/cleanup`
+using the `vm` ID from that file. The separately imported base is not run-owned;
+verify and remove it separately. Neither mode provides automatic expiry.
 
 ## Image and diagnostics
 

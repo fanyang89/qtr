@@ -52,7 +52,10 @@
   (->> [token
         (when (map? body) (:userData body))
         (when (map? body) (:vendorData body))
-        (when (map? body) (:networkConfig body))]
+        (when (map? body) (:networkConfig body))
+        (get-in body [:request :userData])
+        (get-in body [:request :vendorData])
+        (get-in body [:request :networkConfig])]
        (filter string?)
        (remove str/blank?)
        distinct))

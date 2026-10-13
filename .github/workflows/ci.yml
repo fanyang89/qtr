@@ -132,6 +132,7 @@ jobs:
         env:
           QTR_E2E_ARTIFACT_DIR: ${{ runner.temp }}/qtr-cloud-e2e
           QTR_CLOUD_SERVICE_LOG: ${{ steps.qtr.outputs.service-log }}
+          QTR_CLOUD_MANAGED_RUN: "1"
         run: timeout --signal=TERM --kill-after=90s 20m python3 e2e/cloud-vm/run.py
       - name: Upload cloud guest diagnostics
         if: always() && github.event_name == 'workflow_dispatch' && inputs.cloud-vm
