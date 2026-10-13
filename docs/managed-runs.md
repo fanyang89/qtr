@@ -115,6 +115,7 @@ protect backups accordingly. API responses omit those requests and internal
 identity tokens. The server holds an exclusive state lock before startup staging
 cleanup; a second qtr server must not share the same state directory.
 
+Host ACL setup skips `.run-pins` subtrees, preserving their server-only access.
 File identity pins live in mode-`0700` `.run-pins` directories under the image and
 media roots. Do not prune these directories or copy the journal independently of
 the resource roots. Closed journal records are retained; this first version has

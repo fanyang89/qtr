@@ -451,6 +451,10 @@ fn qemu_acl_ancestors(dirs: &[QemuAclDir]) -> BTreeSet<PathBuf> {
 }
 
 fn print_qemu_acl_tree(user: &str, access: QemuDirAccess, path: &Path) -> Result<()> {
+    // Managed-run identity pins are server-private, not QEMU resource paths.
+    if path.file_name().is_some_and(|name| name == ".run-pins") {
+        return Ok(());
+    }
     let file_type = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {}", path.display()))?
         .file_type();
@@ -473,6 +477,10 @@ fn print_qemu_acl_tree(user: &str, access: QemuDirAccess, path: &Path) -> Result
 }
 
 fn apply_qemu_acl_tree(user: &str, access: QemuDirAccess, path: &Path) -> Result<()> {
+    // Managed-run identity pins are server-private, not QEMU resource paths.
+    if path.file_name().is_some_and(|name| name == ".run-pins") {
+        return Ok(());
+    }
     let file_type = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {}", path.display()))?
         .file_type();
@@ -537,4 +545,29 @@ fn build_polkit_rule(group: &str) -> String {
         action = action,
         group = group,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn qemu_acl_setup_preserves_private_run_pins() {
+        let directory = std::env::temp_dir().join(format!("qtr-acl-{}", uuid::Uuid::new_v4()));
+        let pins = directory.join(".run-pins");
+        fs::create_dir_all(&pins).unwrap();
+        fs::set_permissions(&pins, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(pins.join("identity"), b"owned").unwrap();
+        // This would fail if the walker tried to invoke setfacl for this user.
+        apply_qemu_acl_tree("__qtr_invalid_user__", QemuDirAccess::ReadWrite, &pins).unwrap();
+        assert_eq!(
+            fs::metadata(&pins).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(fs::read(pins.join("identity")).unwrap(), b"owned");
+        fs::remove_dir_all(&directory).unwrap();
+        // Dry-run traversal must skip the reserved subtree too, without reading it.
+        print_qemu_acl_tree("__qtr_invalid_user__", QemuDirAccess::ReadOnly, &pins).unwrap();
+    }
 }
