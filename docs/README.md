@@ -14,6 +14,7 @@
 - [Deployment](deployment.md): package qtr as an RPM and deploy it with systemd or Ansible.
 - [GitHub Actions](github-actions.md): start an ephemeral qtr service on an Ubuntu CI runner.
 - [Server-managed runs](managed-runs.md): recover ephemeral resources by persistent run identity.
+- [Jepsen smoke test](jepsen-smoke.md): validate three real nodes, lifecycle faults, and rollback.
 - [Cloud guest E2E](cloud-vm-e2e.md): validate real guest readiness, reboot, and cleanup.
 - [Jepsen adapter](../integrations/jepsen/README.md): provision ephemeral nodes and inject hypervisor lifecycle faults.
 

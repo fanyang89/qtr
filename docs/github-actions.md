@@ -144,3 +144,7 @@ The repository CI workflow accepts an optional `cloud-vm` input on manual runs.
 It exercises the locally built setup action with a real cloud guest, SSH, and
 orderly reboot. See [Cloud guest E2E](cloud-vm-e2e.md) for prerequisites, the
 pinned image, diagnostics, and local execution.
+
+Enable the independent `jepsen-smoke` input for the
+[three-node Jepsen adapter smoke](jepsen-smoke.md), including explicit hypervisor
+faults and partial-provisioning rollback. Both real-guest tests remain opt-in.

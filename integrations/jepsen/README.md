@@ -184,3 +184,15 @@ task jepsen:test
 
 This uses the pinned official Clojure/Leiningen container and does not add
 Clojure or Docker to `task check`.
+
+## Real three-node smoke test
+
+From a dedicated qtr test host, `task e2e:jepsen` runs this adapter against three
+real cloud guests. It authenticates with the Jepsen SSHJ control path, checks
+all directed peer TCP/22 connections, exercises suspend/resume/reset, verifies
+boot IDs, and checks both normal managed-run cleanup and a deliberately failed
+partial provision. It is not a database workload or consistency check.
+
+The **CI** workflow exposes an opt-in `jepsen-smoke` input for manual runs. See
+[Three-node Jepsen adapter smoke](../../docs/jepsen-smoke.md) for prerequisites,
+diagnostics, timeouts, and recovery.

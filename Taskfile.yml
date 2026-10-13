@@ -17,6 +17,7 @@ tasks:
       - cargo test
       - pnpm -C web test
       - task: e2e:cloud-vm:test
+      - task: e2e:jepsen:test
 
   lint:
     desc: Run Rust and web linters
@@ -49,6 +50,16 @@ tasks:
     desc: Test the cloud guest harness without KVM or downloads
     cmds:
       - python3 -m unittest discover -s e2e/cloud-vm -p 'test_*.py'
+
+  e2e:jepsen:
+    desc: Run the real three-node Jepsen adapter smoke against a dedicated local qtr API
+    cmds:
+      - timeout --signal=TERM --kill-after=120s 30m python3 e2e/jepsen/run.py
+
+  e2e:jepsen:test:
+    desc: Test the Jepsen smoke launcher without Docker, KVM, or downloads
+    cmds:
+      - python3 -m unittest discover -s e2e/jepsen -p 'test_*.py'
 
   jepsen:test:
     desc: Run the qtr Jepsen adapter tests in the pinned Clojure container
