@@ -2581,9 +2581,10 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::libvirt::Connect;
     use axum::{body::Body, http::Request, routing::get};
     use tower::ServiceExt;
-    use virt::{connect::Connect, domain::Domain, sys};
+    use virt::{domain::Domain, sys};
 
     fn test_state() -> AppState {
         AppState {
@@ -3943,6 +3944,8 @@ mod tests {
 
     #[tokio::test]
     async fn managed_image_lifecycle_is_safe_and_complete() {
+        // The test driver forgets domains when its last connection is closed.
+        let _test_driver = Connect::open(Some("test:///default")).unwrap();
         let directory = std::env::temp_dir().join(format!("qtr-web-image-test-{}", Uuid::new_v4()));
         let jobs = JobService::start(JobRoots {
             state: directory.join("state"),
@@ -4097,6 +4100,8 @@ mod tests {
 
     #[tokio::test]
     async fn managed_cdrom_lifecycle_supports_multiple_trays() {
+        // The test driver forgets domains when its last connection is closed.
+        let _test_driver = Connect::open(Some("test:///default")).unwrap();
         let directory = std::env::temp_dir().join(format!("qtr-web-cdrom-test-{}", Uuid::new_v4()));
         let jobs = JobService::start(JobRoots {
             state: directory.join("state"),

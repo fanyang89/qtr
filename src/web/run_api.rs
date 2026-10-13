@@ -1,6 +1,7 @@
 use super::*;
+use crate::libvirt::Connect;
 use crate::runs::{self, Run, RunResource};
-use virt::{connect::Connect, domain::Domain};
+use virt::domain::Domain;
 
 #[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]

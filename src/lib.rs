@@ -7,6 +7,7 @@ pub mod guest_agent;
 pub mod host;
 pub mod installer;
 pub mod jobs;
+mod libvirt;
 pub mod network;
 pub mod runs;
 pub mod storage;

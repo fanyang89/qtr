@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
-use virt::{connect::Connect, domain::Domain, error::ErrorNumber, network::Network, sys};
+use virt::{domain::Domain, error::ErrorNumber, network::Network, sys};
 
 use crate::{
     config::{
@@ -22,6 +22,7 @@ use crate::{
         VmInstallFedoraArgs,
     },
     disk, guest_agent,
+    libvirt::Connect,
     vm::{
         self, VmCpu, VmCpuMode, VmDisk, VmDiskBus, VmDiskEntry, VmDiskIoTuneConfig, VmDiskSerial,
         VmDiskType, VmInterface, VmInterfaceEntry, VmInterfaceType, VmManifest, VmMemory,
@@ -944,6 +945,8 @@ mod tests {
 
     #[test]
     fn final_manifest_apply_preserves_domain_uuid() {
+        // The test driver forgets domains when its last connection is closed.
+        let _test_driver = Connect::open(Some("test:///default")).unwrap();
         let dir = std::env::temp_dir().join(format!("qtr-installer-test-{}", Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
         let disk = dir.join("root.qcow2");
