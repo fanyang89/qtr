@@ -7,6 +7,7 @@
 (def client api/client)
 (def provision! cluster/provision!)
 (def cleanup! cluster/cleanup!)
+(def cleanup-run! cluster/cleanup-run!)
 (def node-map cluster/node-map)
 (def test-options cluster/test-options)
 (def resource-names cluster/resource-names)

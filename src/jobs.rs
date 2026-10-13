@@ -496,6 +496,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstallJob> {
 
 #[derive(Clone)]
 pub struct JobService {
+    pub(crate) runs: crate::runs::RunStore,
     store: JobStore,
     sender: Sender<String>,
     controls: Arc<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
@@ -514,6 +515,8 @@ pub struct JobRoots {
 
 impl JobService {
     pub fn start(roots: JobRoots) -> Result<Self> {
+        std::fs::create_dir_all(&roots.state)?;
+        let runs = crate::runs::RunStore::open(&roots.state)?;
         prepare_roots(&roots)?;
         let roots = Arc::new(roots);
         let store = JobStore::open(roots.state.join("jobs.sqlite3"))?;
@@ -531,6 +534,7 @@ impl JobService {
             })
             .context("failed to start install worker")?;
         let service = Self {
+            runs,
             store,
             sender,
             controls,
@@ -731,6 +735,20 @@ impl JobService {
     where
         F: FnOnce(&Path) -> Result<Vec<String>>,
     {
+        self.clone_image_observed(source_id, destination_id, source_vm_users, |_| Ok(()))
+    }
+
+    pub(crate) fn clone_image_observed<F, O>(
+        &self,
+        source_id: &str,
+        destination_id: &str,
+        source_vm_users: F,
+        observe: O,
+    ) -> Result<ImageCloneOutcome>
+    where
+        F: FnOnce(&Path) -> Result<Vec<String>>,
+        O: FnOnce(&Path) -> Result<()>,
+    {
         let _guard = self.lock_resources()?;
         validate_existing_image_id(source_id)?;
         validate_image_id(destination_id, DiskFormat::Qcow2)?;
@@ -787,6 +805,7 @@ impl JobService {
             .join(format!("{}.partial", Uuid::new_v4()));
         let result = (|| {
             disk::create_overlay(&staging, &backing_file, source_format)?;
+            observe(&staging)?;
             match std::fs::hard_link(&staging, &destination) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -833,7 +852,21 @@ impl JobService {
     where
         F: FnOnce(&Path) -> Result<Vec<String>>,
     {
+        self.delete_image_checked(id, vm_users, || Ok(()))
+    }
+
+    pub(crate) fn delete_image_checked<F, C>(
+        &self,
+        id: &str,
+        vm_users: F,
+        check: C,
+    ) -> Result<ImageDeleteOutcome>
+    where
+        F: FnOnce(&Path) -> Result<Vec<String>>,
+        C: FnOnce() -> Result<()>,
+    {
         let _guard = self.lock_resources()?;
+        check()?;
         validate_existing_image_id(id)?;
         let path = self.roots.images.join(id);
         let metadata = match std::fs::symlink_metadata(&path) {
@@ -1038,15 +1071,19 @@ impl JobService {
         &self,
         request: &CloudInitSeedRequest,
     ) -> Result<IsoPublishOutcome> {
+        self.create_cloud_init_seed_observed(request, |_| Ok(()))
+    }
+
+    pub(crate) fn create_cloud_init_seed_observed(
+        &self,
+        request: &CloudInitSeedRequest,
+        observe: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<IsoPublishOutcome> {
         request.validate()?;
         let builder = which::which("genisoimage").context(
             "genisoimage is required to create cloud-init seed ISOs; install the genisoimage package",
         )?;
-        self.create_cloud_init_seed_with_builder_timeout(
-            request,
-            &builder,
-            CLOUD_INIT_BUILDER_TIMEOUT,
-        )
+        self.build_cloud_init_seed(request, &builder, CLOUD_INIT_BUILDER_TIMEOUT, observe)
     }
 
     #[cfg(test)]
@@ -1062,11 +1099,22 @@ impl JobService {
         )
     }
 
+    #[cfg(test)]
     fn create_cloud_init_seed_with_builder_timeout(
         &self,
         request: &CloudInitSeedRequest,
         builder: &Path,
         timeout: Duration,
+    ) -> Result<IsoPublishOutcome> {
+        self.build_cloud_init_seed(request, builder, timeout, |_| Ok(()))
+    }
+
+    fn build_cloud_init_seed(
+        &self,
+        request: &CloudInitSeedRequest,
+        builder: &Path,
+        timeout: Duration,
+        observe: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<IsoPublishOutcome> {
         request.validate()?;
         let uploads = self.roots.media.join(".uploads");
@@ -1122,7 +1170,7 @@ impl JobService {
             );
         }
 
-        self.publish_iso(&request.id, &staging)
+        self.publish_iso_observed(&request.id, &staging, observe)
     }
 
     pub fn create_iso_staging_path(&self) -> Result<PathBuf> {
@@ -1137,6 +1185,15 @@ impl JobService {
     }
 
     pub fn publish_iso(&self, id: &str, staging: &Path) -> Result<IsoPublishOutcome> {
+        self.publish_iso_observed(id, staging, |_| Ok(()))
+    }
+
+    fn publish_iso_observed(
+        &self,
+        id: &str,
+        staging: &Path,
+        observe: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<IsoPublishOutcome> {
         let _guard = self.lock_resources()?;
         validate_iso_id(id)?;
         let staged_iso = iso_from_path(id, staging)?;
@@ -1156,6 +1213,7 @@ impl JobService {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        observe(staging)?;
         match std::fs::hard_link(staging, &destination) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1190,7 +1248,21 @@ impl JobService {
     where
         F: FnOnce(&Path) -> Result<Vec<String>>,
     {
+        self.delete_iso_checked(id, vm_users, || Ok(()))
+    }
+
+    pub(crate) fn delete_iso_checked<F, C>(
+        &self,
+        id: &str,
+        vm_users: F,
+        check: C,
+    ) -> Result<IsoDeleteOutcome>
+    where
+        F: FnOnce(&Path) -> Result<Vec<String>>,
+        C: FnOnce() -> Result<()>,
+    {
         let _guard = self.lock_resources()?;
+        check()?;
         validate_iso_id(id)?;
         let path = self.roots.media.join(id);
         let metadata = match std::fs::symlink_metadata(&path) {

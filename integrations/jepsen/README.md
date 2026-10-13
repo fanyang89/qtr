@@ -54,6 +54,7 @@ as `checkouts/qtr-jepsen` in the test project's Leiningen checkout path.
 
 (def cluster-config
   {:run-id "etcd-20260603-01"
+   :managed-run? true
    :nodes ["n1" "n2" "n3" "n4" "n5"]
    :base-image-id "debian-base.qcow2"
    :network-id "default"
@@ -130,15 +131,43 @@ in memory, then deletes their seed media and linked-clone images. It never
 searches by prefix and never deletes the base image. Successful cleanup is
 idempotent; failed resources remain tracked for an explicit retry.
 
+## Server-managed runs
+
+Set `:managed-run? true` to use qtr's persistent run journal. This is opt-in for
+compatibility with older servers. VM, clone and seed creations are sent through
+`/api/v1/runs/{run-id}/resources`; the base image is never enrolled. The server
+records intent before creation and checks VM UUIDs or pinned file identity during
+recovery. A lost response no longer depends on the adapter having recorded a
+successful creation locally.
+
+Use a unique run ID per workload. Reusing an ID addresses the same run, including
+its existing resources; it is not a new ownership boundary. Once cleaning starts,
+new creation is rejected, and closed run IDs cannot be reused.
+
+After losing the control process, explicitly clean its run from a new process:
+
+```clojure
+(qtr/cleanup-run! api "etcd-20260603-01")
+```
+
+This forcibly stops owned VMs. Identity mismatches or resources used elsewhere
+block cleanup instead of deleting a replacement or unrelated image. Failed cleanup
+can be retried, including after restarting qtr with the same state and resource
+roots. There is no automatic expiry or cleanup timer. See
+[Server-managed runs](../../docs/managed-runs.md) for state storage, security,
+crash windows and recovery limits.
+
+The preceding in-memory cleanup description applies to legacy mode. In managed
+mode `with-cluster` and partial-provisioning rollback call server-side run cleanup.
+
 Current limitations:
 
 - one qtr endpoint and one libvirt hypervisor per `Cluster`;
 - sequential provisioning;
-- no persistent qtr-side run lease or ownership labels;
-- a hard kill of the Jepsen control process can bypass `finally`, and an
-  ambiguous HTTP transport failure can occur after qtr creates a resource but
-  before the adapter records success; either case can require manual cleanup of
-  the deterministic IDs;
+- no automatic run expiry or distributed lease;
+- in legacy mode (the default), a hard kill can bypass `finally`, and a lost
+  creation response can require manual cleanup; opt into managed runs for
+  persistent, identity-checked explicit recovery;
 - readiness depends on QEMU Guest Agent network data, and optionally TCP/22;
 - no automatic download or checksum verification of base images.
 
@@ -155,3 +184,15 @@ task jepsen:test
 
 This uses the pinned official Clojure/Leiningen container and does not add
 Clojure or Docker to `task check`.
+
+## Real three-node smoke test
+
+From a dedicated qtr test host, `task e2e:jepsen` runs this adapter against three
+real cloud guests. It authenticates with the Jepsen SSHJ control path, checks
+all directed peer TCP/22 connections, exercises suspend/resume/reset, verifies
+boot IDs, and checks both normal managed-run cleanup and a deliberately failed
+partial provision. It is not a database workload or consistency check.
+
+The **CI** workflow exposes an opt-in `jepsen-smoke` input for manual runs. See
+[Three-node Jepsen adapter smoke](../../docs/jepsen-smoke.md) for prerequisites,
+diagnostics, timeouts, and recovery.

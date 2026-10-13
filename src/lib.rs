@@ -7,9 +7,14 @@ pub mod guest_agent;
 pub mod host;
 pub mod installer;
 pub mod jobs;
+mod libvirt;
 pub mod network;
+pub mod runs;
 pub mod storage;
 pub mod vm;
 pub mod vm_model;
 mod vm_reconcile;
 pub mod web;
+
+#[cfg(test)]
+mod test_support;

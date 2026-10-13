@@ -4,6 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      jepsen-smoke:
+        description: Run the real three-node Jepsen adapter smoke
+        type: boolean
+        default: false
+      cloud-vm:
+        description: Run the real cloud guest E2E through the setup action
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -52,6 +62,8 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle --timeout=30
+          ls -l /dev/kvm
           test -r /dev/kvm
           test -w /dev/kvm
       - name: Run libvirt lifecycle E2E
@@ -69,7 +81,7 @@ jobs:
 
   setup-action:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -120,6 +132,44 @@ jobs:
           test "$(virsh --connect qemu:///system uri)" = "qemu:///system"
           curl --fail --silent --show-error "$API_URL/health" | jq -e '.ok == true'
           qtr vm capabilities --json | jq -e '.domainType == "kvm"'
+
+      - name: Run real cloud guest E2E
+        if: github.event_name == 'workflow_dispatch' && inputs.cloud-vm
+        env:
+          QTR_E2E_ARTIFACT_DIR: ${{ runner.temp }}/qtr-cloud-e2e
+          QTR_CLOUD_SERVICE_LOG: ${{ steps.qtr.outputs.service-log }}
+          QTR_CLOUD_MANAGED_RUN: "1"
+        run: timeout --signal=TERM --kill-after=90s 20m python3 e2e/cloud-vm/run.py
+      - name: Upload cloud guest diagnostics
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.cloud-vm
+        uses: actions/upload-artifact@v4
+        with:
+          name: qtr-cloud-e2e-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qtr-cloud-e2e
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Run three-node Jepsen adapter smoke
+        if: github.event_name == 'workflow_dispatch' && inputs.jepsen-smoke
+        env:
+          QTR_E2E_ARTIFACT_DIR: ${{ runner.temp }}/qtr-jepsen-smoke
+          QTR_CLOUD_SERVICE_LOG: ${{ steps.qtr.outputs.service-log }}
+        run: timeout --signal=TERM --kill-after=120s 30m python3 e2e/jepsen/run.py
+      - name: Upload Jepsen smoke diagnostics
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.jepsen-smoke
+        uses: actions/upload-artifact@v4
+        with:
+          name: qtr-jepsen-smoke-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qtr-jepsen-smoke
+          if-no-files-found: warn
+          retention-days: 7
+
+  cloud-harness:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s e2e/cloud-vm -p 'test_*.py'
+      - run: python3 -m unittest discover -s e2e/jepsen -p 'test_*.py'
 
   web:
     runs-on: ubuntu-latest

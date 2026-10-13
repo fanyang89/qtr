@@ -2,9 +2,12 @@ use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use virt::{connect::Connect, error::clear_error_callback, network::Network};
+use virt::{error::clear_error_callback, network::Network};
 
-use crate::config::{NetArgs, NetCommand, NetCreateArgs, NetNameArgs};
+use crate::{
+    config::{NetArgs, NetCommand, NetCreateArgs, NetNameArgs},
+    libvirt::Connect,
+};
 
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]

@@ -53,6 +53,8 @@ cargo run -- vm --help
 | [External storage](docs/external-storage.md) | Register, scan, and connect iSCSI-backed volumes |
 | [Deployment](docs/deployment.md) | Build and deploy the RPM with systemd and Ansible |
 | [GitHub Actions](docs/github-actions.md) | Start an ephemeral qtr service for VM-backed CI workloads |
+| [Jepsen smoke test](docs/jepsen-smoke.md) | Validate three real guests, hypervisor faults, and failure cleanup |
+| [Server-managed runs](docs/managed-runs.md) | Persist ephemeral resource ownership and recover cleanup after restart |
 | [Jepsen adapter](integrations/jepsen/README.md) | Provision ephemeral test nodes and inject hypervisor lifecycle faults |
 
 The frontend-specific development notes are in [`web/README.md`](web/README.md). The committed OpenAPI 3.1 document is [`openapi/qtr-v1.json`](openapi/qtr-v1.json).
@@ -85,6 +87,13 @@ Run the complete local verification suite:
 task check
 ```
 
+Rust tests run in parallel with `cargo test`. Tests that mutate libvirt's
+process-global `test:///default` driver, or depend on exact socket FD lifetimes,
+use `crate::test_support::in_subprocess()` at test entry and return when it returns
+`true`. Each child runs only that exact test; the parent verifies it actually ran
+and propagates failures. This prevents unrelated domain mutations and forked FD
+copies from interfering without serializing the full suite or adding sleeps.
+
 Run the real libvirt lifecycle test in a Fedora 44 container:
 
 ```bash
@@ -97,6 +106,10 @@ VM lifecycle operations, managed save, disk resize, managed image import and lin
 cloning, backing-image protection, and real NoCloud seed generation, then writes
 diagnostics to `.tmp/e2e/libvirt/`. It uses an empty test disk and does not download
 a guest image.
+
+For an opt-in real cloud guest test (cloud-init, SSH, and reboot), see the
+[cloud guest E2E guide](docs/cloud-vm-e2e.md). Run `task e2e:cloud-vm:test` to
+check its harness without KVM or image downloads.
 
 After changing API handlers, regenerate the OpenAPI document:
 

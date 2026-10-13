@@ -16,7 +16,6 @@ use serde::Serialize;
 use similar::TextDiff;
 use uuid::Uuid;
 use virt::{
-    connect::Connect,
     domain::{Domain, DomainInfo, MemoryStat},
     error::clear_error_callback,
     sys,
@@ -35,7 +34,9 @@ use crate::{
         VmLaunchDiskSource, VmLaunchDiskSpec, VmLaunchDomainSpec, VmLaunchInterfaceSpec,
         VmLaunchIoThreadsSpec, build_vm_launch_domain_xml, parse_boot_devices,
     },
-    guest_agent, installer, vm_reconcile,
+    guest_agent, installer,
+    libvirt::Connect,
+    vm_reconcile,
 };
 
 pub use crate::vm_model::{
@@ -8769,6 +8770,10 @@ interfaces:
 
     #[test]
     fn libvirt_test_driver_supports_managed_save_lifecycle() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         let conn = Connect::open(Some("test:///default")).expect("test driver should connect");
         let domain = Domain::lookup_by_name(&conn, "test").expect("test domain should exist");
 

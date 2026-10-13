@@ -232,6 +232,7 @@ if [[ -c /dev/kvm ]]; then
         | sudo -n tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
     sudo -n udevadm control --reload-rules
     sudo -n udevadm trigger --name-match=kvm
+    sudo -n udevadm settle --timeout=30
     if [[ -r /dev/kvm && -w /dev/kvm ]]; then
         kvm_available=true
     fi

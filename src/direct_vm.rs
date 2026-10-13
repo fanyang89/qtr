@@ -206,7 +206,14 @@ impl DirectVmPaths {
 }
 
 struct OperationLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for OperationLock {
+    fn drop(&mut self) {
+        // Closing our FD alone leaves the flock held by fork-inherited copies.
+        let _ = self.file.unlock();
+    }
 }
 
 pub fn run(args: DirectVmArgs) -> Result<()> {
@@ -1269,7 +1276,7 @@ fn lock(root: &Path, name: &str) -> Result<OperationLock> {
     }
     file.try_lock()
         .with_context(|| format!("another operation is active for direct VM {name}"))?;
-    Ok(OperationLock { _file: file })
+    Ok(OperationLock { file })
 }
 
 fn runtime_status(paths: &DirectVmPaths, manifest: &DirectVmManifest) -> Result<RuntimeStatus> {
@@ -2042,6 +2049,22 @@ mod tests {
     }
 
     #[test]
+    fn operation_lock_releases_even_when_a_descriptor_is_inherited() {
+        let directory = TestDirectory::new();
+        let root = state_root(&directory.0).unwrap();
+        let operation = lock(&root, "edge-worker").unwrap();
+        // dup and fork retain the same open file description and flock ownership.
+        let inherited = operation.file.try_clone().unwrap();
+        assert!(lock(&root, "edge-worker").is_err());
+        drop(operation);
+        let next_operation = lock(&root, "edge-worker").unwrap();
+        drop(inherited);
+        assert!(lock(&root, "edge-worker").is_err());
+        drop(next_operation);
+        assert!(lock(&root, "edge-worker").is_ok());
+    }
+
+    #[test]
     fn defines_and_removes_stopped_direct_vm() {
         let directory = TestDirectory::new();
         let firmware = directory.file("firmware");
@@ -2113,12 +2136,17 @@ mod tests {
 
     #[test]
     fn reports_an_unlinked_active_socket_as_untracked() {
+        // Parallel fork/exec tests can temporarily inherit even CLOEXEC sockets.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         use std::os::unix::net::UnixListener;
 
         let directory = TestDirectory::new();
         let paths = DirectVmPaths::new(&directory.0, "edge-worker").unwrap();
         fs::create_dir(&paths.directory).unwrap();
         let listener = UnixListener::bind(&paths.socket).unwrap();
+        let inherited = listener.try_clone().unwrap();
         fs::remove_file(&paths.socket).unwrap();
 
         assert_eq!(
@@ -2128,6 +2156,12 @@ mod tests {
         assert!(remove_stale_runtime(&paths).is_err());
 
         drop(listener);
+        assert_eq!(
+            runtime_status(&paths, &offline_manifest()).unwrap(),
+            RuntimeStatus::Untracked
+        );
+        assert!(remove_stale_runtime(&paths).is_err());
+        drop(inherited);
         assert_eq!(
             runtime_status(&paths, &offline_manifest()).unwrap(),
             RuntimeStatus::Stopped
@@ -2152,6 +2186,10 @@ mod tests {
 
     #[test]
     fn cleans_an_inactive_socket_file() {
+        // Parallel fork/exec tests can temporarily inherit even CLOEXEC sockets.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         use std::os::unix::net::UnixListener;
 
         let directory = TestDirectory::new();
@@ -2206,6 +2244,10 @@ mod tests {
 
     #[test]
     fn recovers_and_terminates_passt_without_a_pid_file() {
+        // Parallel fork/exec tests can temporarily inherit even CLOEXEC sockets.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         use std::os::unix::net::UnixListener;
 
         let directory = TestDirectory::new();

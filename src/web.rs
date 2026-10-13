@@ -1,3 +1,5 @@
+mod run_api;
+
 use std::{
     collections::HashMap,
     path::{Path as FsPath, PathBuf},
@@ -220,7 +222,7 @@ impl IntoResponse for AppError {
     }
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmRequest {
     name: String,
@@ -232,14 +234,14 @@ struct CreateVmRequest {
     console: CreateVmConsole,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmCdrom {
     id: String,
     media_id: Option<String>,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmResources {
     vcpus: u32,
@@ -247,7 +249,7 @@ struct CreateVmResources {
     memory_mib: u64,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmDisk {
     image_id: String,
@@ -256,7 +258,7 @@ struct CreateVmDisk {
     bus: vm::VmDiskBus,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateVmConsole {
     graphics: GraphicsMode,
@@ -272,7 +274,7 @@ struct CreateImageRequest {
     size_bytes: u64,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CloneImageRequest {
     id: String,
@@ -703,8 +705,12 @@ fn app_with_upload_limits(
 fn documented_api(state: &AppState) -> (Router<AppState>, utoipa::openapi::OpenApi) {
     let cloud_init_api = OpenApiRouter::new()
         .routes(routes!(create_cloud_init_seed))
+        .routes(routes!(run_api::create_resource))
         .layer(DefaultBodyLimit::max(MAX_CLOUD_INIT_JSON_BYTES));
     let protected_api = OpenApiRouter::new()
+        .routes(routes!(run_api::create_run, run_api::get_run))
+        .routes(routes!(run_api::list_runs))
+        .routes(routes!(run_api::cleanup_run))
         .routes(routes!(list_vms, create_vm))
         .routes(routes!(get_vm, update_vm, undefine_vm))
         .routes(routes!(get_vm_guest_status))
@@ -861,8 +867,8 @@ async fn get_vm(
     let jobs = job_service(&state)?;
     let connect_uri = state.connect_uri;
     let vm = run_libvirt(move || {
-        let summary = vm::get_summary(&connect_uri, &name).map_err(anyhow::Error::new)?;
-        managed_vm_summary(&jobs, summary)
+        let summary = vm::get_summary(&connect_uri, &name)?;
+        managed_vm_summary(&jobs, summary).map_err(vm::VmApiError::Internal)
     })
     .await?;
     Ok(Json(vm))
@@ -2575,9 +2581,10 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::libvirt::Connect;
     use axum::{body::Body, http::Request, routing::get};
     use tower::ServiceExt;
-    use virt::{connect::Connect, domain::Domain, sys};
+    use virt::{domain::Domain, sys};
 
     fn test_state() -> AppState {
         AppState {
@@ -2824,7 +2831,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vm_detail_preserves_not_found_status() {
+        let directory =
+            std::env::temp_dir().join(format!("qtr-web-detail-test-{}", Uuid::new_v4()));
+        let jobs = JobService::start(JobRoots {
+            state: directory.join("state"),
+            images: directory.join("images"),
+            media: directory.join("media"),
+            logs: directory.join("logs"),
+            connect_uri: "test:///default".to_string(),
+        })
+        .unwrap();
+        let router = app(
+            "test:///default".to_string(),
+            PathBuf::from("web/dist"),
+            "test-token".to_string(),
+            Some(jobs),
+        );
+        let name = format!("qtr-missing-{}", Uuid::new_v4());
+        let response = router
+            .oneshot(
+                Request::get(format!("/api/v1/vms/{name}"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], 404);
+        assert_eq!(body["detail"], name);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn guest_status_reports_inactive_test_driver_domain_without_agent() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         let connect_uri = "test:///default";
         let connection = Connect::open(Some(connect_uri)).unwrap();
         let template = Domain::lookup_by_name(&connection, "test").unwrap();
@@ -2876,6 +2925,10 @@ mod tests {
 
     #[tokio::test]
     async fn fault_lifecycle_endpoints_enforce_auth_and_state_semantics() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         let directory =
             std::env::temp_dir().join(format!("qtr-web-lifecycle-test-{}", Uuid::new_v4()));
         let connect_uri = "test:///default";
@@ -3049,6 +3102,10 @@ mod tests {
 
     #[tokio::test]
     async fn fault_lifecycle_endpoint_waits_for_resource_lock() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
         let directory =
             std::env::temp_dir().join(format!("qtr-web-lifecycle-lock-test-{}", Uuid::new_v4()));
         let connect_uri = "test:///default";
@@ -3899,6 +3956,12 @@ mod tests {
 
     #[tokio::test]
     async fn managed_image_lifecycle_is_safe_and_complete() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
+        // The test driver forgets domains when its last connection is closed.
+        let _test_driver = Connect::open(Some("test:///default")).unwrap();
         let directory = std::env::temp_dir().join(format!("qtr-web-image-test-{}", Uuid::new_v4()));
         let jobs = JobService::start(JobRoots {
             state: directory.join("state"),
@@ -4053,6 +4116,12 @@ mod tests {
 
     #[tokio::test]
     async fn managed_cdrom_lifecycle_supports_multiple_trays() {
+        // Isolate process-global libvirt test-driver mutations.
+        if crate::test_support::in_subprocess() {
+            return;
+        }
+        // The test driver forgets domains when its last connection is closed.
+        let _test_driver = Connect::open(Some("test:///default")).unwrap();
         let directory = std::env::temp_dir().join(format!("qtr-web-cdrom-test-{}", Uuid::new_v4()));
         let jobs = JobService::start(JobRoots {
             state: directory.join("state"),

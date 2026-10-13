@@ -22,6 +22,14 @@ Fedora installations are persistent jobs under `/api/v1/install-jobs`. Requests 
 
 SQLite uses WAL mode, queued jobs resume after restart, and jobs that were running are marked `interrupted` without deleting uncertain VM resources. Cancelling an interrupted job acknowledges it and releases its resource reservations.
 
+## Server-managed Runs
+
+`/api/v1/runs` provides opt-in persistent ownership for VM definitions, linked
+clones and cloud-init seeds. Record intent before creation, retry identical
+requests after lost responses, and explicitly recover cleanup after client or
+server restart. Cleanup verifies file identity and VM UUIDs; it forcibly stops
+owned VMs but never adopts resources by name. See [Server-managed runs](managed-runs.md).
+
 ## Guest Readiness and Addresses
 
 Authenticated automation can query `GET /api/v1/vms/{name}/guest-status` without adding Guest Agent latency to the normal VM list or detail endpoints. Each request is a one-shot observation bounded to about two seconds. Existing inactive VMs and running guests without a responsive QEMU Guest Agent still return `200`: inspect `domainState`, `guestAgentReady`, and `networkInterfacesAvailable` instead of treating HTTP success as guest readiness.
@@ -32,7 +40,7 @@ When the Guest Agent supports `guest-network-get-interfaces`, the response inclu
 
 Authenticated lifecycle operations use `POST /api/v1/vms/{name}/{action}`. In addition to `start`, `shutdown`, and `destroy`, the API exposes `reboot`, `reset`, `suspend`, and `resume`. `reboot` requests an orderly guest reboot, while `reset` immediately resets the virtual hardware and may cause data loss. Suspending an already paused VM and resuming an already running VM are successful no-ops; other invalid source states return a conflict. Lifecycle mutations are serialized with install and resource changes for the same qtr server.
 
-The REST lifecycle handlers are covered with libvirt's test driver. The current real-libvirt E2E harness exercises suspend/resume through the CLI but does not start the Web server, so reset and the HTTP lifecycle transport against real libvirt remain explicit validation gaps.
+The REST lifecycle handlers are covered with libvirt's test driver. The real-libvirt E2E harness also starts the authenticated Web server and exercises REST start, suspend, resume, and reset. It uses an empty disk; the separate [cloud guest E2E](cloud-vm-e2e.md) validates Guest Agent readiness, SSH, cloud-init completion, and orderly reboot with a real guest.
 
 ## Installation Media
 

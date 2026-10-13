@@ -96,6 +96,9 @@
   (vec nodes))
 
 (defn- validate-config! [config]
+  (when (and (contains? config :managed-run?)
+             (not (instance? Boolean (:managed-run? config))))
+    (throw (ex-info "managed-run? must be a boolean" {:type ::invalid-config})))
   (let [run-id (require-public-id! (:run-id config) "run-id" 24)
         nodes (validate-nodes! (:nodes config))
         base-image-id (require-public-id! (:base-image-id config) "base-image-id" 255)
@@ -276,6 +279,13 @@
             (*sleep!* (min (:poll-interval-ms config) after-probe-ms))
             (recur)))))))
 
+(defn- create-resource! [cluster kind path request & [source-image-id]]
+  (if (:managed-run? cluster)
+    (api/post! (:api cluster) ["runs" (:run-id cluster) "resources"]
+               (cond-> {:kind kind :request request}
+                 source-image-id (assoc :sourceImageId source-image-id)))
+    (api/post! (:api cluster) path request)))
+
 (defn- provision-node! [cluster config logical-node]
   (let [{:keys [vm-id image-id seed-id] :as names}
         (resource-names (:run-id config) logical-node)
@@ -283,10 +293,11 @@
         user-data (node-data config logical-node)
         network-config (optional-node-data config :network-config logical-node)
         vendor-data (optional-node-data config :vendor-data logical-node)]
-    (api/post! qtr-api ["images" (:base-image-id config) "clone"] {:id image-id})
+    (create-resource! cluster "imageClone" ["images" (:base-image-id config) "clone"]
+                      {:id image-id} (:base-image-id config))
     (track! cluster {:kind :image :id image-id})
 
-    (api/post! qtr-api ["media" "cloud-init"]
+    (create-resource! cluster "cloudInit" ["media" "cloud-init"]
                (cond-> {:id seed-id
                         :instanceId vm-id
                         :localHostname logical-node
@@ -295,7 +306,7 @@
                  (some? vendor-data) (assoc :vendorData vendor-data)))
     (track! cluster {:kind :seed :id seed-id})
 
-    (api/post! qtr-api ["vms"]
+    (create-resource! cluster "vm" ["vms"]
                {:name vm-id
                 :resources {:vcpus (:vcpus config)
                             :memoryMib (:memory-mib config)}
@@ -340,7 +351,7 @@
          :id (:id resource)
          :message (bounded (.getMessage throwable))}))))
 
-(defn cleanup!
+(defn- cleanup-unmanaged!
   "Deletes only the exact resources recorded by this Cluster.
 
   Successful cleanup is idempotent. Failed resources remain tracked so callers
@@ -377,13 +388,39 @@
             (reset! (:closed? cluster) true)
             cluster))))))
 
+(defn cleanup-run!
+  "Explicitly recovers and cleans one server-managed run by its exact ID.
+
+  Stops owned VMs forcibly. Identity conflicts leave the run in cleaning state
+  for inspection and retry; no prefix search or base-image deletion is used."
+  [qtr-api run-id]
+  (require-public-id! run-id "run-id" 63)
+  (api/post! qtr-api ["runs" run-id "cleanup"] nil))
+
+(defn cleanup!
+  "Cleans the server-managed run, or the legacy in-memory resource list."
+  [cluster]
+  (if-not (:managed-run? cluster)
+    (cleanup-unmanaged! cluster)
+    (locking (:cleanup-lock cluster)
+      (when-not @(:closed? cluster)
+        (cleanup-run! (:api cluster) (:run-id cluster))
+        (reset! (:resources cluster) [])
+        (reset! (:closed? cluster) true))
+      cluster)))
+
 (defn provision!
   "Creates and waits for an ephemeral qtr cluster before Jepsen run! starts."
   [qtr-api raw-config]
   (let [config (validate-config! raw-config)
-        cluster (->Cluster qtr-api (:run-id config) (atom []) (atom {})
-                           (:nodes config) (:ssh config) (Object.) (atom false))]
+        cluster (assoc (->Cluster qtr-api (:run-id config) (atom []) (atom {})
+                                  (:nodes config) (:ssh config) (Object.) (atom false))
+                       :managed-run? (true? (:managed-run? config)))]
     (try
+      (when (:managed-run? cluster)
+        (let [run (api/request! qtr-api :put ["runs" (:run-id config)] nil)]
+          (when-not (= "active" (:state run))
+            (throw (ex-info "run is not active; use a new run-id" {:type ::inactive-run})))))
       (doseq [logical-node (:nodes config)]
         (provision-node! cluster config logical-node))
       cluster
